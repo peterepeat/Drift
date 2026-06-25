@@ -29,27 +29,41 @@ function gaussian(rand) {
   return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
 }
 
-// `now` anchors each object's decay clock and creation time to the moment the
-// world is born — NOT a backdated constant, or the first 60s tick would compute
-// a huge elapsed dt and dissolve everything at once. The procedural FORM of
-// each object (id, position, seed) stays fully deterministic regardless of `now`.
+// One object record. Lifecycle fields (maturity/aged/heat/shedAccum) are STATE,
+// not visual data — the form is always re-derived from seed+maturity+aged.
+export function makeRecord(id, family, seed, x, y, now, maturity = 0, aged = 0) {
+  return {
+    id, family, x, y, seed,
+    handling: 0, maturity, aged, heat: 0, shedAccum: 0,
+    last_eval: now, created_at: now,
+    held: '', heldConn: '', held_at: 0,
+  };
+}
+export const makeSeedRecord = (id, seed, x, y, now, maturity = 0, aged = 0) =>
+  makeRecord(id, 'seed', seed, x, y, now, maturity, aged);
+
+// `now` anchors creation time to the moment the world is born. The procedural
+// FORM of each object (id, position, seed) is fully deterministic; the starting
+// lifecycle mix makes the arrival world feel already in progress.
 export function generateWorld(now = Date.now()) {
   const rand = rng(WORLD_SEED);
   const out = [];
   for (let i = 0; i < N; i++) {
-    // Fixed draw order per object so DO and script agree byte-for-byte:
-    // id (16) -> x (gauss) -> y (gauss) -> seed.
+    // Fixed draw order so DO and script agree byte-for-byte:
+    // id (16) -> x -> y -> seed -> [seed-family lifecycle].
     const family = i < N_SEED ? 'seed' : 'stone';
     const id = detUuid(rand);
     const x = +(gaussian(rand) * 400).toFixed(2);
     const y = +(gaussian(rand) * 400).toFixed(2);
     const seed = Math.floor(rand() * 4294967296) >>> 0; // 32-bit procgen seed
-    out.push({
-      id, family, x, y, seed,
-      handling: 0, decay: 0,
-      last_eval: now, created_at: now,
-      held: '', heldConn: '', held_at: 0,
-    });
+    let maturity = 0, aged = 0;
+    if (family === 'seed') {
+      const roll = rand();
+      if (roll < 0.5) maturity = rand() * 0.10;                 // dormant seeds / just stirring
+      else if (roll < 0.82) maturity = 0.20 + rand() * 0.55;    // young .. near-mature plants
+      else { maturity = 0.86 + rand() * 0.14; aged = rand() * 0.35; } // mature, a little aged
+    }
+    out.push(makeRecord(id, family, seed, x, y, now, maturity, aged));
   }
   return out;
 }

@@ -14,7 +14,8 @@ const LIFT_MS = 300, SETTLE_MS = 260;        // pickup / place timings (spec)
 const CARRY_SEND_MS = 50;                    // throttle for streaming a carried object
 const PRESENCE_SEND_MS = 500;                // presence cadence (spec)
 const P_IN = 1500, P_OUT = 2500, P_IDLE = 2000; // bloom fade-in / fade-out / idle-before-fade
-const SEASON = 'growing';                    // Phase 1: one season
+const SEASON = 'growing';                    // one season (Growing) for now
+const SPROUT_C = 0.14;                        // maturity below this renders as a seed (mirrors server)
 
 // Spec easing curves (Visual Bible §06).
 const EASE_RISE = cubicBezier(0.22, 1, 0.36, 1);     // pickup / place lift
@@ -106,16 +107,29 @@ function isLifted(id) { return id === heldId || liftValue(id) > 0.002; }
 // ---- deterministic-from-seed sizing (never stored) --------------------------
 function stoneSize(seed) { return 12 + PG.rng(seed >>> 0)() * 34; }            // pebble..rock, world units
 function seedScale(seed) { return 0.9 + PG.rng((seed ^ 0x9e3779b9) >>> 0)() * 0.9; }
-function objRadius(o) { return o.family === 'stone' ? stoneSize(o.seed) : 10 * seedScale(o.seed); }
+// Smoothly-tweened lifecycle the renderer reads (eased toward server values so
+// the 60s growth steps don't pop). Falls back to the raw value before first tween.
+function shownMat(o) { return o._matShown != null ? o._matShown : (o.maturity || 0); }
+function shownAged(o) { return o._agedShown != null ? o._agedShown : (o.aged || 0); }
+function objRadius(o) {
+  if (o.family === 'stone') return stoneSize(o.seed);
+  const mat = shownMat(o);
+  return mat < SPROUT_C ? 10 * seedScale(o.seed) : 10 + mat * 26; // plants present a larger tap target
+}
 function stoneGeom(o) {
   const er = Math.min(0.95, o.handling * 0.04); // handling erodes the stone (PRD §3.2)
   if (!o._sg || o._sgEr !== er) { o._sg = PG.makeStone(o.seed >>> 0, stoneSize(o.seed), er); o._sgEr = er; }
   return o._sg;
 }
-function drawObjectWorld(o) {
-  if (o.family === 'stone') PG.drawStone(ctx, stoneGeom(o), o.x, o.y);
-  else PG.drawSeed(ctx, o.seed >>> 0, o.x, o.y, seedScale(o.seed));
+// Draw any object (stone, seed, or plant) at (cx, cy) in the current transform.
+// FORM is always regenerated from seed (+ maturity/aged for growth) — never stored.
+function paintObject(o, cx, cy) {
+  if (o.family === 'stone') { PG.drawStone(ctx, stoneGeom(o), cx, cy); return; }
+  const mat = shownMat(o), aged = shownAged(o);
+  if (mat < SPROUT_C) PG.drawSeed(ctx, o.seed >>> 0, cx, cy, seedScale(o.seed) * (1 + mat * 1.4));
+  else PG.drawPlant(ctx, o.seed >>> 0, cx, cy, mat, aged);
 }
+function drawObjectWorld(o) { paintObject(o, o.x, o.y); }
 // Lifted object drawn in screen space so the 10px rise / shadow stay constant
 // regardless of zoom; intrinsic size still scales with zoom via camera.z.
 function drawHeldScreen(o, sx, sy, lift) {
@@ -129,9 +143,22 @@ function drawHeldScreen(o, sx, sy, lift) {
   ctx.save();
   ctx.translate(sx, sy - rise);
   ctx.scale(z * sc, z * sc);
-  if (o.family === 'stone') PG.drawStone(ctx, stoneGeom(o), 0, 0);
-  else PG.drawSeed(ctx, o.seed >>> 0, 0, 0, seedScale(o.seed));
+  paintObject(o, 0, 0);
   ctx.restore();
+}
+// Ease each object's rendered maturity/aged toward the server's value.
+let _lastGrowthFrame = 0;
+function updateGrowth(now) {
+  const dt = _lastGrowthFrame ? (now - _lastGrowthFrame) / 1000 : 0;
+  _lastGrowthFrame = now;
+  const k = dt > 0 ? 1 - Math.pow(0.0002, dt) : 0; // ~reaches target in ~1s
+  for (const o of objects.values()) {
+    if (o.family === 'stone') continue;
+    if (o._matShown == null) o._matShown = o.maturity || 0;
+    if (o._agedShown == null) o._agedShown = o.aged || 0;
+    o._matShown += ((o.maturity || 0) - o._matShown) * k;
+    o._agedShown += ((o.aged || 0) - o._agedShown) * k;
+  }
 }
 
 // ---- presence fade envelope -------------------------------------------------
@@ -292,7 +319,7 @@ function onMessage(raw) {
     case 'world_state': {
       myPid = m.pid;
       objects.clear(); lifts.clear();
-      for (const o of m.objects) objects.set(o.id, { ...o, held: !!o.held });
+      for (const o of m.objects) objects.set(o.id, { ...o, held: !!o.held, _matShown: o.maturity || 0, _agedShown: o.aged || 0 });
       if (m.cog) startArrive(m.cog.x, m.cog.y);
       break;
     }
@@ -301,10 +328,17 @@ function onMessage(raw) {
       if (!o) break; // unknown (already dissolved) — ignore
       const wasHeld = o.held;
       o.x = m.x; o.y = m.y; o.handling = m.handling; o.held = !!m.held;
+      if (m.maturity != null) o.maturity = m.maturity;
+      if (m.aged != null) o.aged = m.aged;
       if (m.id !== heldId) {
         if (o.held && !wasHeld) setLift(o.id, 1, LIFT_MS, EASE_RISE);
         else if (!o.held && wasHeld) setLift(o.id, 0, SETTLE_MS, EASE_SETTLE);
       }
+      break;
+    }
+    case 'object_new': { // a shed seed (or other runtime-spawned object)
+      const o = m.o;
+      objects.set(o.id, { ...o, held: !!o.held, _matShown: o.maturity || 0, _agedShown: o.aged || 0 });
       break;
     }
     case 'object_gone': {
@@ -349,6 +383,7 @@ setInterval(() => {
 const bgSeed = PG.seedFrom('drift-ground');
 function frame(now) {
   updateLifts(now);
+  updateGrowth(now);
   updateArrive(now);
 
   // background (screen space) — world-locked objects pan over a near-fixed
