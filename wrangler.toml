@@ -1,0 +1,24 @@
+name = "drift"
+main = "server/index.js"
+compatibility_date = "2026-06-01"
+
+# Serve the client straight from /public. Requests that match a file are served
+# as static assets; everything else (/ws, /admin/seed) falls through to the Worker.
+[assets]
+directory = "public"
+
+# The single global world.
+[[durable_objects.bindings]]
+name = "WORLD"
+class_name = "WorldRoom"
+
+# SQLite-backed Durable Object storage (durable across restarts).
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["WorldRoom"]
+
+[observability]
+enabled = true
+
+# ADMIN_KEY (for forced re-seeds) is a secret, set with:
+#   npx wrangler secret put ADMIN_KEY

@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <!-- viewport-fit=cover for the notch; do NOT rely on user-scalable=no (iOS ignores it) -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>·</title>
+  <style>
+    :root { color-scheme: dark; }
+    html, body {
+      height: 100vh; height: 100dvh;   /* dvh handles the iOS address bar */
+      margin: 0; background: #0d0b08;
+      overflow: hidden; overscroll-behavior: none;
+    }
+    /* touch-action:none blocks native scroll + pinch on the canvas (required) */
+    #c { position: fixed; inset: 0; display: block; touch-action: none; }
+
+    /* The single permitted UI chrome: a 7px connection dot, peripheral, fades after 2s. */
+    #dot {
+      position: fixed; right: 13px; bottom: 13px;
+      width: 7px; height: 7px; border-radius: 50%;
+      background: #4a4640; opacity: 0;
+      transition: opacity .6s ease, background .4s ease;
+      pointer-events: none;
+    }
+    #dot.connected   { background: #88a888; }
+    #dot.reconnecting { background: #4a4640; }
+    #dot.show { opacity: .4; }
+    /* a slightly larger invisible hover target so the tiny dot is reachable */
+    #dothit { position: fixed; right: 0; bottom: 0; width: 44px; height: 44px; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div id="dot"></div>
+  <div id="dothit"></div>
+  <script type="module" src="./client.js"></script>
+</body>
+</html>
