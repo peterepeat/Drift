@@ -8,6 +8,8 @@ A single-URL, real-time, anonymous shared world of slow objects. No accounts, no
 
 **Phase 2 — seasons:** the world cycles **Growing → Turning → Resting → Rising** on its own slow clock (~2h per season), uncorrelated to real time. The server owns the clock; the whole frame crossfades between the four committed grades (colour + saturation) and the season **modulates the lifecycle** — Growing grows fastest, Resting holds its breath (growth paused), Turning ages things quickest. There's no way to see which season it is; you feel it on arrival.
 
+**Phase 2 — anomalies:** rare, luminous, lifecycle-free forms (procgen's four `drawAnomaly` kinds — rotor, point, prism, breath) that mature plants occasionally birth, only in generative seasons, and only a few in the world at once — seeing one is luck. They quietly **accelerate growth and slow decay** nearby (without anyone being told why), and they persist until deliberately dissolved: pick one up and **hold it for 10 seconds** and it fades from your hands. Never explained.
+
 ## Architecture
 
 One **Cloudflare Durable Object** (`WorldRoom`) is the entire world:
@@ -73,4 +75,4 @@ That single deploy serves both the client and the WebSocket world at one global 
 
 ## What this is not (yet)
 
-Still to come: water traces & crystals, anomalies, stone stacking & erosion-to-grit, sound — those are the remaining Phase 2/3 threads. And by design, forever: no accounts, no chat, no notifications, no sharing, no scores, no onboarding, no words in the world.
+Still to come: water traces & crystals, stone stacking & erosion-to-grit, sound — those are the remaining Phase 2/3 threads. And by design, forever: no accounts, no chat, no notifications, no sharing, no scores, no onboarding, no words in the world.

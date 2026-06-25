@@ -42,6 +42,14 @@ export function makeRecord(id, family, seed, x, y, now, maturity = 0, aged = 0) 
 export const makeSeedRecord = (id, seed, x, y, now, maturity = 0, aged = 0) =>
   makeRecord(id, 'seed', seed, x, y, now, maturity, aged);
 
+// Anomalies (Family 4): rare, luminous, NO lifecycle. `kind` selects the form.
+export const ANOMALY_KINDS = ['rotor', 'point', 'prism', 'breath'];
+export function makeAnomalyRecord(id, seed, kind, x, y, now) {
+  const r = makeRecord(id, 'anomaly', seed, x, y, now);
+  r.kind = kind;
+  return r;
+}
+
 // `now` anchors creation time to the moment the world is born. The procedural
 // FORM of each object (id, position, seed) is fully deterministic; the starting
 // lifecycle mix makes the arrival world feel already in progress.

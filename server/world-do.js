@@ -18,7 +18,7 @@
 // for hold ownership; broadcasts carry an ephemeral per-connection `pid` and a
 // boolean `held` — never the token.
 // =============================================================================
-import { generateWorld, makeSeedRecord } from './seed.js';
+import { generateWorld, makeSeedRecord, makeAnomalyRecord, ANOMALY_KINDS } from './seed.js';
 
 const TICK_MS = 60000;
 const HOLD_TIMEOUT_MS = 45000;            // reclaim a hold if its connection vanished
@@ -49,6 +49,15 @@ const SEASON_PER_TICK = 4 / 480;          // full 4-season cycle ~8h of ticks (~
 const GROWTH_MULT = { growing: 1.0, turning: 0.25, resting: 0.0, rising: 0.6 };
 const AGE_MULT = { growing: 0.7, turning: 1.4, resting: 0.3, rising: 0.8 };
 const lerp = (a, b, t) => a + (b - a) * t;
+
+// ---- anomalies (Family 4): rare, luminous, no lifecycle ---------------------
+const MAX_ANOMALIES = 4;                  // the world holds at most a few — seeing one is luck
+const ANOMALY_SPAWN_CHANCE = 0.03;        // per tick, when conditions allow
+const ANOMALY_SEASONS = { growing: true, rising: true }; // "new creation possible"
+const ANOMALY_RADIUS = 200;               // world units an anomaly influences
+const ANOMALY_GROW_BOOST = 0.02;          // extra maturity/tick for seeds near an anomaly
+const ANOMALY_AGE_SLOW = 0.4;             // aging multiplier near an anomaly (slows decay)
+
 function seasonBlend(phase) {
   const i = Math.floor(phase) % 4, frac = phase - Math.floor(phase);
   let f = frac < 0.7 ? 0 : (frac - 0.7) / 0.3;
@@ -152,6 +161,19 @@ export class WorldRoom {
       return Response.json({ ok: true, ticks: n, before, after: this.objects.size, spawned, gone, season: this.season });
     }
 
+    // Ops/testing only: spawn one anomaly (optionally at ?x=&y=). Gated.
+    if (url.pathname === '/admin/anomaly') {
+      if (!this.#adminOk(request)) return Response.json({ ok: false, error: 'forbidden' }, { status: 403 });
+      const px = url.searchParams.get('x'), py = url.searchParams.get('y');
+      const at = (px != null && py != null) ? { x: parseFloat(px), y: parseFloat(py) } : null;
+      const matures = [...this.objects.values()].filter((o) => o.family === 'seed' && o.maturity >= 1);
+      const parent = matures.length ? matures[Math.floor(Math.random() * matures.length)] : { x: 0, y: 0 };
+      const an = this.#spawnAnomaly(parent, Date.now(), at, url.searchParams.get('kind'));
+      this.objects.set(an.id, an); await this.#persist(an);
+      this.#bcast({ t: 'object_new', o: this.#pub(an) }, null);
+      return Response.json({ ok: true, anomaly: { id: an.id, kind: an.kind, x: an.x, y: an.y } });
+    }
+
     return new Response('not found', { status: 404 });
   }
 
@@ -161,11 +183,13 @@ export class WorldRoom {
 
   // Public projection of an object (FORM derived from seed; no visual data).
   #pub(o) {
-    return {
+    const p = {
       id: o.id, family: o.family, x: o.x, y: o.y, seed: o.seed,
       handling: o.handling, held: o.held !== '',
       maturity: o.maturity, aged: o.aged, created_at: o.created_at,
     };
+    if (o.kind) p.kind = o.kind; // anomalies carry their form
+    return p;
   }
   #stateMsg(o, now) {
     return {
@@ -228,6 +252,14 @@ export class WorldRoom {
       this.#bcast(this.#stateMsg(o, now), null);
       this.#updateCog(o.x, o.y);
 
+    } else if (m.t === 'dissolve') {
+      // Only the current holder can dissolve an anomaly (the deliberate 10s hold).
+      const o = this.objects.get(m.id);
+      if (!o || o.family !== 'anomaly' || o.held !== m.token) return;
+      this.objects.delete(o.id); this.bcastMark.delete(o.id);
+      await this.state.storage.delete('obj:' + o.id);
+      this.#bcast({ t: 'object_gone', id: o.id }, null);
+
     } else if (m.t === 'presence_move') {
       this.lastSeen.set(pid, now);
       this.presencePos.set(pid, { x: m.x, y: m.y, ts: now });
@@ -278,6 +310,8 @@ export class WorldRoom {
     const sb = seasonBlend(this.season);
     const gMult = lerp(GROWTH_MULT[sb.cur], GROWTH_MULT[sb.next], sb.fade);
     const aMult = lerp(AGE_MULT[sb.cur], AGE_MULT[sb.next], sb.fade);
+    const anomalies = [];
+    for (const o of this.objects.values()) if (o.family === 'anomaly') anomalies.push(o);
     for (const o of this.objects.values()) {
       if (o.held !== '' && now - o.held_at > HOLD_TIMEOUT_MS) { // missed-close safety net
         o.held = ''; o.heldConn = ''; o.held_at = 0; changed.push(o);
@@ -287,11 +321,14 @@ export class WorldRoom {
 
       o.heat = Math.min(1, o.heat * HEAT_DECAY + this.#warmth(o, now));
       const beforeMat = o.maturity, beforeAged = o.aged;
+      // An anomaly nearby quietly accelerates growth and slows aging.
+      let nearAnomaly = false;
+      for (const an of anomalies) { if (Math.hypot(o.x - an.x, o.y - an.y) < ANOMALY_RADIUS) { nearAnomaly = true; break; } }
 
       if (o.maturity < 1) {
-        o.maturity = Math.min(1, o.maturity + (GROW_BASE + GROW_WARM * o.heat) * gMult);
+        o.maturity = Math.min(1, o.maturity + (GROW_BASE + GROW_WARM * o.heat + (nearAnomaly ? ANOMALY_GROW_BOOST : 0)) * gMult);
       } else {
-        o.aged = Math.min(1, o.aged + AGE_RATE * aMult);
+        o.aged = Math.min(1, o.aged + AGE_RATE * aMult * (nearAnomaly ? ANOMALY_AGE_SLOW : 1));
         if (o.aged < SHED_MAX_AGED) {
           o.shedAccum += 1;
           if (o.shedAccum >= SHED_TICKS && this.objects.size + spawned.length < MAX_OBJECTS) {
@@ -325,6 +362,15 @@ export class WorldRoom {
       if (now - p.ts > PRESENCE_STALE_MS + 5000) this.presencePos.delete(pid);
     }
 
+    // Rarely, a mature plant births an anomaly — only in generative seasons,
+    // and only while the world holds fewer than a few. Seeing one is luck.
+    if (anomalies.length < MAX_ANOMALIES && ANOMALY_SEASONS[sb.cur] &&
+        this.objects.size + spawned.length < MAX_OBJECTS && Math.random() < ANOMALY_SPAWN_CHANCE) {
+      const matures = [];
+      for (const o of this.objects.values()) if (o.family === 'seed' && o.maturity >= 1 && o.aged < 0.5) matures.push(o);
+      if (matures.length) spawned.push(this.#spawnAnomaly(matures[Math.floor(Math.random() * matures.length)], now));
+    }
+
     for (const o of changed) { await this.#persist(o); this.#bcast(this.#stateMsg(o, now), null); }
     for (const o of spawned) { this.objects.set(o.id, o); await this.#persist(o); this.#bcast({ t: 'object_new', o: this.#pub(o) }, null); }
     for (const o of gone) {
@@ -352,6 +398,15 @@ export class WorldRoom {
     const y = parent.y + Math.sin(ang) * dist;
     const seed = (Math.random() * 4294967296) >>> 0;
     return makeSeedRecord(crypto.randomUUID(), seed, x, y, now);
+  }
+
+  #spawnAnomaly(parent, now, at, kind) {
+    const ang = Math.random() * Math.PI * 2, dist = 30 + Math.random() * 60;
+    const x = at ? at.x : parent.x + Math.cos(ang) * dist;
+    const y = at ? at.y : parent.y + Math.sin(ang) * dist;
+    const seed = (Math.random() * 4294967296) >>> 0;
+    const k = (kind && ANOMALY_KINDS.includes(kind)) ? kind : ANOMALY_KINDS[Math.floor(Math.random() * ANOMALY_KINDS.length)];
+    return makeAnomalyRecord(crypto.randomUUID(), seed, k, x, y, now);
   }
 
   async alarm() {

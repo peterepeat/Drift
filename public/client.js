@@ -15,6 +15,7 @@ const CARRY_SEND_MS = 50;                    // throttle for streaming a carried
 const PRESENCE_SEND_MS = 500;                // presence cadence (spec)
 const P_IN = 1500, P_OUT = 2500, P_IDLE = 2000; // bloom fade-in / fade-out / idle-before-fade
 const SPROUT_C = 0.14;                        // maturity below this renders as a seed (mirrors server)
+const ANOM_DISSOLVE_MS = 10000, ANOM_FADE_MS = 3000; // hold an anomaly 10s and it fades from your hands
 
 // Spec easing curves (Visual Bible §06).
 const EASE_RISE = cubicBezier(0.22, 1, 0.36, 1);     // pickup / place lift
@@ -84,9 +85,11 @@ const lifts = new Map();       // id -> lift animation state
 let myPid = null;
 let seasonPhase = 0;           // monotonic season clock from the server (feels, never labelled)
 let lastSat = -1;              // last-applied canvas saturation (avoids per-frame style writes)
+let animT = 0;                 // seconds, drives the only animated objects (anomalies)
 
 // local hold
 let heldId = null, carry = null, preGrab = null;
+let heldSince = 0;             // when the local hold began (drives anomaly dissolution)
 
 // ---- lift animation ---------------------------------------------------------
 function setLift(id, target, dur, ease) {
@@ -108,12 +111,14 @@ function isLifted(id) { return id === heldId || liftValue(id) > 0.002; }
 // ---- deterministic-from-seed sizing (never stored) --------------------------
 function stoneSize(seed) { return 12 + PG.rng(seed >>> 0)() * 34; }            // pebble..rock, world units
 function seedScale(seed) { return 0.9 + PG.rng((seed ^ 0x9e3779b9) >>> 0)() * 0.9; }
+function anomalyR(o) { return 18 + PG.rng(o.seed >>> 0)() * 14; } // luminous, ~18-32 wu
 // Smoothly-tweened lifecycle the renderer reads (eased toward server values so
 // the 60s growth steps don't pop). Falls back to the raw value before first tween.
 function shownMat(o) { return o._matShown != null ? o._matShown : (o.maturity || 0); }
 function shownAged(o) { return o._agedShown != null ? o._agedShown : (o.aged || 0); }
 function objRadius(o) {
   if (o.family === 'stone') return stoneSize(o.seed);
+  if (o.family === 'anomaly') return anomalyR(o);
   const mat = shownMat(o);
   return mat < SPROUT_C ? 10 * seedScale(o.seed) : 10 + mat * 26; // plants present a larger tap target
 }
@@ -126,6 +131,7 @@ function stoneGeom(o) {
 // FORM is always regenerated from seed (+ maturity/aged for growth) — never stored.
 function paintObject(o, cx, cy) {
   if (o.family === 'stone') { PG.drawStone(ctx, stoneGeom(o), cx, cy); return; }
+  if (o.family === 'anomaly') { PG.drawAnomaly(ctx, o.kind || 'breath', animT, cx, cy, anomalyR(o)); return; }
   const mat = shownMat(o), aged = shownAged(o);
   if (mat < SPROUT_C) PG.drawSeed(ctx, o.seed >>> 0, cx, cy, seedScale(o.seed) * (1 + mat * 1.4));
   else PG.drawPlant(ctx, o.seed >>> 0, cx, cy, mat, aged);
@@ -159,6 +165,16 @@ function updateGrowth(now) {
     if (o._agedShown == null) o._agedShown = o.aged || 0;
     o._matShown += ((o.maturity || 0) - o._matShown) * k;
     o._agedShown += ((o.aged || 0) - o._agedShown) * k;
+  }
+}
+// Holding an anomaly for 10s dissolves it (it fades from your hands — never explained).
+function updateDissolve(now) {
+  if (!heldId) return;
+  const ho = objects.get(heldId);
+  if (ho && ho.family === 'anomaly' && (now - heldSince) >= ANOM_DISSOLVE_MS) {
+    send({ t: 'dissolve', id: heldId, token, ts: Date.now() });
+    objects.delete(heldId); lifts.delete(heldId);
+    heldId = null; carry = null; preGrab = null;
   }
 }
 
@@ -262,7 +278,7 @@ function handleTap(cx, cy) {
   }
   if (pick) {
     preGrab = { x: pick.x, y: pick.y };
-    heldId = pick.id; carry = { x: pick.x, y: pick.y };
+    heldId = pick.id; carry = { x: pick.x, y: pick.y }; heldSince = performance.now();
     pick.held = true;                       // optimistic
     setLift(pick.id, 1, LIFT_MS, EASE_RISE);
     send({ t: 'pickup', id: pick.id, token, ts: Date.now() });
@@ -388,8 +404,10 @@ setInterval(() => {
 // ---- render loop ------------------------------------------------------------
 const bgSeed = PG.seedFrom('drift-ground');
 function frame(now) {
+  animT = now / 1000;
   updateLifts(now);
   updateGrowth(now);
+  updateDissolve(now);
   updateArrive(now);
 
   // background (screen space) — world-locked objects pan over a near-fixed
@@ -422,7 +440,13 @@ function frame(now) {
   for (const o of objects.values()) {
     if (!isLifted(o.id)) continue;
     const s = (o.id === heldId && carry) ? worldToScreen(carry.x, carry.y) : worldToScreen(o.x, o.y);
+    let alpha = 1;
+    if (o.id === heldId && o.family === 'anomaly') { // fade out over the last seconds of the 10s hold
+      alpha = 1 - clamp((now - heldSince - (ANOM_DISSOLVE_MS - ANOM_FADE_MS)) / ANOM_FADE_MS, 0, 1);
+    }
+    ctx.globalAlpha = alpha;
     drawHeldScreen(o, s.x, s.y, liftValue(o.id));
+    ctx.globalAlpha = 1;
   }
 
   paintSeasonGrade(ctx, vw, vh, seasonPhase); // season composite (crossfaded), last
