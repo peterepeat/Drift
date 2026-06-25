@@ -18,7 +18,7 @@
 // for hold ownership; broadcasts carry an ephemeral per-connection `pid` and a
 // boolean `held` — never the token.
 // =============================================================================
-import { generateWorld, makeSeedRecord, makeAnomalyRecord, ANOMALY_KINDS } from './seed.js';
+import { generateWorld, makeSeedRecord, makeAnomalyRecord, ANOMALY_KINDS, makeCrystalRecord } from './seed.js';
 
 const TICK_MS = 60000;
 const HOLD_TIMEOUT_MS = 45000;            // reclaim a hold if its connection vanished
@@ -58,6 +58,14 @@ const ANOMALY_RADIUS = 200;               // world units an anomaly influences
 const ANOMALY_GROW_BOOST = 0.02;          // extra maturity/tick for seeds near an anomaly
 const ANOMALY_AGE_SLOW = 0.4;             // aging multiplier near an anomaly (slows decay)
 
+// ---- water & crystals (Family 3) -------------------------------------------
+// Water pools in the world's low centre (where objects accumulate). Crystalline
+// formations grow at the pool's edge and slowly dissolve in a brief flash.
+const POOL = { x: 0, y: 0, r: 350 };      // the world's water pool (world units)
+const CRYSTAL_CAP = 10;                    // at most this many crystals at once
+const CRYSTAL_SPAWN_CHANCE = 0.05;        // per tick, while under the cap
+const CRYSTAL_DECAY = 1 / 300;            // decay/tick (~5h to dissolve) — slow, impermanent
+
 function seasonBlend(phase) {
   const i = Math.floor(phase) % 4, frac = phase - Math.floor(phase);
   let f = frac < 0.7 ? 0 : (frac - 0.7) / 0.3;
@@ -95,6 +103,7 @@ export class WorldRoom {
     if (typeof o.aged !== 'number') o.aged = 0;
     if (typeof o.heat !== 'number') o.heat = 0;
     if (typeof o.shedAccum !== 'number') o.shedAccum = 0;
+    if (typeof o.decay !== 'number') o.decay = 0;
   }
 
   async #seed(force) {
@@ -174,6 +183,17 @@ export class WorldRoom {
       return Response.json({ ok: true, anomaly: { id: an.id, kind: an.kind, x: an.x, y: an.y } });
     }
 
+    // Ops/testing only: spawn one crystal (optionally at ?x=&y=). Gated.
+    if (url.pathname === '/admin/crystal') {
+      if (!this.#adminOk(request)) return Response.json({ ok: false, error: 'forbidden' }, { status: 403 });
+      const px = url.searchParams.get('x'), py = url.searchParams.get('y');
+      const at = (px != null && py != null) ? { x: parseFloat(px), y: parseFloat(py) } : null;
+      const cr = this.#spawnCrystal(Date.now(), at);
+      this.objects.set(cr.id, cr); await this.#persist(cr);
+      this.#bcast({ t: 'object_new', o: this.#pub(cr) }, null);
+      return Response.json({ ok: true, crystal: { id: cr.id, x: cr.x, y: cr.y } });
+    }
+
     return new Response('not found', { status: 404 });
   }
 
@@ -200,7 +220,7 @@ export class WorldRoom {
   #worldState(pid) {
     const objects = [];
     for (const o of this.objects.values()) objects.push(this.#pub(o));
-    return { t: 'world_state', now: Date.now(), pid, season: this.season, cog: { x: this.cog.x, y: this.cog.y }, objects };
+    return { t: 'world_state', now: Date.now(), pid, season: this.season, pool: POOL, cog: { x: this.cog.x, y: this.cog.y }, objects };
   }
 
   #send(ws, obj) { try { ws.send(JSON.stringify(obj)); } catch {} }
@@ -317,7 +337,12 @@ export class WorldRoom {
         o.held = ''; o.heldConn = ''; o.held_at = 0; changed.push(o);
       }
       if (o.held !== '') continue;          // growth paused while held
-      if (o.family !== 'seed') continue;    // stones don't grow (they erode by handling)
+      if (o.family === 'crystal') {         // crystals slowly dissolve (a brief flash, then gone)
+        o.decay = Math.min(1, (o.decay || 0) + CRYSTAL_DECAY);
+        if (o.decay >= 1) gone.push(o);
+        continue;
+      }
+      if (o.family !== 'seed') continue;    // stones / anomalies have no time-based change here
 
       o.heat = Math.min(1, o.heat * HEAT_DECAY + this.#warmth(o, now));
       const beforeMat = o.maturity, beforeAged = o.aged;
@@ -371,6 +396,13 @@ export class WorldRoom {
       if (matures.length) spawned.push(this.#spawnAnomaly(matures[Math.floor(Math.random() * matures.length)], now));
     }
 
+    // Crystalline formations grow at the pool's edge, up to a few.
+    let crystalCount = 0;
+    for (const o of this.objects.values()) if (o.family === 'crystal') crystalCount++;
+    if (crystalCount < CRYSTAL_CAP && this.objects.size + spawned.length < MAX_OBJECTS && Math.random() < CRYSTAL_SPAWN_CHANCE) {
+      spawned.push(this.#spawnCrystal(now));
+    }
+
     for (const o of changed) { await this.#persist(o); this.#bcast(this.#stateMsg(o, now), null); }
     for (const o of spawned) { this.objects.set(o.id, o); await this.#persist(o); this.#bcast({ t: 'object_new', o: this.#pub(o) }, null); }
     for (const o of gone) {
@@ -407,6 +439,15 @@ export class WorldRoom {
     const seed = (Math.random() * 4294967296) >>> 0;
     const k = (kind && ANOMALY_KINDS.includes(kind)) ? kind : ANOMALY_KINDS[Math.floor(Math.random() * ANOMALY_KINDS.length)];
     return makeAnomalyRecord(crypto.randomUUID(), seed, k, x, y, now);
+  }
+
+  #spawnCrystal(now, at) {
+    const ang = Math.random() * Math.PI * 2;
+    const rr = POOL.r * (0.82 + Math.random() * 0.3); // at / just past the pool edge
+    const x = at ? at.x : POOL.x + Math.cos(ang) * rr;
+    const y = at ? at.y : POOL.y + Math.sin(ang) * rr;
+    const seed = (Math.random() * 4294967296) >>> 0;
+    return makeCrystalRecord(crypto.randomUUID(), seed, x, y, now);
   }
 
   async alarm() {

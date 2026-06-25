@@ -4,7 +4,7 @@
 // no visual data is ever stored or transmitted.
 // =============================================================================
 import * as PG from './drift-procgen.js';
-import { paintGround, paintGlows, paintNoise, paintPresence, paintSeasonGrade, seasonGround, seasonSat } from './render.js';
+import { paintGround, paintGlows, paintNoise, paintPresence, paintSeasonGrade, seasonGround, seasonSat, paintWaterWorld } from './render.js';
 
 // ---- tuning constants -------------------------------------------------------
 const Z0 = 1.0, ZMIN = 0.2, ZMAX = 4.0;     // zoom = CSS px per world unit
@@ -82,6 +82,8 @@ function updateArrive(now) {
 const objects = new Map();     // id -> { id, family, x, y, seed, handling, held(bool), _sg, _sgEr }
 const presences = new Map();   // pid -> { x, y, born, last, gone }
 const lifts = new Map();       // id -> lift animation state
+const flashes = [];            // brief crystal-dissolution flashes { x, y, start }
+let pool = null;               // the world water pool { x, y, r }
 let myPid = null;
 let seasonPhase = 0;           // monotonic season clock from the server (feels, never labelled)
 let lastSat = -1;              // last-applied canvas saturation (avoids per-frame style writes)
@@ -112,6 +114,7 @@ function isLifted(id) { return id === heldId || liftValue(id) > 0.002; }
 function stoneSize(seed) { return 12 + PG.rng(seed >>> 0)() * 34; }            // pebble..rock, world units
 function seedScale(seed) { return 0.9 + PG.rng((seed ^ 0x9e3779b9) >>> 0)() * 0.9; }
 function anomalyR(o) { return 18 + PG.rng(o.seed >>> 0)() * 14; } // luminous, ~18-32 wu
+function crystalR(o) { return 6 + PG.rng(o.seed >>> 0)() * 7; }   // small, ~6-13 wu
 // Smoothly-tweened lifecycle the renderer reads (eased toward server values so
 // the 60s growth steps don't pop). Falls back to the raw value before first tween.
 function shownMat(o) { return o._matShown != null ? o._matShown : (o.maturity || 0); }
@@ -119,6 +122,7 @@ function shownAged(o) { return o._agedShown != null ? o._agedShown : (o.aged || 
 function objRadius(o) {
   if (o.family === 'stone') return stoneSize(o.seed);
   if (o.family === 'anomaly') return anomalyR(o);
+  if (o.family === 'crystal') return crystalR(o);
   const mat = shownMat(o);
   return mat < SPROUT_C ? 10 * seedScale(o.seed) : 10 + mat * 26; // plants present a larger tap target
 }
@@ -132,6 +136,7 @@ function stoneGeom(o) {
 function paintObject(o, cx, cy) {
   if (o.family === 'stone') { PG.drawStone(ctx, stoneGeom(o), cx, cy); return; }
   if (o.family === 'anomaly') { PG.drawAnomaly(ctx, o.kind || 'breath', animT, cx, cy, anomalyR(o)); return; }
+  if (o.family === 'crystal') { PG.drawCrystal(ctx, o.seed >>> 0, cx, cy, crystalR(o), animT); return; }
   const mat = shownMat(o), aged = shownAged(o);
   if (mat < SPROUT_C) PG.drawSeed(ctx, o.seed >>> 0, cx, cy, seedScale(o.seed) * (1 + mat * 1.4));
   else PG.drawPlant(ctx, o.seed >>> 0, cx, cy, mat, aged);
@@ -338,6 +343,7 @@ function onMessage(raw) {
       objects.clear(); lifts.clear();
       for (const o of m.objects) objects.set(o.id, { ...o, held: !!o.held, _matShown: o.maturity || 0, _agedShown: o.aged || 0 });
       if (m.season != null) seasonPhase = m.season;
+      if (m.pool) pool = m.pool;
       if (m.cog) startArrive(m.cog.x, m.cog.y);
       break;
     }
@@ -364,6 +370,8 @@ function onMessage(raw) {
       break;
     }
     case 'object_gone': {
+      const og = objects.get(m.id);
+      if (og && og.family === 'crystal') flashes.push({ x: og.x, y: og.y, start: performance.now() }); // brief flash
       objects.delete(m.id); lifts.delete(m.id);
       if (heldId === m.id) { heldId = null; carry = null; preGrab = null; }
       break;
@@ -421,6 +429,7 @@ function frame(now) {
   // objects (world space) — single matrix folds dpr + zoom + pan
   ctx.setTransform(dpr * camera.z, 0, 0, dpr * camera.z,
     dpr * (vw / 2 - camera.x * camera.z), dpr * (vh / 2 - camera.y * camera.z));
+  paintWaterWorld(ctx, pool, animT); // wet sheen beneath the objects
   const list = [];
   for (const o of objects.values()) if (!isLifted(o.id)) list.push(o);
   list.sort((a, b) => (a.y - b.y) || (a.id < b.id ? -1 : 1)); // painter's depth, stable
@@ -447,6 +456,16 @@ function frame(now) {
     ctx.globalAlpha = alpha;
     drawHeldScreen(o, s.x, s.y, liftValue(o.id));
     ctx.globalAlpha = 1;
+  }
+  // brief crystal-dissolution flashes (~180ms expanding ring)
+  for (let i = flashes.length - 1; i >= 0; i--) {
+    const f = flashes[i], age = now - f.start;
+    if (age > 180) { flashes.splice(i, 1); continue; }
+    const p = age / 180, s = worldToScreen(f.x, f.y);
+    ctx.save(); ctx.globalCompositeOperation = 'lighter';
+    ctx.strokeStyle = PG.rgba('#eaf4ff', 0.85 * (1 - p)); ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(s.x, s.y, 4 + p * 22, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
   }
 
   paintSeasonGrade(ctx, vw, vh, seasonPhase); // season composite (crossfaded), last

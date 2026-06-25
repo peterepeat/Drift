@@ -50,6 +50,14 @@ export function makeAnomalyRecord(id, seed, kind, x, y, now) {
   return r;
 }
 
+// Crystalline formations (Family 3): small, geometric, glinting, pickable; they
+// form at the edge of a water pool and slowly dissolve in a brief flash.
+export const makeCrystalRecord = (id, seed, x, y, now) => {
+  const r = makeRecord(id, 'crystal', seed, x, y, now);
+  r.decay = 0; // crystals carry a slow decay clock (others don't)
+  return r;
+};
+
 // `now` anchors creation time to the moment the world is born. The procedural
 // FORM of each object (id, position, seed) is fully deterministic; the starting
 // lifecycle mix makes the arrival world feel already in progress.

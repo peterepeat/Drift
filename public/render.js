@@ -72,6 +72,27 @@ export function paintPresence(ctx, w, h, x, y, rad, intensity) {
 
 export const paintGrade = PG.paintGrade;
 
+// ---- water -----------------------------------------------------------------
+// A world-anchored pool of wet sheen (drawn in the world transform, beneath
+// objects). Pale cool grey-blue (#a8b8c4), with a slow breathing shimmer.
+export function paintWaterWorld(ctx, pool, t) {
+  if (!pool) return;
+  const { x, y, r } = pool;
+  const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+  g.addColorStop(0, PG.rgba(PALETTE.waterCore, 0.16));
+  g.addColorStop(0.7, PG.rgba(PALETTE.waterCore, 0.06));
+  g.addColorStop(1, PG.rgba(PALETTE.waterCore, 0));
+  ctx.save();
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.ellipse(x, y, r, r * 0.7, 0, 0, Math.PI * 2); ctx.fill();
+  const b = 0.5 + 0.5 * Math.sin(t * 0.4); // slow shimmer
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.strokeStyle = PG.rgba('#cfe0ea', 0.04 + 0.05 * b);
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.ellipse(x, y, r * (0.5 + 0.28 * b), r * 0.7 * (0.5 + 0.28 * b), 0, 0, Math.PI * 2); ctx.stroke();
+  ctx.restore();
+}
+
 // ---- seasons ----------------------------------------------------------------
 // The whole-frame colour grade for a monotonic season phase (floor % 4 is the
 // current season; it crossfades to the next over the season's last ~30%).

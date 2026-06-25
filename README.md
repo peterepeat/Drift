@@ -10,6 +10,8 @@ A single-URL, real-time, anonymous shared world of slow objects. No accounts, no
 
 **Phase 2 — anomalies:** rare, luminous, lifecycle-free forms (procgen's four `drawAnomaly` kinds — rotor, point, prism, breath) that mature plants occasionally birth, only in generative seasons, and only a few in the world at once — seeing one is luck. They quietly **accelerate growth and slow decay** nearby (without anyone being told why), and they persist until deliberately dissolved: pick one up and **hold it for 10 seconds** and it fades from your hands. Never explained.
 
+**Phase 2 — water & crystals:** a slow **water pool** lies in the world's low centre (a wet grey-blue sheen beneath the objects), and **crystalline formations** grow at its edge — small, geometric, glinting, and pickable like anything else. They're impermanent: each slowly dissolves in a brief flash and another forms. (The full flow/drift/stone-channelling water system is Phase 3, per the PRD.)
+
 ## Architecture
 
 One **Cloudflare Durable Object** (`WorldRoom`) is the entire world:
@@ -75,4 +77,4 @@ That single deploy serves both the client and the WebSocket world at one global 
 
 ## What this is not (yet)
 
-Still to come: water traces & crystals, stone stacking & erosion-to-grit, sound — those are the remaining Phase 2/3 threads. And by design, forever: no accounts, no chat, no notifications, no sharing, no scores, no onboarding, no words in the world.
+Still to come: stone stacking & erosion-to-grit, the full water flow/drift system, sound — those are the remaining Phase 2/3 threads. And by design, forever: no accounts, no chat, no notifications, no sharing, no scores, no onboarding, no words in the world.
