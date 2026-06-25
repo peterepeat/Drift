@@ -39,6 +39,23 @@ const FINAL_SHED = 2;                     // seeds released when a plant dissolv
 const MAX_OBJECTS = 800;                  // population cap (stop shedding above it)
 const MAT_BCAST_DELTA = 0.025;            // broadcast growth when maturity moves this much
 
+// ---- seasons (the world's own slow clock; not correlated to real time) ------
+// `season` is a monotonic float; the current season is floor(season) % 4 and
+// the fractional part is progress toward the next. Each season holds, then
+// crossfades to the next over its last ~30%. Seasons modulate growth/aging
+// rates and the whole-frame colour grade — never the rules of interaction.
+const SEASON_KEYS = ['growing', 'turning', 'resting', 'rising'];
+const SEASON_PER_TICK = 4 / 480;          // full 4-season cycle ~8h of ticks (~2h/season)
+const GROWTH_MULT = { growing: 1.0, turning: 0.25, resting: 0.0, rising: 0.6 };
+const AGE_MULT = { growing: 0.7, turning: 1.4, resting: 0.3, rising: 0.8 };
+const lerp = (a, b, t) => a + (b - a) * t;
+function seasonBlend(phase) {
+  const i = Math.floor(phase) % 4, frac = phase - Math.floor(phase);
+  let f = frac < 0.7 ? 0 : (frac - 0.7) / 0.3;
+  f = f * f * (3 - 2 * f); // smoothstep
+  return { cur: SEASON_KEYS[i], next: SEASON_KEYS[(i + 1) % 4], fade: f };
+}
+
 export class WorldRoom {
   constructor(state, env) {
     this.state = state;
@@ -48,6 +65,7 @@ export class WorldRoom {
     this.lastSeen = new Map();     // pid -> ts (presence liveness)
     this.presencePos = new Map();  // pid -> { x, y, ts } (drives warmth)
     this.bcastMark = new Map();    // id -> { maturity, aged } last broadcast (chatter control)
+    this.season = 0;               // monotonic season phase (floor % 4 = current season)
     this.state.blockConcurrencyWhile(async () => { await this.#load(); });
   }
 
@@ -55,6 +73,7 @@ export class WorldRoom {
     const list = await this.state.storage.list({ prefix: 'obj:' });
     for (const [, rec] of list) { this.#migrate(rec); this.objects.set(rec.id, rec); }
     this.cog = (await this.state.storage.get('cog')) || { x: 0, y: 0, n: 0 };
+    this.season = (await this.state.storage.get('meta:season')) || 0;
     if (this.objects.size === 0) await this.#seed(false);
     if ((await this.state.storage.getAlarm()) == null) {
       await this.state.storage.setAlarm(Date.now() + TICK_MS);
@@ -125,10 +144,12 @@ export class WorldRoom {
     if (url.pathname === '/admin/tick') {
       if (!this.#adminOk(request)) return Response.json({ ok: false, error: 'forbidden' }, { status: 403 });
       const n = Math.max(1, Math.min(500, parseInt(url.searchParams.get('n') || '1', 10)));
+      const setSeason = url.searchParams.get('season');
+      if (setSeason != null) this.season = parseFloat(setSeason) || 0; // jump the season clock (testing)
       const before = this.objects.size;
       let spawned = 0, gone = 0;
       for (let i = 0; i < n; i++) { const r = await this.#tick(Date.now()); spawned += r.spawned; gone += r.gone; }
-      return Response.json({ ok: true, ticks: n, before, after: this.objects.size, spawned, gone });
+      return Response.json({ ok: true, ticks: n, before, after: this.objects.size, spawned, gone, season: this.season });
     }
 
     return new Response('not found', { status: 404 });
@@ -155,7 +176,7 @@ export class WorldRoom {
   #worldState(pid) {
     const objects = [];
     for (const o of this.objects.values()) objects.push(this.#pub(o));
-    return { t: 'world_state', now: Date.now(), pid, cog: { x: this.cog.x, y: this.cog.y }, objects };
+    return { t: 'world_state', now: Date.now(), pid, season: this.season, cog: { x: this.cog.x, y: this.cog.y }, objects };
   }
 
   #send(ws, obj) { try { ws.send(JSON.stringify(obj)); } catch {} }
@@ -253,6 +274,10 @@ export class WorldRoom {
   // ---- the breath: one growth/decay tick ------------------------------------
   async #tick(now) {
     const changed = [], spawned = [], gone = [];
+    // Season modulates how fast life grows and ages this tick.
+    const sb = seasonBlend(this.season);
+    const gMult = lerp(GROWTH_MULT[sb.cur], GROWTH_MULT[sb.next], sb.fade);
+    const aMult = lerp(AGE_MULT[sb.cur], AGE_MULT[sb.next], sb.fade);
     for (const o of this.objects.values()) {
       if (o.held !== '' && now - o.held_at > HOLD_TIMEOUT_MS) { // missed-close safety net
         o.held = ''; o.heldConn = ''; o.held_at = 0; changed.push(o);
@@ -264,9 +289,9 @@ export class WorldRoom {
       const beforeMat = o.maturity, beforeAged = o.aged;
 
       if (o.maturity < 1) {
-        o.maturity = Math.min(1, o.maturity + GROW_BASE + GROW_WARM * o.heat);
+        o.maturity = Math.min(1, o.maturity + (GROW_BASE + GROW_WARM * o.heat) * gMult);
       } else {
-        o.aged = Math.min(1, o.aged + AGE_RATE);
+        o.aged = Math.min(1, o.aged + AGE_RATE * aMult);
         if (o.aged < SHED_MAX_AGED) {
           o.shedAccum += 1;
           if (o.shedAccum >= SHED_TICKS && this.objects.size + spawned.length < MAX_OBJECTS) {
@@ -311,6 +336,11 @@ export class WorldRoom {
     const puts = {};
     for (const o of this.objects.values()) puts['obj:' + o.id] = o;
     if (Object.keys(puts).length) await this.#putAll(puts);
+
+    // Advance the world's own season clock and let everyone feel it.
+    this.season += SEASON_PER_TICK;
+    await this.state.storage.put('meta:season', this.season);
+    this.#bcast({ t: 'season', phase: this.season }, null);
 
     return { spawned: spawned.length, gone: gone.length };
   }

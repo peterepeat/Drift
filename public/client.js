@@ -4,7 +4,7 @@
 // no visual data is ever stored or transmitted.
 // =============================================================================
 import * as PG from './drift-procgen.js';
-import { paintGround, paintGlows, paintNoise, paintPresence, paintGrade } from './render.js';
+import { paintGround, paintGlows, paintNoise, paintPresence, paintSeasonGrade, seasonGround, seasonSat } from './render.js';
 
 // ---- tuning constants -------------------------------------------------------
 const Z0 = 1.0, ZMIN = 0.2, ZMAX = 4.0;     // zoom = CSS px per world unit
@@ -14,7 +14,6 @@ const LIFT_MS = 300, SETTLE_MS = 260;        // pickup / place timings (spec)
 const CARRY_SEND_MS = 50;                    // throttle for streaming a carried object
 const PRESENCE_SEND_MS = 500;                // presence cadence (spec)
 const P_IN = 1500, P_OUT = 2500, P_IDLE = 2000; // bloom fade-in / fade-out / idle-before-fade
-const SEASON = 'growing';                    // one season (Growing) for now
 const SPROUT_C = 0.14;                        // maturity below this renders as a seed (mirrors server)
 
 // Spec easing curves (Visual Bible §06).
@@ -83,6 +82,8 @@ const objects = new Map();     // id -> { id, family, x, y, seed, handling, held
 const presences = new Map();   // pid -> { x, y, born, last, gone }
 const lifts = new Map();       // id -> lift animation state
 let myPid = null;
+let seasonPhase = 0;           // monotonic season clock from the server (feels, never labelled)
+let lastSat = -1;              // last-applied canvas saturation (avoids per-frame style writes)
 
 // local hold
 let heldId = null, carry = null, preGrab = null;
@@ -320,6 +321,7 @@ function onMessage(raw) {
       myPid = m.pid;
       objects.clear(); lifts.clear();
       for (const o of m.objects) objects.set(o.id, { ...o, held: !!o.held, _matShown: o.maturity || 0, _agedShown: o.aged || 0 });
+      if (m.season != null) seasonPhase = m.season;
       if (m.cog) startArrive(m.cog.x, m.cog.y);
       break;
     }
@@ -334,6 +336,10 @@ function onMessage(raw) {
         if (o.held && !wasHeld) setLift(o.id, 1, LIFT_MS, EASE_RISE);
         else if (!o.held && wasHeld) setLift(o.id, 0, SETTLE_MS, EASE_SETTLE);
       }
+      break;
+    }
+    case 'season': { // the world's slow clock advanced
+      if (m.phase != null) seasonPhase = m.phase;
       break;
     }
     case 'object_new': { // a shed seed (or other runtime-spawned object)
@@ -390,7 +396,7 @@ function frame(now) {
   // backdrop, which reads as subtle parallax depth.
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, vw, vh);
-  paintGround(ctx, vw, vh, SEASON);
+  paintGround(ctx, vw, vh, seasonGround(seasonPhase));
   paintGlows(ctx, vw, vh, bgSeed);
   paintNoise(ctx, vw, vh, bgSeed + 1);
 
@@ -419,7 +425,11 @@ function frame(now) {
     drawHeldScreen(o, s.x, s.y, liftValue(o.id));
   }
 
-  paintGrade(ctx, vw, vh, SEASON); // season composite, last
+  paintSeasonGrade(ctx, vw, vh, seasonPhase); // season composite (crossfaded), last
+
+  // season saturation as a GPU CSS filter on the canvas (set only on change)
+  const sat = seasonSat(seasonPhase);
+  if (Math.abs(sat - lastSat) > 0.001) { canvas.style.filter = sat < 0.999 ? `saturate(${sat.toFixed(3)})` : 'none'; lastSat = sat; }
 
   requestAnimationFrame(frame);
 }

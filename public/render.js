@@ -71,3 +71,36 @@ export function paintPresence(ctx, w, h, x, y, rad, intensity) {
 }
 
 export const paintGrade = PG.paintGrade;
+
+// ---- seasons ----------------------------------------------------------------
+// The whole-frame colour grade for a monotonic season phase (floor % 4 is the
+// current season; it crossfades to the next over the season's last ~30%).
+export const SEASON_KEYS = ['growing', 'turning', 'resting', 'rising'];
+function gradeOne(ctx, w, h, key, weight) {
+  if (weight <= 0) return;
+  const s = SEASONS[key] || SEASONS.growing;
+  ctx.save();
+  ctx.globalAlpha = Math.min(1, weight);
+  ctx.globalCompositeOperation = s.blend;
+  ctx.fillStyle = s.overlay;
+  ctx.fillRect(0, 0, w, h);
+  ctx.restore();
+}
+export function paintSeasonGrade(ctx, w, h, phase) {
+  const i = Math.floor(phase) % 4, frac = phase - Math.floor(phase);
+  let f = frac < 0.7 ? 0 : (frac - 0.7) / 0.3; f = f * f * (3 - 2 * f); // smoothstep
+  gradeOne(ctx, w, h, SEASON_KEYS[i], 1 - f);
+  gradeOne(ctx, w, h, SEASON_KEYS[(i + 1) % 4], f);
+}
+// The current season's ground base colour key (differences are subtle).
+export function seasonGround(phase) { return SEASON_KEYS[Math.floor(phase) % 4]; }
+// The world-layer saturation for this season phase (applied as a CSS filter on
+// the canvas — the Visual Bible's "canvas/CSS saturation multiplier"). Resting
+// drops toward silver (0.68); Growing is full (1.0).
+export function seasonSat(phase) {
+  const i = Math.floor(phase) % 4, frac = phase - Math.floor(phase);
+  let f = frac < 0.7 ? 0 : (frac - 0.7) / 0.3; f = f * f * (3 - 2 * f);
+  const a = SEASONS[SEASON_KEYS[i]] || SEASONS.growing;
+  const b = SEASONS[SEASON_KEYS[(i + 1) % 4]] || SEASONS.growing;
+  return a.sat + (b.sat - a.sat) * f;
+}
