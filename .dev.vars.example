@@ -1,0 +1,5 @@
+# Copy to `.dev.vars` (gitignored) for local `wrangler dev`.
+# ADMIN_KEY gates the /admin/* test endpoints (force-reseed, tick, anomaly, crystal).
+# These endpoints are inert in production unless you set the secret there with:
+#   npx wrangler secret put ADMIN_KEY
+ADMIN_KEY=local-dev-key
