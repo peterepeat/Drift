@@ -246,7 +246,12 @@ export class WorldRoom {
     if (action === 'seed-fresh') await this.#seed(false);
     else if (action === 'reseed') await this.#seed(true);
     this.#gridRebuild();           // index every loaded/seeded object (in-memory; the grid is empty after a DO restart)
-    if ((await this.state.storage.getAlarm()) == null) {
+    // Self-heal the tick alarm: arm it if there's none OR if the stored alarm is
+    // already past-due. A deploy/restart can leave a past alarm that never re-fires,
+    // which silently freezes the world's clock (no growth, no creatures); re-arming
+    // a past-due alarm guarantees the world keeps breathing across deploys.
+    const alarmAt = await this.state.storage.getAlarm();
+    if (alarmAt == null || alarmAt <= Date.now()) {
       await this.state.storage.setAlarm(Date.now() + TICK_MS);
     }
   }
