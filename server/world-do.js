@@ -37,7 +37,7 @@ const PRESENCE_STALE_MS = 12000;          // presence older than this stops warm
 const SHED_TICKS = 6;                     // a mature plant sheds ~every 6 ticks
 const SHED_MAX_AGED = 0.6;                // stop shedding once this aged
 const FINAL_SHED = 2;                     // seeds released when a plant dissolves
-const MAX_OBJECTS = 10000;                // population ceiling (PRD §7.3 — raised to the 10k target; needs Workers Paid for rows_written headroom as the world fills, since the checkpoint flushes ~all active objects)
+const DEFAULT_MAX_OBJECTS = 10000;        // population ceiling (PRD §7.3 — the 10k target). Overridable per-deployment via env.MAX_OBJECTS so the cap can be ramped/rolled back with a Cloudflare var, no code change. Needs Workers Paid for rows_written headroom as the world fills (the checkpoint flushes ~all active objects).
 const MAT_BCAST_DELTA = 0.025;            // broadcast growth when maturity moves this much
 
 // ---- isolation & the ceiling (PRD §4.3 + §7.3) -----------------------------
@@ -187,6 +187,11 @@ export class WorldRoom {
   constructor(state, env) {
     this.state = state;
     this.env = env;
+    // Population ceiling: env-overridable so the cap can be ramped/rolled back via a
+    // Cloudflare var without a code change (a deliberate DO-load decision — PRD §7.3).
+    // Clamped to a sane range so a typo can't set a runaway cap.
+    const envMax = parseInt(env.MAX_OBJECTS, 10);
+    this.maxObjects = Number.isFinite(envMax) ? Math.max(200, Math.min(50000, envMax)) : DEFAULT_MAX_OBJECTS;
     this.objects = new Map();      // id -> record
     this.cog = { x: 0, y: 0, n: 0 };
     this.lastSeen = new Map();     // pid -> ts (presence liveness)
@@ -336,7 +341,7 @@ export class WorldRoom {
       for (let i = 0; i < n; i++) { const r = await this.#tick(Date.now()); spawned += r.spawned; gone += r.gone; if (r.checkpointed) { checkpoints++; checkpointWrote += r.checkpointWrote; } }
       // objWrites = discrete per-object row writes/deletes during these ticks (spawns + deaths + any
       // hold-reclaim), NOT the batched checkpoint — growth/drift broadcasts are decoupled and cost zero here.
-      return Response.json({ ok: true, ticks: n, before, after: this.objects.size, spawned, gone, objWrites: this.objWrites - writesBefore, checkpoints, checkpointWrote, season: this.season });
+      return Response.json({ ok: true, ticks: n, before, after: this.objects.size, spawned, gone, objWrites: this.objWrites - writesBefore, checkpoints, checkpointWrote, season: this.season, max: this.maxObjects });
     }
 
     // Ops/testing only: spawn one anomaly (optionally at ?x=&y=). Gated.
@@ -753,13 +758,13 @@ export class WorldRoom {
         o.aged = Math.min(1, o.aged + AGE_RATE * aMult * (nearAnomaly ? ANOMALY_AGE_SLOW : 1));
         if (o.aged < SHED_MAX_AGED) {
           o.shedAccum += 1;
-          if (o.shedAccum >= SHED_TICKS && this.objects.size + spawned.length < MAX_OBJECTS) {
+          if (o.shedAccum >= SHED_TICKS && this.objects.size + spawned.length < this.maxObjects) {
             o.shedAccum = 0;
             spawned.push(this.#shed(o, now));
           }
         }
         if (o.aged >= 1) {                  // dissolve: release final seeds, then gone
-          for (let k = 0; k < FINAL_SHED && this.objects.size + spawned.length < MAX_OBJECTS; k++) {
+          for (let k = 0; k < FINAL_SHED && this.objects.size + spawned.length < this.maxObjects; k++) {
             spawned.push(this.#shed(o, now));
           }
           gone.push(o);
@@ -824,7 +829,7 @@ export class WorldRoom {
     // last_touched) objects are trimmed back to just under the cap so a packed
     // world keeps breathing. Anomalies and held objects are spared.
     const effective = this.objects.size - gone.length;
-    if (effective >= MAX_OBJECTS) {
+    if (effective >= this.maxObjects) {
       const goneSet = new Set(gone.map((o) => o.id)); // O(1) membership at ceiling scale
       const cands = [];
       for (const o of this.objects.values()) {
@@ -832,7 +837,7 @@ export class WorldRoom {
         cands.push(o);
       }
       cands.sort((a, b) => a.last_touched - b.last_touched); // longest-untouched first
-      const trim = Math.min(cands.length, effective - (MAX_OBJECTS - CEIL_TRIM));
+      const trim = Math.min(cands.length, effective - (this.maxObjects - CEIL_TRIM));
       // A forced eviction is not a natural death — it does NOT release final seeds
       // (that would fight the very trim we're doing); the object just leaves.
       for (let k = 0; k < trim; k++) gone.push(cands[k]);
@@ -847,7 +852,7 @@ export class WorldRoom {
     // Rarely, a mature plant births an anomaly — only in generative seasons,
     // and only while the world holds fewer than a few. Seeing one is luck.
     if (anomalies.length < MAX_ANOMALIES && ANOMALY_SEASONS[sb.cur] &&
-        this.objects.size + spawned.length < MAX_OBJECTS && Math.random() < ANOMALY_SPAWN_CHANCE) {
+        this.objects.size + spawned.length < this.maxObjects && Math.random() < ANOMALY_SPAWN_CHANCE) {
       const matures = [];
       for (const o of this.objects.values()) if (o.family === 'seed' && o.maturity >= 1 && o.aged < 0.5) matures.push(o);
       if (matures.length) spawned.push(this.#spawnAnomaly(matures[Math.floor(Math.random() * matures.length)], now));
@@ -856,7 +861,7 @@ export class WorldRoom {
     // Crystalline formations grow at the pool's edge, up to a few.
     let crystalCount = 0;
     for (const o of this.objects.values()) if (o.family === 'crystal') crystalCount++;
-    if (crystalCount < CRYSTAL_CAP && this.objects.size + spawned.length < MAX_OBJECTS && Math.random() < CRYSTAL_SPAWN_CHANCE) {
+    if (crystalCount < CRYSTAL_CAP && this.objects.size + spawned.length < this.maxObjects && Math.random() < CRYSTAL_SPAWN_CHANCE) {
       spawned.push(this.#spawnCrystal(now));
     }
 
@@ -1067,7 +1072,7 @@ export class WorldRoom {
       // counter is capped at the threshold so warm-while-capped time isn't lost.
       if (h.data[i] >= STONE_HEAT && !occupied.has(i)) {
         h.form[i] = Math.min(STONE_FORM_TICKS, h.form[i] + 1);
-        if (h.form[i] >= STONE_FORM_TICKS && this.objects.size + formed.length < MAX_OBJECTS) {
+        if (h.form[i] >= STONE_FORM_TICKS && this.objects.size + formed.length < this.maxObjects) {
           h.form[i] = 0;
           formed.push(this.#formStone(i, now));
         }
