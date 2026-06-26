@@ -37,8 +37,18 @@ const PRESENCE_STALE_MS = 12000;          // presence older than this stops warm
 const SHED_TICKS = 6;                     // a mature plant sheds ~every 6 ticks
 const SHED_MAX_AGED = 0.6;                // stop shedding once this aged
 const FINAL_SHED = 2;                     // seeds released when a plant dissolves
-const MAX_OBJECTS = 800;                  // population cap (stop shedding above it)
+const MAX_OBJECTS = 2000;                 // population ceiling (PRD §7.3; staged toward 10k once at scale)
 const MAT_BCAST_DELTA = 0.025;            // broadcast growth when maturity moves this much
+
+// ---- isolation & the ceiling (PRD §4.3 + §7.3) -----------------------------
+// Everything except anomalies carries an isolation clock: ticks since it was
+// last tended (handled, held, or near warmth). Things left utterly alone fade —
+// a stone, which otherwise never decays with time, crumbles to grit. And when
+// the world is full, the most-isolated (longest-untouched) objects begin
+// accelerated decay so a packed world keeps breathing rather than freezing.
+const WARM_EPS = 0.02;                     // heat above this counts as "tended" (resets isolation)
+const STONE_FADE_TICKS = 1440;             // a stone untouched & unwarmed this long crumbles to grit (~a day)
+const CEIL_TRIM = 2;                       // how far under the ceiling to trim to (leaves room to breathe)
 
 // ---- seasons (the world's own slow clock; not correlated to real time) ------
 // `season` is a monotonic float; the current season is floor(season) % 4 and
@@ -158,6 +168,7 @@ export class WorldRoom {
     if (typeof o.decay !== 'number') o.decay = 0;
     if (typeof o.stack !== 'number') o.stack = 0;
     if (typeof o.stackBase !== 'string') o.stackBase = '';
+    if (typeof o.isolation !== 'number') o.isolation = 0;
   }
 
   async #seed(force) {
@@ -220,7 +231,9 @@ export class WorldRoom {
       if (setSeason != null) this.season = parseFloat(setSeason) || 0; // jump the season clock (testing)
       const before = this.objects.size;
       let spawned = 0, gone = 0;
-      for (let i = 0; i < n; i++) { const r = await this.#tick(Date.now()); spawned += r.spawned; gone += r.gone; }
+      // Batch the fast-forward: only the last tick writes the full snapshot (the
+      // whole loop runs atomically in this one request — no eviction mid-batch).
+      for (let i = 0; i < n; i++) { const r = await this.#tick(Date.now(), i === n - 1); spawned += r.spawned; gone += r.gone; }
       return Response.json({ ok: true, ticks: n, before, after: this.objects.size, spawned, gone, season: this.season });
     }
 
@@ -265,7 +278,7 @@ export class WorldRoom {
       if (!Number.isFinite(x) || !Number.isFinite(y)) return Response.json({ ok: false, error: 'bad coords' }, { status: 400 });
       const now = Date.now();
       if (o.family === 'stone') await this.#detachFromStack(o, now); // relocating a stacked stone leaves the stack
-      o.x = x; o.y = y; o.stack = 0; o.stackBase = '';
+      o.x = x; o.y = y; o.stack = 0; o.stackBase = ''; o.isolation = 0;
       this.driftMark.delete(o.id);
       await this.#persist(o);
       this.#bcast(this.#stateMsg(o, now), null);
@@ -284,6 +297,30 @@ export class WorldRoom {
       }
       const g = this.#heatGrad(x, y);
       return Response.json({ ok: true, x, y, heat: this.#heatAt(x, y), gx: g.gx, gy: g.gy });
+    }
+
+    // Ops/testing only: bulk-spawn N cheap dormant seeds to push toward the ceiling. Gated.
+    if (url.pathname === '/admin/fill') {
+      if (!this.#adminOk(request)) return Response.json({ ok: false, error: 'forbidden' }, { status: 403 });
+      const n = Math.max(1, Math.min(5000, parseInt(url.searchParams.get('n') || '1', 10)));
+      const now = Date.now(), puts = {};
+      for (let i = 0; i < n; i++) {
+        const r = makeSeedRecord(crypto.randomUUID(), (Math.random() * 4294967296) >>> 0,
+          (Math.random() * 2 - 1) * 1500, (Math.random() * 2 - 1) * 1500, now);
+        this.objects.set(r.id, r); puts['obj:' + r.id] = r;
+      }
+      await this.#putAll(puts);
+      return Response.json({ ok: true, added: n, total: this.objects.size });
+    }
+
+    // Ops/testing only: set an object's isolation clock (drive fade/ceiling tests). Gated.
+    if (url.pathname === '/admin/isolate') {
+      if (!this.#adminOk(request)) return Response.json({ ok: false, error: 'forbidden' }, { status: 403 });
+      const o = this.objects.get(url.searchParams.get('id') || '');
+      if (!o) return Response.json({ ok: false, error: 'no such object' }, { status: 404 });
+      o.isolation = Math.max(0, parseInt(url.searchParams.get('n') || '0', 10) || 0);
+      await this.#persist(o);
+      return Response.json({ ok: true, id: o.id, isolation: o.isolation });
     }
 
     return new Response('not found', { status: 404 });
@@ -338,7 +375,7 @@ export class WorldRoom {
       if (!o) return;
       if (o.held === '') {
         // Single-threaded DO -> this read-then-write IS the atomic compare-and-set.
-        o.held = m.token; o.heldConn = pid; o.held_at = now;
+        o.held = m.token; o.heldConn = pid; o.held_at = now; o.isolation = 0;
         // Lifting a stone out of a stack: anything resting above it loses its
         // support and scatters; the lifted stone leaves the stack.
         if (o.family === 'stone') await this.#detachFromStack(o, now);
@@ -362,7 +399,7 @@ export class WorldRoom {
       if (!o) return;
       if (o.held !== m.token) { this.#send(ws, this.#stateMsg(o, now)); return; } // not the holder
       o.x = m.x; o.y = m.y; o.held = ''; o.heldConn = ''; o.held_at = 0;
-      o.handling += 1;
+      o.handling += 1; o.isolation = 0; // a placed object has just been tended
       // Disturbing a pre-sprout seed resets its growth — it must be left be to take.
       if (o.family === 'seed' && o.maturity < SPROUT) { o.maturity = 0; o.heat = 0; }
       if (o.family === 'stone') {
@@ -437,7 +474,13 @@ export class WorldRoom {
   }
 
   // ---- the breath: one growth/decay tick ------------------------------------
-  async #tick(now) {
+  // `persist`: write the full survivor snapshot + field/season this tick. The
+  // alarm passes true (production ticks 1/min, so persisting every tick is cheap
+  // and keeps accumulators safe across the eviction that can follow any alarm).
+  // The /admin/tick fast-forward passes false for all but the last tick of its
+  // batch — that whole batch runs atomically in one request, so a single
+  // end-of-batch snapshot is sufficient and keeps the N-tick test calls fast.
+  async #tick(now, persist = true) {
     const changed = [], spawned = [], gone = [];
     // Season modulates how fast life grows and ages this tick.
     const sb = seasonBlend(this.season);
@@ -522,6 +565,38 @@ export class WorldRoom {
       }
     }
 
+    // Isolation (PRD §4.3): anything untouched AND unwarmed accrues isolation;
+    // warmth or being held keeps it tended. A forgotten stone — which otherwise
+    // never decays with time — crumbles to grit (the client shows grit by family).
+    for (const o of this.objects.values()) {
+      // Anomalies never fade; held and stacked things are tended (a cairn stone
+      // mustn't silently accrue isolation and crumble the moment it's scattered).
+      if (o.family === 'anomaly' || o.held !== '' || o.stack > 0) { o.isolation = 0; continue; }
+      if (this.#heatAt(o.x, o.y) > WARM_EPS) { o.isolation = 0; continue; }
+      o.isolation = (o.isolation || 0) + 1;
+      if (o.family === 'stone' && o.isolation >= STONE_FADE_TICKS && !gone.includes(o)) {
+        gone.push(o);
+      }
+    }
+
+    // Ceiling (PRD §7.3): when the world is full, the most-isolated (longest-
+    // untouched) objects begin accelerated decay, trimming back to just under the
+    // cap so a packed world keeps breathing. Anomalies and held objects are spared.
+    const effective = this.objects.size - gone.length;
+    if (effective >= MAX_OBJECTS) {
+      const goneSet = new Set(gone.map((o) => o.id)); // O(1) membership at ceiling scale
+      const cands = [];
+      for (const o of this.objects.values()) {
+        if (o.family === 'anomaly' || o.held !== '' || goneSet.has(o.id)) continue;
+        cands.push(o);
+      }
+      cands.sort((a, b) => (b.isolation || 0) - (a.isolation || 0) || a.created_at - b.created_at);
+      const trim = Math.min(cands.length, effective - (MAX_OBJECTS - CEIL_TRIM));
+      // A forced eviction is not a natural death — it does NOT release final seeds
+      // (that would fight the very trim we're doing); the object just leaves.
+      for (let k = 0; k < trim; k++) gone.push(cands[k]);
+    }
+
     // Prune stale presence so the warmth map can't grow unbounded from
     // connections that never closed cleanly.
     for (const [pid, p] of this.presencePos) {
@@ -568,19 +643,24 @@ export class WorldRoom {
       }
     }
 
-    // Snapshot survivors so growth survives a restart.
-    const puts = {};
-    for (const o of this.objects.values()) puts['obj:' + o.id] = o;
-    if (Object.keys(puts).length) await this.#putAll(puts);
-    // Persist the thermal field only when it's live (or just settled to zero) —
-    // an idle, all-zero world shouldn't write the field every tick forever.
-    if (this.heat && (this.heatActive || this.heatWasActive)) await this.state.storage.put('field:heat', this.heat);
+    // Snapshot survivors every tick so ALL per-tick state — including the slow
+    // accumulators (isolation, sub-threshold growth, crept drift positions) —
+    // survives a DO restart, which can happen between any two 60s alarms. At
+    // ~1 tick/minute this is cheap even near the ceiling; a coarser checkpoint
+    // would silently lose accumulator progress on the frequent evictions of a
+    // quiet, alarm-driven world (the fade clock would never reach its threshold).
+    this.season += SEASON_PER_TICK; // advance the world's own season clock (in memory every tick)
+    if (persist) {
+      const puts = {};
+      for (const o of this.objects.values()) puts['obj:' + o.id] = o;
+      if (Object.keys(puts).length) await this.#putAll(puts);
+      // Persist the thermal field only when it's live (or just settled to zero) —
+      // an idle, all-zero world shouldn't write the field every tick forever.
+      if (this.heat && (this.heatActive || this.heatWasActive)) await this.state.storage.put('field:heat', this.heat);
+      await this.state.storage.put('meta:season', this.season);
+    }
     this.heatWasActive = this.heatActive;
-
-    // Advance the world's own season clock and let everyone feel it.
-    this.season += SEASON_PER_TICK;
-    await this.state.storage.put('meta:season', this.season);
-    this.#bcast({ t: 'season', phase: this.season }, null);
+    this.#bcast({ t: 'season', phase: this.season }, null); // let everyone feel the clock turn
 
     return { spawned: spawned.length, gone: gone.length };
   }
@@ -637,7 +717,7 @@ export class WorldRoom {
     const ang = Math.random() * Math.PI * 2, dist = 18 + s.stack * 10 + Math.random() * 28;
     s.x = gx + Math.cos(ang) * dist;
     s.y = gy + Math.sin(ang) * dist;
-    s.stack = 0; s.stackBase = '';
+    s.stack = 0; s.stackBase = ''; s.isolation = 0; // a just-scattered stone is freshly disturbed
     await this.#persist(s);
     this.#bcast(this.#stateMsg(s, now), null);
   }

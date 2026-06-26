@@ -36,7 +36,7 @@ function gaussian(rand) {
 export function makeRecord(id, family, seed, x, y, now, maturity = 0, aged = 0) {
   return {
     id, family, x, y, seed,
-    handling: 0, maturity, aged, heat: 0, shedAccum: 0,
+    handling: 0, maturity, aged, heat: 0, shedAccum: 0, isolation: 0,
     stack: 0, stackBase: '', // stone stacking: level above the ground stone, and its base id
     last_eval: now, created_at: now,
     held: '', heldConn: '', held_at: 0,

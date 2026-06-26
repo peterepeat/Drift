@@ -64,7 +64,7 @@ for (let i = 0; i < 6; i++) { const r = await tick(40); totalSpawned += r.spawne
 const w2 = await snapshot();
 check(totalSpawned > 0, `mature plants shed new seeds (${totalSpawned} spawned over ~240 ticks)`);
 check(totalGone > 0, `fully-aged plants dissolved (${totalGone} gone)`);
-check(w2.objects.length <= 800, `population stays under the cap (${w2.objects.length} <= 800)`);
+check(w2.objects.length <= 2000, `population stays under the cap (${w2.objects.length} <= 2000)`);
 const grown = w2.objects.filter((o) => o.family === 'seed' && o.maturity >= 0.14).length;
 check(grown > plant0, `the world filled with plants over time (${plant0} -> ${grown})`);
 
