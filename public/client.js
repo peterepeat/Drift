@@ -18,6 +18,7 @@ const PRESENCE_SEND_MS = 500;                // presence cadence (spec)
 const P_IN = 1500, P_OUT = 2500, P_IDLE = 2000; // bloom fade-in / fade-out / idle-before-fade
 const SPROUT_C = 0.14;                        // maturity below this renders as a seed (mirrors server)
 const ANOM_DISSOLVE_MS = 10000, ANOM_FADE_MS = 3000; // hold an anomaly 10s and it fades from your hands
+const ATTEND_MS = 450;                        // long-press dwell before an object is "attended" (PRD §5.2)
 const STACK_STEP_C = 12, STACK_TALL_C = 4;   // stone-stack rise/level + tall-stack-tap-to-scatter (mirror server)
 const GRIT_MS = 500;                          // a worn-out stone's grit scatter lifetime (spec §4.3)
 const POS_EASE_MAX = 24;                       // a position change up to this (a drift hop) eases; larger snaps
@@ -178,6 +179,30 @@ function drawObjectWorld(o) {
   }
   paintObject(o, o.x, o.y);
 }
+// The "reveal of age" (PRD §5.2): how far along its life an attended object is, so
+// the attend-bloom is larger and warmer the older/more-worn the object — its history
+// made briefly legible without a single word or number.
+function ageFactor(o) {
+  if (o.family === 'stone') return Math.min(1, (o.handling || 0) / 26);   // worn smooth = old (mirror GRIT_HANDLING)
+  if (o.family === 'crystal') return Math.min(1, o.decay || 0);           // closer to its flash-dissolution
+  if (o.family === 'anomaly') return 0.5;                                 // timeless — a steady, even reveal
+  return Math.min(1, shownMat(o) * 0.55 + shownAged(o) * 0.65);           // seed → plant → aged
+}
+// A soft warm bloom that breathes around the attended object (its "response").
+function paintAttend(o, t) {
+  const age = ageFactor(o);
+  const rad = objRadius(o) * (1.7 + 1.3 * age);
+  const breath = 0.6 + 0.4 * Math.sin(animT * 1.6);     // slow pulse = the object responding
+  const a = 0.16 * t * breath * (0.55 + 0.45 * age);    // older → warmer reveal
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  const g = ctx.createRadialGradient(o.x, o.y, 0, o.x, o.y, rad);
+  g.addColorStop(0, PG.rgba('#e8c87a', a));
+  g.addColorStop(1, PG.rgba('#e8c87a', 0));
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(o.x, o.y, rad, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
 // A stack's ground line (the base sits here; each level is stored STACK_STEP up).
 function groundY(o) { return o.y + (o.stack || 0) * STACK_STEP_C; }
 // Height of the stack a stone belongs to (1 = a lone stone on the ground).
@@ -255,6 +280,30 @@ function presenceIntensity(p, now) {
   return Math.max(0, inF * outF);
 }
 
+// ---- attend (PRD §5.2): hover (desktop) / long-press (mobile) reveals an object's
+// age. Purely a visual response — no server message, no state change. `attendId` is
+// the object under attention; `attendT` eases its reveal in/out in the render loop.
+let attendId = null, attendT = 0;
+let lpTimer = null, lpFired = false;   // long-press arming (touch)
+function clearLongPress() { if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; } }
+// Topmost free object under world point w (shared by tap-to-pick and attend).
+function hitTest(w) {
+  let pick = null, best = -Infinity;
+  for (const o of objects.values()) {
+    if (o.held) continue;
+    const r = Math.max(objRadius(o), HIT_MIN / camera.z);
+    if (Math.hypot(o.x - w.x, o.y - w.y) > r) continue;
+    const score = (o.stack || 0) * 1e6 + o.y;
+    if (score > best) { best = score; pick = o; }
+  }
+  return pick;
+}
+function updateHover(cx, cy) { // desktop: attend whatever the mouse rests on
+  if (heldId) { attendId = null; return; }
+  const o = hitTest(screenToWorld(cx, cy));
+  attendId = o ? o.id : null;
+}
+
 // ---- pointer input (Pointer Events only) ------------------------------------
 const pointers = new Map(); // id -> { x, y, sx, sy, maxMove }
 let pinch = null, multiTouched = false;
@@ -262,19 +311,25 @@ let pinch = null, multiTouched = false;
 canvas.addEventListener('pointerdown', (e) => {
   canvas.setPointerCapture(e.pointerId);
   pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, maxMove: 0 });
+  attendId = null; clearLongPress(); lpFired = false;   // any press interrupts a hover/long-press
   if (pointers.size >= 2) {
     multiTouched = true;
     const [a, b] = [...pointers.values()];
     pinch = { d0: Math.hypot(a.x - b.x, a.y - b.y), z0: camera.z };
+  } else if (!heldId) {
+    // arm a long-press: dwell stationary on an object → attend it (mobile §5.2)
+    const hit = hitTest(screenToWorld(e.clientX, e.clientY));
+    if (hit) lpTimer = setTimeout(() => { attendId = hit.id; lpFired = true; lpTimer = null; }, ATTEND_MS);
   }
 });
 
 canvas.addEventListener('pointermove', (e) => {
   const p = pointers.get(e.pointerId);
-  if (!p) return;
+  if (!p) { if (e.pointerType === 'mouse') updateHover(e.clientX, e.clientY); return; }
   const dx = e.clientX - p.x, dy = e.clientY - p.y;
   p.x = e.clientX; p.y = e.clientY;
   p.maxMove = Math.max(p.maxMove, Math.hypot(e.clientX - p.sx, e.clientY - p.sy));
+  if (p.maxMove > SLOP) clearLongPress(); // moved → it's a pan/carry, not an attend
 
   if (pointers.size >= 2 && pinch) {
     const [a, b] = [...pointers.values()];
@@ -301,8 +356,11 @@ function endPointer(e) {
   pointers.delete(e.pointerId);
   try { canvas.releasePointerCapture(e.pointerId); } catch {}
   if (pointers.size < 2) pinch = null;
-  // Tap = single stationary pointer, no multi-touch this gesture, any duration.
-  const wasTap = p && p.maxMove < SLOP && pointers.size === 0 && !multiTouched;
+  clearLongPress();
+  const wasLong = lpFired; lpFired = false;
+  if (e.pointerType !== 'mouse') attendId = null; // touch attend ends on release (a mouse keeps hovering)
+  // Tap = single stationary pointer, no multi-touch, and NOT a long-press attend.
+  const wasTap = p && p.maxMove < SLOP && pointers.size === 0 && !multiTouched && !wasLong;
   if (pointers.size === 0) multiTouched = false;
   if (wasTap) handleTap(e.clientX, e.clientY);
 }
@@ -311,6 +369,7 @@ canvas.addEventListener('pointercancel', (e) => {
   pointers.delete(e.pointerId);
   if (pointers.size < 2) pinch = null;
   if (pointers.size === 0) multiTouched = false;
+  clearLongPress(); lpFired = false; attendId = null;
   try { canvas.releasePointerCapture(e.pointerId); } catch {}
 });
 
@@ -337,15 +396,7 @@ function handleTap(cx, cy) {
     return;
   }
   // pick up topmost: the top of a stack wins, else the frontmost (largest y)
-  const w = screenToWorld(cx, cy);
-  let pick = null, best = -Infinity;
-  for (const o of objects.values()) {
-    if (o.held) continue;
-    const r = Math.max(objRadius(o), HIT_MIN / camera.z);
-    if (Math.hypot(o.x - w.x, o.y - w.y) > r) continue;
-    const score = (o.stack || 0) * 1e6 + o.y;
-    if (score > best) { best = score; pick = o; }
-  }
+  const pick = hitTest(screenToWorld(cx, cy));
   // Tapping a tall stack topples it instead of lifting a stone off the top.
   if (pick && pick.family === 'stone' && stackHeight(pick) >= STACK_TALL_C) {
     send({ t: 'scatter', id: pick.id, token, ts: Date.now() });
@@ -575,6 +626,9 @@ function frame(now) {
   }
   // painter's depth by ground line, then bottom-up within a stack so the top stone occludes
   list.sort((a, b) => (groundY(a) - groundY(b)) || ((a.stack || 0) - (b.stack || 0)) || (a.id < b.id ? -1 : 1));
+  // attend (§5.2): ease the reveal in/out and bloom it behind the attended object
+  attendT += ((attendId ? 1 : 0) - attendT) * 0.14;
+  if (attendT > 0.01 && attendId) { const ao = objects.get(attendId); if (ao && !isLifted(ao.id)) paintAttend(ao, attendT); }
   for (const o of list) drawObjectWorld(o);
   // worn-out stones crumble to a brief scatter of grit (world space, ~500ms)
   for (let i = grits.length - 1; i >= 0; i--) {
