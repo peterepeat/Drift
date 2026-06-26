@@ -6,6 +6,7 @@
 import * as PG from './drift-procgen.js';
 import { paintGround, paintGlows, paintNoise, paintPresence, paintSeasonGrade, seasonGround, seasonSat, paintWaterWorld, paintFlow } from './render.js';
 import { inViewport, CULL_MARGIN } from './cull.js';
+import { Audio } from './audio.js';
 
 // ---- tuning constants -------------------------------------------------------
 const Z0 = 1.0, ZMIN = 0.2, ZMAX = 4.0;     // zoom = CSS px per world unit
@@ -367,6 +368,37 @@ function setDot(connected) {
 dothit.addEventListener('pointerenter', () => { dot.classList.add('show'); clearTimeout(dotTimer); });
 dothit.addEventListener('pointerleave', () => { dotTimer = setTimeout(() => dot.classList.remove('show'), 2000); });
 
+// ---- ambient sound: one corner glyph, opt-in (PRD §8.4) ---------------------
+const snd = document.getElementById('snd');
+const sndhit = document.getElementById('sndhit');
+let sndTimer = null;
+let aDensity = 0, aWarmth = 0, aWater = 0;            // world -> sound, gathered each frame
+const audioState = () => ({ seasonPhase, density: aDensity, warmth: aWarmth, water: aWater });
+function flashSnd() { snd.classList.add('show'); clearTimeout(sndTimer); sndTimer = setTimeout(() => snd.classList.remove('show'), 2000); }
+function reflectSnd() { snd.classList.toggle('on', Audio.isEnabled()); flashSnd(); }
+sndhit.addEventListener('pointerenter', () => { snd.classList.add('show'); clearTimeout(sndTimer); });
+sndhit.addEventListener('pointerleave', () => { sndTimer = setTimeout(() => snd.classList.remove('show'), 2000); });
+sndhit.addEventListener('click', () => {
+  const on = Audio.toggle(audioState());           // the tap is what unlocks the AudioContext
+  localStorage.setItem('drift_sound', on ? '1' : '0');
+  reflectSnd();
+});
+// Remembered "on": reflect it immediately, but only actually start from the next
+// user gesture (browsers block autoplay) — don't auto-start on load. A tap on the
+// control itself is left to its own click handler (so we don't enable-then-toggle
+// it straight back off); any other first gesture starts the remembered sound.
+if (localStorage.getItem('drift_sound') === '1') {
+  snd.classList.add('on'); flashSnd();
+  const armStart = (e) => {
+    if (Audio.isEnabled()) { window.removeEventListener('pointerdown', armStart); return; }
+    if (e.target === sndhit) return; // the control's click will start it
+    Audio.enable(audioState()); reflectSnd();
+    window.removeEventListener('pointerdown', armStart);
+  };
+  window.addEventListener('pointerdown', armStart);
+}
+document.addEventListener('visibilitychange', () => { document.hidden ? Audio.onHidden() : Audio.onVisible(); });
+
 function wsUrl() { return (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws'; }
 function connect() {
   ws = new WebSocket(wsUrl());
@@ -518,16 +550,25 @@ function frame(now) {
     PG.drawGrit(ctx, g.seed >>> 0, g.x, g.y, g.r * (0.4 + p * 1.5), 0.8 * (1 - p));
   }
 
+  aDensity = list.length; // objects on screen — feeds the ambient sound's richness
+
   // overlays (screen space)
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  let warmth = 0;
   for (const [pid, p] of presences) {
     const inten = presenceIntensity(p, now);
     if (inten <= 0) {
       if ((p.gone && now - p.gone > P_OUT) || (now - p.last > P_IDLE + P_OUT)) presences.delete(pid);
       continue;
     }
+    if (inten > warmth) warmth = inten;
     const s = worldToScreen(p.x, p.y);
     paintPresence(ctx, vw, vh, s.x, s.y, vw * 0.55, inten);
+  }
+  aWarmth = warmth; // free (piggybacks the presence pass)
+  if (Audio.isEnabled()) {
+    aWater = poolOnScreen() ? 0.5 + 0.5 * Math.sin(animT * 0.4) : 0; // matches the visible sheen's shimmer
+    Audio.setState(audioState());
   }
   for (const o of objects.values()) {
     if (!isLifted(o.id)) continue;

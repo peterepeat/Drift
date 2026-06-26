@@ -28,12 +28,26 @@
     #dot.show { opacity: .4; }
     /* a slightly larger invisible hover target so the tiny dot is reachable */
     #dothit { position: fixed; right: 0; bottom: 0; width: 44px; height: 44px; }
+
+    /* The one control PRD §8.4 permits: a tiny ring (hollow=silent, filled=sounding). */
+    #snd {
+      position: fixed; left: 13px; bottom: 13px;
+      width: 7px; height: 7px; border-radius: 50%;
+      border: 1px solid #6a6258; background: transparent; opacity: 0;
+      transition: opacity .6s ease, background .4s ease, border-color .4s ease;
+      pointer-events: none;
+    }
+    #snd.on { background: #8a8478; border-color: #8a8478; }
+    #snd.show { opacity: .4; }
+    #sndhit { position: fixed; left: 0; bottom: 0; width: 44px; height: 44px; }
   </style>
 </head>
 <body>
   <canvas id="c"></canvas>
   <div id="dot"></div>
   <div id="dothit"></div>
+  <div id="snd"></div>
+  <div id="sndhit"></div>
   <script type="module" src="./client.js"></script>
 </body>
 </html>
