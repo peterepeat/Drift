@@ -66,6 +66,21 @@ resize();
 const camera = { x: 0, y: 0, z: Z0 };
 let arrive = null; // soft-pan-to-active-area animation
 
+// Return thread (PRD §6.3): the area a visitor was last active in is remembered
+// CLIENT-side (never sent as identity — only as a transient viewport hint) so a
+// returning visitor is softly oriented back toward where they were, rather than the
+// world's global centre-of-gravity. First-time visitors have no home and arrive at
+// the cog (PRD §5.4). Stored as the camera centre, throttled while inhabiting.
+let home = null;
+try { const h = JSON.parse(localStorage.getItem('drift_home') || 'null'); if (h && Number.isFinite(h.x) && Number.isFinite(h.y)) home = h; } catch {}
+let arrivedOnce = false, homeSavedAt = 0;
+function saveHome(now) {
+  if (now - homeSavedAt < 2000) return;          // at most every 2s
+  homeSavedAt = now;
+  home = { x: camera.x, y: camera.y };
+  try { localStorage.setItem('drift_home', JSON.stringify(home)); } catch {}
+}
+
 function screenToWorld(sx, sy) {
   return { x: camera.x + (sx - vw / 2) / camera.z, y: camera.y + (sy - vh / 2) / camera.z };
 }
@@ -404,7 +419,8 @@ document.addEventListener('visibilitychange', () => { document.hidden ? Audio.on
 function viewHalf() { return { hw: (vw / 2) / camera.z, hh: (vh / 2) / camera.z }; }
 function wsUrl() {
   const h = viewHalf();
-  const q = `?hw=${Math.round(h.hw)}&hh=${Math.round(h.hh)}`;
+  let q = `?hw=${Math.round(h.hw)}&hh=${Math.round(h.hh)}`;
+  if (home) q += `&cx=${Math.round(home.x)}&cy=${Math.round(home.y)}`; // return thread: land the initial payload on our area, not the cog
   return (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws' + q;
 }
 function connect() {
@@ -437,7 +453,9 @@ function onMessage(raw) {
       for (const o of m.objects) objects.set(o.id, { ...o, held: !!o.held, _matShown: o.maturity || 0, _agedShown: o.aged || 0, _tx: o.x, _ty: o.y });
       if (m.season != null) seasonPhase = m.season;
       if (m.pool) pool = m.pool;
-      if (m.cog) startArrive(m.cog.x, m.cog.y);
+      // Orient on the FIRST arrival only (a reconnect must not yank the camera back):
+      // a returning visitor drifts toward their remembered home, a new one toward the cog.
+      if (!arrivedOnce) { arrivedOnce = true; const t = home || m.cog; if (t) startArrive(t.x, t.y); }
       break;
     }
     case 'object_state': {
@@ -520,6 +538,7 @@ setInterval(() => {
   const c = screenToWorld(vw / 2, vh / 2);
   const h = viewHalf();
   send({ t: 'presence_move', x: c.x, y: c.y, hw: h.hw, hh: h.hh, ts: Date.now() });
+  saveHome(performance.now()); // remember where we've been inhabiting (return thread, §6.3)
 }, PRESENCE_SEND_MS);
 
 // ---- render loop ------------------------------------------------------------

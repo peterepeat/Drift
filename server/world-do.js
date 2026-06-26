@@ -287,14 +287,20 @@ export class WorldRoom {
       this.state.acceptWebSocket(server);
       server.serializeAttachment({ pid });
       // Interest-managed initial payload: if the client tells us its viewport size,
-      // send only what it can see (centred on the cog, where its camera arrives).
+      // send only what it can see. A returning client may also hint its remembered
+      // home centre (cx/cy — the return thread, PRD §6.3) so its first payload lands
+      // on its own area; default to the cog, where a fresh arrival lands (§5.4).
+      // cx/cy are PURELY a viewport hint — no identity, nothing stored per token.
       const hw = parseFloat(url.searchParams.get('hw'));
       const hh = parseFloat(url.searchParams.get('hh'));
-      const box = (hw > 0 && hh > 0) ? this.#boxFrom(this.cog.x, this.cog.y, hw, hh) : null;
+      const cxp = parseFloat(url.searchParams.get('cx')), cyp = parseFloat(url.searchParams.get('cy'));
+      const cx = Number.isFinite(cxp) ? cxp : this.cog.x;
+      const cy = Number.isFinite(cyp) ? cyp : this.cog.y;
+      const box = (hw > 0 && hh > 0) ? this.#boxFrom(cx, cy, hw, hh) : null;
       const state = this.#worldState(pid, box);
       this.#send(server, state);
       if (box) {
-        this.viewports.set(pid, { cx: this.cog.x, cy: this.cog.y, hw, hh });
+        this.viewports.set(pid, { cx, cy, hw, hh });
         this.known.set(pid, new Set(state.objects.map((o) => o.id)));
       } else {
         this.known.set(pid, new Set(this.objects.keys())); // got the whole world
