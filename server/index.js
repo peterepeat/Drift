@@ -8,7 +8,7 @@ export { WorldRoom } from './world-do.js';
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    if (url.pathname === '/ws' || url.pathname.startsWith('/admin/')) {
+    if (url.pathname === '/ws' || url.pathname === '/status' || url.pathname.startsWith('/admin/')) {
       const id = env.WORLD.idFromName('global'); // one world for everyone
       return env.WORLD.get(id).fetch(request);
     }

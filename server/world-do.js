@@ -517,6 +517,17 @@ export class WorldRoom {
       return Response.json({ ok: true, wrote, dirtyBefore, total });
     }
 
+    // Public, READ-ONLY health probe (no secret; no mutation) — surfaces whether
+    // the world is actually ticking (season/alarm) and how it's populated.
+    if (url.pathname === '/status') {
+      let creatures = 0; for (const o of this.objects.values()) if (o.family === 'creature') creatures++;
+      return Response.json({
+        objects: this.objects.size, creatures, season: this.season,
+        seedVersion: await this.state.storage.get('meta:seedVersion'),
+        alarmAt: await this.state.storage.getAlarm(), now: Date.now(),
+      });
+    }
+
     return new Response('not found', { status: 404 });
   }
 
@@ -1215,7 +1226,10 @@ export class WorldRoom {
   }
 
   async alarm() {
-    await this.#tick(Date.now());
+    // A bad tick must NOT freeze the world forever: catch, log, and ALWAYS
+    // reschedule so the world keeps breathing (and the error surfaces in logs).
+    try { await this.#tick(Date.now()); }
+    catch (e) { console.error('tick failed:', (e && e.stack) || String(e)); }
     await this.state.storage.setAlarm(Date.now() + TICK_MS);
   }
 }
