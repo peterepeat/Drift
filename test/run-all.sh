@@ -34,13 +34,13 @@ boot() {
 fail=0
 
 # Pure unit suites — no worker boot needed.
-for unit in cull audio-map physics; do
+for unit in cull audio-map physics creatures; do
   echo "=== $unit (unit) ==="
   node "test/$unit.test.mjs" || fail=1
 done
 
 # Integration suites — each against a FRESH worker on an isolated port.
-for suite in protocol interest grid checkpoint decouple growth seasons anomalies water-crystals stones water-flow thermal ceiling; do
+for suite in protocol interest grid checkpoint decouple growth seasons anomalies water-crystals stones water-flow thermal ceiling creature-world; do
   boot
   echo "=== $suite ==="
   PORT="$PORT" node "test/$suite.test.mjs" || fail=1

@@ -8,6 +8,7 @@ import { paintGround, paintGlows, paintNoise, paintPresence, paintSeasonGrade, s
 import { inViewport, CULL_MARGIN } from './cull.js';
 import { Audio } from './audio.js';
 import { flingStep, ema, nudge, spring } from './physics.js';
+import { wanderAt, drawCreature, creatureR } from './creatures.js';
 
 // ---- tuning constants -------------------------------------------------------
 const Z0 = 1.0, ZMIN = 0.2, ZMAX = 4.0;     // zoom = CSS px per world unit
@@ -131,6 +132,8 @@ let myPid = null;
 let seasonPhase = 0;           // monotonic season clock from the server (feels, never labelled)
 let lastSat = -1;              // last-applied canvas saturation (avoids per-frame style writes)
 let animT = 0;                 // seconds, drives the only animated objects (anomalies)
+let clockSkew = 0;             // (server now − local now), from world_state — aligns the creature wander clock across clients
+function syncedT() { return (Date.now() + clockSkew) / 1000; }
 
 // local hold
 let heldId = null, carry = null, preGrab = null;
@@ -169,8 +172,22 @@ function objRadius(o) {
   if (o.family === 'stone') return stoneSize(o.seed);
   if (o.family === 'anomaly') return anomalyR(o);
   if (o.family === 'crystal') return crystalR(o);
+  if (o.family === 'creature') return creatureR(o.seed >>> 0, o.kind || 'crawler');
   const mat = shownMat(o);
   return mat < SPROUT_C ? 10 * seedScale(o.seed) : 10 + mat * 26; // plants present a larger tap target
+}
+// A creature's LIVE position: home (its stored x/y) + the deterministic wander, with
+// a heading from the wander's near-future direction. Held creatures sit in the hand.
+function creaturePos(o) {
+  const t = syncedT(), seed = o.seed >>> 0, kind = o.kind || 'crawler';
+  const w = wanderAt(seed, kind, t), w2 = wanderAt(seed, kind, t + 0.2);
+  return { x: o.x + w.x, y: o.y + w.y, ang: Math.atan2(w2.y - w.y, w2.x - w.x) };
+}
+// Where an object is drawn / tested THIS frame: a free creature wanders; everything
+// else sits at its true position plus any local cursor-displacement offset.
+function posOf(o) {
+  if (o.family === 'creature' && !o.held && o.id !== heldId) return creaturePos(o);
+  return { x: o.x + (o._ox || 0), y: o.y + (o._oy || 0) };
 }
 function stoneGeom(o) {
   const er = Math.min(0.95, o.handling * 0.04); // handling erodes the stone (PRD §3.2)
@@ -179,10 +196,11 @@ function stoneGeom(o) {
 }
 // Draw any object (stone, seed, or plant) at (cx, cy) in the current transform.
 // FORM is always regenerated from seed (+ maturity/aged for growth) — never stored.
-function paintObject(o, cx, cy) {
+function paintObject(o, cx, cy, ang = 0) {
   if (o.family === 'stone') { PG.drawStone(ctx, stoneGeom(o), cx, cy); return; }
   if (o.family === 'anomaly') { PG.drawAnomaly(ctx, o.kind || 'breath', animT, cx, cy, anomalyR(o)); return; }
   if (o.family === 'crystal') { PG.drawCrystal(ctx, o.seed >>> 0, cx, cy, crystalR(o), animT); return; }
+  if (o.family === 'creature') { drawCreature(ctx, o.seed >>> 0, o.kind || 'crawler', cx, cy, animT, ang); return; }
   const mat = shownMat(o), aged = shownAged(o);
   if (mat < SPROUT_C) PG.drawSeed(ctx, o.seed >>> 0, cx, cy, seedScale(o.seed) * (1 + mat * 1.4));
   else PG.drawPlant(ctx, o.seed >>> 0, cx, cy, mat, aged);
@@ -195,6 +213,7 @@ function drawObjectWorld(o) {
     ctx.beginPath(); ctx.ellipse(o.x, o.y + rad * 0.5, rad * 0.8, rad * 0.32, 0, 0, Math.PI * 2); ctx.fill();
     ctx.restore();
   }
+  if (o.family === 'creature') { const p = creaturePos(o); paintObject(o, p.x, p.y, p.ang); return; } // live wander + heading
   paintObject(o, o.x + (o._ox || 0), o.y + (o._oy || 0)); // + local cursor-displacement (Wave 6)
 }
 // The "reveal of age" (PRD §5.2): how far along its life an attended object is, so
@@ -204,21 +223,23 @@ function ageFactor(o) {
   if (o.family === 'stone') return Math.min(1, (o.handling || 0) / 26);   // worn smooth = old (mirror GRIT_HANDLING)
   if (o.family === 'crystal') return 0.4;                                 // decay isn't on the wire — a steady, modest reveal
   if (o.family === 'anomaly') return 0.5;                                 // timeless — a steady, even reveal
+  if (o.family === 'creature') return 0.35;                              // alive — a steady, gentle reveal
   return Math.min(1, shownMat(o) * 0.55 + shownAged(o) * 0.65);           // seed → plant → aged
 }
 // A soft warm bloom that breathes around the attended object (its "response").
 function paintAttend(o, t) {
   const age = ageFactor(o);
+  const c = posOf(o);                                   // bloom at the live position (a creature wanders)
   const rad = objRadius(o) * (1.7 + 1.3 * age);
   const breath = 0.6 + 0.4 * Math.sin(animT * 1.6);     // slow pulse = the object responding
   const a = 0.16 * t * breath * (0.55 + 0.45 * age);    // older → warmer reveal
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
-  const g = ctx.createRadialGradient(o.x, o.y, 0, o.x, o.y, rad);
+  const g = ctx.createRadialGradient(c.x, c.y, 0, c.x, c.y, rad);
   g.addColorStop(0, PG.rgba('#e8c87a', a));
   g.addColorStop(1, PG.rgba('#e8c87a', 0));
   ctx.fillStyle = g;
-  ctx.beginPath(); ctx.arc(o.x, o.y, rad, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(c.x, c.y, rad, 0, Math.PI * 2); ctx.fill();
   ctx.restore();
 }
 // A stack's ground line (the base sits here; each level is stored STACK_STEP up).
@@ -308,7 +329,7 @@ function updateFling(now) {
 // growing plants get heavier as they mature and root, crystals stir a little, and
 // stones / anomalies / held things don't move at all.
 function lightnessOf(o) {
-  if (o.held || o.family === 'stone' || o.family === 'anomaly') return 0;
+  if (o.held || o.family === 'stone' || o.family === 'anomaly' || o.family === 'creature') return 0; // creatures move themselves
   if (o.family === 'crystal') return 0.45;
   return Math.max(0, 1 - shownMat(o) * 1.3); // ~1 at seed → 0 by ~maturity 0.77
 }
@@ -362,7 +383,8 @@ function hitTest(w) {
   let pick = null, best = -Infinity;
   for (const o of objects.values()) {
     if (o.held) continue;
-    const d = Math.hypot(o.x - w.x, o.y - w.y);
+    const p = posOf(o);
+    const d = Math.hypot(p.x - w.x, p.y - w.y);
     if (d > hitRadius(o)) continue;
     // The top of a stack wins (lift a cairn from the top); otherwise the object
     // whose centre is NEAREST the tap — so a small thing directly under the cursor
@@ -691,6 +713,7 @@ function onMessage(raw) {
       objects.clear(); lifts.clear();
       for (const o of m.objects) objects.set(o.id, { ...o, held: !!o.held, _matShown: o.maturity || 0, _agedShown: o.aged || 0, _tx: o.x, _ty: o.y });
       if (m.season != null) seasonPhase = m.season;
+      if (m.now != null) clockSkew = m.now - Date.now(); // lock the creature wander clock to the server's
       if (m.pool) pool = m.pool;
       // Orient on the FIRST arrival only (a reconnect must not yank the camera back):
       // a returning visitor drifts toward their remembered home, a new one toward the cog.
@@ -810,7 +833,8 @@ function frame(now) {
   // Lifted/held objects are never culled — they're drawn in the screen-space pass.
   for (const o of objects.values()) {
     if (isLifted(o.id)) continue;
-    const s = worldToScreen(o.x, o.y);
+    const p = posOf(o);
+    const s = worldToScreen(p.x, p.y);
     if (!inViewport(s.x, s.y, vw, vh, CULL_MARGIN)) continue;
     list.push(o);
   }

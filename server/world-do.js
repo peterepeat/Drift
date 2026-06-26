@@ -18,7 +18,7 @@
 // for hold ownership; broadcasts carry an ephemeral per-connection `pid` and a
 // boolean `held` — never the token.
 // =============================================================================
-import { generateWorld, makeRecord, makeSeedRecord, makeAnomalyRecord, ANOMALY_KINDS, makeCrystalRecord, rng, makeNoise } from './seed.js';
+import { generateWorld, makeRecord, makeSeedRecord, makeAnomalyRecord, ANOMALY_KINDS, makeCrystalRecord, makeCreatureRecord, CREATURE_KINDS, rng, makeNoise } from './seed.js';
 import { FLOW_SEED, FLOW_SCALE, FLOW_REACH } from '../public/flow.js'; // shared with the client visual
 
 const TICK_MS = 60000;
@@ -107,6 +107,16 @@ const POOL = { x: 0, y: 0, r: 350 };      // the world's water pool (world units
 const CRYSTAL_CAP = 10;                    // at most this many crystals at once
 const CRYSTAL_SPAWN_CHANCE = 0.05;        // per tick, while under the cap
 const CRYSTAL_DECAY = 1 / 300;            // decay/tick (~5h to dissolve) — slow, impermanent
+
+// ---- creatures (Family 5): a few wandering insects -------------------------
+// Stored as existence + a HOME (x/y) only; the live position is a deterministic
+// wander the clients compute (public/creatures.js), so no position is ticked or
+// broadcast — the always-ticking world spends nothing keeping them moving. They
+// ramp to a baseline quickly so an arriving world feels inhabited, then top up to
+// a cap. Spared from water-drift, isolation-fade and the ceiling trim (they're alive).
+const MIN_CREATURES = 5;
+const MAX_CREATURES = 14;
+const CREATURE_SPAWN_CHANCE = 0.04;       // per tick, between MIN and MAX
 
 // ---- stones: erosion-to-grit & stacking (Family 1) -------------------------
 // Stones don't grow; they erode by handling (each place wears them smoother and
@@ -366,6 +376,17 @@ export class WorldRoom {
       this.objects.set(cr.id, cr); this.#gridAdd(cr); await this.#persist(cr);
       this.#bcast({ t: 'object_new', o: this.#pub(cr) }, null);
       return Response.json({ ok: true, crystal: { id: cr.id, x: cr.x, y: cr.y } });
+    }
+
+    // Ops/testing only: spawn one creature (optionally at ?x=&y=&kind=). Gated.
+    if (url.pathname === '/admin/creature') {
+      if (!this.#adminOk(request)) return Response.json({ ok: false, error: 'forbidden' }, { status: 403 });
+      const px = url.searchParams.get('x'), py = url.searchParams.get('y');
+      const at = (px != null && py != null) ? { x: parseFloat(px), y: parseFloat(py) } : null;
+      const cr = this.#spawnCreature(Date.now(), at, url.searchParams.get('kind'));
+      this.objects.set(cr.id, cr); this.#gridAdd(cr); await this.#persist(cr);
+      this.#bcast({ t: 'object_new', o: this.#pub(cr) }, null);
+      return Response.json({ ok: true, creature: { id: cr.id, kind: cr.kind, x: cr.x, y: cr.y } });
     }
 
     // Ops/testing only: read the water flow vector at (?x=&y=). Gated.
@@ -833,7 +854,7 @@ export class WorldRoom {
       const goneSet = new Set(gone.map((o) => o.id)); // O(1) membership at ceiling scale
       const cands = [];
       for (const o of this.objects.values()) {
-        if (o.family === 'anomaly' || o.held !== '' || goneSet.has(o.id)) continue;
+        if (o.family === 'anomaly' || o.family === 'creature' || o.held !== '' || goneSet.has(o.id)) continue;
         cands.push(o);
       }
       cands.sort((a, b) => a.last_touched - b.last_touched); // longest-untouched first
@@ -863,6 +884,18 @@ export class WorldRoom {
     for (const o of this.objects.values()) if (o.family === 'crystal') crystalCount++;
     if (crystalCount < CRYSTAL_CAP && this.objects.size + spawned.length < this.maxObjects && Math.random() < CRYSTAL_SPAWN_CHANCE) {
       spawned.push(this.#spawnCrystal(now));
+    }
+
+    // Creatures: ramp quickly to a baseline so the world feels inhabited, then top
+    // up toward the cap. Only existence is written; their motion costs the tick nothing.
+    let creatureCount = 0;
+    for (const o of this.objects.values()) if (o.family === 'creature') creatureCount++;
+    let creAdded = 0;
+    while (creatureCount + creAdded < MIN_CREATURES && this.objects.size + spawned.length < this.maxObjects) {
+      spawned.push(this.#spawnCreature(now)); creAdded++;
+    }
+    if (creatureCount + creAdded < MAX_CREATURES && this.objects.size + spawned.length < this.maxObjects && Math.random() < CREATURE_SPAWN_CHANCE) {
+      spawned.push(this.#spawnCreature(now));
     }
 
     // Broadcast every threshold-crossing for smooth visuals, but DON'T write per
@@ -1097,7 +1130,7 @@ export class WorldRoom {
   // left undisturbed to take root). So mature plants and crystals creep along.
   #driftEligible(o) {
     if (o.held !== '' || o.stack > 0) return false;
-    if (o.family === 'stone' || o.family === 'anomaly') return false;
+    if (o.family === 'stone' || o.family === 'anomaly' || o.family === 'creature') return false; // creatures move themselves
     if (o.family === 'seed' && o.maturity < SPROUT) return false;
     return true;
   }
@@ -1127,6 +1160,23 @@ export class WorldRoom {
     const y = at ? at.y : POOL.y + Math.sin(ang) * rr;
     const seed = (Math.random() * 4294967296) >>> 0;
     return makeCrystalRecord(crypto.randomUUID(), seed, x, y, now);
+  }
+
+  // Born among the living: a creature's home starts near a random plant/seed (or
+  // the centre-of-gravity if the world is bare), so they inhabit the vegetated areas.
+  #spawnCreature(now, at, kind) {
+    const k = (kind && CREATURE_KINDS.includes(kind)) ? kind : CREATURE_KINDS[Math.floor(Math.random() * CREATURE_KINDS.length)];
+    let x, y;
+    if (at) { x = at.x; y = at.y; }
+    else {
+      const verdure = [];
+      for (const o of this.objects.values()) if (o.family === 'seed') verdure.push(o);
+      const base = verdure.length ? verdure[Math.floor(Math.random() * verdure.length)] : { x: this.cog.x, y: this.cog.y };
+      const ang = Math.random() * Math.PI * 2, d = Math.random() * 120;
+      x = base.x + Math.cos(ang) * d; y = base.y + Math.sin(ang) * d;
+    }
+    const seed = (Math.random() * 4294967296) >>> 0;
+    return makeCreatureRecord(crypto.randomUUID(), seed, k, x, y, now);
   }
 
   async alarm() {

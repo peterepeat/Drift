@@ -62,6 +62,18 @@ export const makeCrystalRecord = (id, seed, x, y, now) => {
   return r;
 };
 
+// Creatures (Family 5): a few gentle insects that wander on their own. NO stored
+// position-over-time — the record holds only existence + a HOME (x/y); the live
+// position is home + a deterministic wander(seed, kind, sharedClock) the clients
+// compute (see public/creatures.js). Pickable like anything else; placed, its home
+// moves there. `kind` selects crawler vs flier.
+export const CREATURE_KINDS = ['crawler', 'flier'];
+export const makeCreatureRecord = (id, seed, kind, x, y, now) => {
+  const r = makeRecord(id, 'creature', seed, x, y, now);
+  r.kind = kind;
+  return r;
+};
+
 // `now` anchors creation time to the moment the world is born. The procedural
 // FORM of each object (id, position, seed) is fully deterministic; the starting
 // lifecycle mix makes the arrival world feel already in progress.
