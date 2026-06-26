@@ -166,7 +166,7 @@ export class WorldRoom {
     this.lastCheckpoint = (await this.state.storage.get('meta:checkpoint')) || 0;
     if (this.objects.size === 0) await this.#seed(false);
     if ((await this.state.storage.getAlarm()) == null) {
-      await this.state.storage.setAlarm(Date.now() + TICK_MS);
+      await this.#arm(Date.now() + TICK_MS);
     }
   }
 
@@ -189,7 +189,7 @@ export class WorldRoom {
   async #seed(force) {
     if (force) {
       const old = await this.state.storage.list({ prefix: 'obj:' });
-      if (old.size) await this.state.storage.delete([...old.keys()]);
+      if (old.size) await this.#del([...old.keys()]);
       this.objects.clear();
     }
     const recs = generateWorld();
@@ -197,16 +197,29 @@ export class WorldRoom {
     for (const r of recs) { this.objects.set(r.id, r); puts['obj:' + r.id] = r; }
     await this.#putAll(puts);
     this.cog = { x: 0, y: 0, n: 0 };
-    await this.state.storage.put('cog', this.cog);
-    await this.state.storage.put('meta:seeded', { at: Date.now(), n: recs.length });
+    await this.#put('cog', this.cog);
+    await this.#put('meta:seeded', { at: Date.now(), n: recs.length });
     return recs.length;
   }
+
+  // ---- best-effort persistence ----------------------------------------------
+  // Every write goes through these. A failed write — e.g. the DO's daily
+  // rows_written quota is exhausted — must NOT crash the world: it keeps running
+  // in memory (still viewable + interactive over WebSockets) and resumes
+  // persisting once writes are allowed again. Reads never go through here.
+  #writeWarn(e) {
+    if (!this._warnedWrite) { this._warnedWrite = true; console.warn('drift: storage write failed (quota?), running in-memory:', e?.message || e); }
+  }
+  async #put(key, val) { try { await this.state.storage.put(key, val); } catch (e) { this.#writeWarn(e); } }
+  async #del(key) { try { await this.state.storage.delete(key); } catch (e) { this.#writeWarn(e); } }
+  async #arm(t) { try { await this.state.storage.setAlarm(t); } catch (e) { this.#writeWarn(e); } }
 
   // storage.put accepts at most 128 entries per call.
   async #putAll(map) {
     const entries = Object.entries(map);
     for (let i = 0; i < entries.length; i += 128) {
-      await this.state.storage.put(Object.fromEntries(entries.slice(i, i + 128)));
+      try { await this.state.storage.put(Object.fromEntries(entries.slice(i, i + 128))); }
+      catch (e) { this.#writeWarn(e); }
     }
   }
 
@@ -306,7 +319,7 @@ export class WorldRoom {
       const setv = url.searchParams.get('set');
       if (setv != null && Number.isFinite(parseFloat(setv))) {
         this.#ensureHeat().data[this.#cellIndex(x, y)] = Math.max(0, Math.min(HEAT_MAX, parseFloat(setv)));
-        await this.state.storage.put('field:heat', this.heat);
+        await this.#put('field:heat', this.heat);
       }
       const g = this.#heatGrad(x, y);
       return Response.json({ ok: true, x, y, heat: this.#heatAt(x, y), gx: g.gx, gy: g.gy });
@@ -377,7 +390,7 @@ export class WorldRoom {
       try { ws.send(s); } catch {}
     }
   }
-  async #persist(o) { await this.state.storage.put('obj:' + o.id, o); }
+  async #persist(o) { await this.#put('obj:' + o.id, o); }
 
   // ---- WebSocket message handling -------------------------------------------
   async webSocketMessage(ws, raw) {
@@ -421,7 +434,7 @@ export class WorldRoom {
         // Worn to grit by too much handling — a brief scatter, then gone (§4.3).
         if (o.handling >= GRIT_HANDLING) {
           this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id);
-          await this.state.storage.delete('obj:' + o.id);
+          await this.#del('obj:' + o.id);
           this.#bcast({ t: 'object_gone', id: o.id, grit: true }, null);
           return;
         }
@@ -436,7 +449,7 @@ export class WorldRoom {
       const o = this.objects.get(m.id);
       if (!o || o.family !== 'anomaly' || o.held !== m.token) return;
       this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id);
-      await this.state.storage.delete('obj:' + o.id);
+      await this.#del('obj:' + o.id);
       this.#bcast({ t: 'object_gone', id: o.id }, null);
 
     } else if (m.t === 'scatter') {
@@ -475,7 +488,7 @@ export class WorldRoom {
     this.cog.x = this.cog.x * (1 - COG_ALPHA) + x * COG_ALPHA;
     this.cog.y = this.cog.y * (1 - COG_ALPHA) + y * COG_ALPHA;
     this.cog.n += 1;
-    this.state.storage.put('cog', this.cog); // fire-and-forget
+    this.#put('cog', this.cog); // fire-and-forget (best-effort)
   }
 
   #warmth(o, now) {
@@ -633,7 +646,7 @@ export class WorldRoom {
     for (const o of spawned) { this.objects.set(o.id, o); await this.#persist(o); this.#bcast({ t: 'object_new', o: this.#pub(o) }, null); }
     for (const o of gone) {
       this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id);
-      await this.state.storage.delete('obj:' + o.id);
+      await this.#del('obj:' + o.id);
       this.#bcast({ t: 'object_gone', id: o.id }, null);
     }
 
@@ -654,10 +667,10 @@ export class WorldRoom {
     }
 
     this.season += SEASON_PER_TICK; // advance the world's own season clock (in memory every tick)
-    await this.state.storage.put('meta:season', this.season); // one tiny key; cheap
+    await this.#put('meta:season', this.season); // one tiny key; cheap
     // Persist the thermal field only when it's live (or just settled to zero) —
     // an idle, all-zero world shouldn't write the field every tick forever.
-    if (this.heat && (this.heatActive || this.heatWasActive)) await this.state.storage.put('field:heat', this.heat);
+    if (this.heat && (this.heatActive || this.heatWasActive)) await this.#put('field:heat', this.heat);
     this.heatWasActive = this.heatActive;
 
     // Full-world snapshot: only every CHECKPOINT_MS (wall-clock, persisted so it
@@ -671,7 +684,7 @@ export class WorldRoom {
       for (const o of this.objects.values()) puts['obj:' + o.id] = o;
       if (Object.keys(puts).length) await this.#putAll(puts);
       this.lastCheckpoint = now;
-      await this.state.storage.put('meta:checkpoint', now);
+      await this.#put('meta:checkpoint', now);
       checkpointed = true;
     }
     this.#bcast({ t: 'season', phase: this.season }, null); // let everyone feel the clock turn
@@ -870,7 +883,9 @@ export class WorldRoom {
   }
 
   async alarm() {
-    await this.#tick(Date.now());
-    await this.state.storage.setAlarm(Date.now() + TICK_MS);
+    // A tick that fails mid-way (e.g. writes are quota-blocked) must not stop the
+    // clock — swallow it and always re-arm so the world resumes once writes return.
+    try { await this.#tick(Date.now()); } catch (e) { this.#writeWarn(e); }
+    await this.#arm(Date.now() + TICK_MS);
   }
 }
