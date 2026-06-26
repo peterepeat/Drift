@@ -53,11 +53,17 @@ const CEIL_TRIM = 2;                       // how far under the ceiling to trim 
 
 // ---- persistence ------------------------------------------------------------
 // Per-tick we persist only what actually changed/spawned/vanished (the broadcast
-// loops below). A full snapshot of every object runs only every CHECKPOINT_MS,
-// driven by a PERSISTED wall-clock mark so it fires across DO eviction. This is
-// what keeps a quiet, always-ticking world from rewriting its whole population to
-// storage every minute (the DO rows_written quota killer).
-const CHECKPOINT_MS = 30 * 60 * 1000;      // full-snapshot cadence (~30 min)
+// loops below). The remaining in-memory drift that has no discrete write — sub-
+// threshold growth/aging, sub-POS_BCAST_DELTA water creep, per-object heat, the
+// warmth-refreshed last_touched clock, crystal decay — is tracked in a DIRTY SET
+// and flushed by the periodic checkpoint. The checkpoint writes ONLY the dirty
+// objects, never the whole population: an object absent from the set is byte-
+// identical on disk already, so skipping it loses nothing. This makes the always-
+// ticking world's write rate scale with CHANGE, not with population — the thing
+// that has to hold before the cap can rise toward the PRD's 10k (the DO
+// rows_written quota was, and remains, the binding constraint). A PERSISTED
+// wall-clock mark gates the cadence so it fires across DO eviction.
+const CHECKPOINT_MS = 30 * 60 * 1000;      // dirty-flush cadence (~30 min)
 
 // ---- seasons (the world's own slow clock; not correlated to real time) ------
 // `season` is a monotonic float; the current season is floor(season) % 4 and
@@ -175,6 +181,7 @@ export class WorldRoom {
     this.known = new Map();        // pid -> Set(id) objects already sent to this connection (interest streaming)
     this.grid = new Map();         // "cx,cy" -> Set(record): in-memory spatial hash (never persisted)
     this.cellOf = new Map();       // id -> "cx,cy": each object's current grid cell (for move/remove)
+    this.dirty = new Set();        // ids whose in-memory state diverged from disk since last #persist (checkpoint flushes these)
     this.flowNoise = null;         // lazily-built makeNoise(FLOW_SEED); shared with the client visual
     this.heat = null;              // coarse thermal field { w, data[], form[] } (lazy; PRD §4.1)
     this.heatActive = false;       // any heat/formation this tick (skip persisting an inert field)
@@ -186,7 +193,12 @@ export class WorldRoom {
 
   async #load() {
     const list = await this.state.storage.list({ prefix: 'obj:' });
-    for (const [, rec] of list) { this.#migrate(rec); this.objects.set(rec.id, rec); }
+    // A record the migration actually rewrote (e.g. a legacy stone getting its
+    // last_touched clock stamped) is now divergent from disk in memory only —
+    // mark it dirty so the first checkpoint freezes it, exactly as the old
+    // full-population checkpoint did. Otherwise such a stone would re-stamp
+    // last_touched=now on every cold load and never accumulate its fade clock.
+    for (const [, rec] of list) { if (this.#migrate(rec)) this.dirty.add(rec.id); this.objects.set(rec.id, rec); }
     this.cog = (await this.state.storage.get('cog')) || { x: 0, y: 0, n: 0 };
     this.season = (await this.state.storage.get('meta:season')) || 0;
     this.heat = (await this.state.storage.get('field:heat')) || null; // rebuilt lazily if absent
@@ -198,20 +210,25 @@ export class WorldRoom {
     }
   }
 
-  // Backfill lifecycle fields on records written by an earlier version.
+  // Backfill lifecycle fields on records written by an earlier version. Returns
+  // true if it actually rewrote the record (so #load can mark it dirty for the
+  // next checkpoint — under the dirty-flush, an unmarked migration would never
+  // reach disk).
   #migrate(o) {
-    if (typeof o.maturity !== 'number') o.maturity = 0;
-    if (typeof o.aged !== 'number') o.aged = 0;
-    if (typeof o.heat !== 'number') o.heat = 0;
-    if (typeof o.shedAccum !== 'number') o.shedAccum = 0;
-    if (typeof o.decay !== 'number') o.decay = 0;
-    if (typeof o.stack !== 'number') o.stack = 0;
-    if (typeof o.stackBase !== 'string') o.stackBase = '';
+    let changed = false;
+    if (typeof o.maturity !== 'number') { o.maturity = 0; changed = true; }
+    if (typeof o.aged !== 'number') { o.aged = 0; changed = true; }
+    if (typeof o.heat !== 'number') { o.heat = 0; changed = true; }
+    if (typeof o.shedAccum !== 'number') { o.shedAccum = 0; changed = true; }
+    if (typeof o.decay !== 'number') { o.decay = 0; changed = true; }
+    if (typeof o.stack !== 'number') { o.stack = 0; changed = true; }
+    if (typeof o.stackBase !== 'string') { o.stackBase = ''; changed = true; }
     // Records from before the last_touched clock start their fade timer NOW, not
     // at created_at — otherwise a long-lived world's stones would all crumble to
     // grit on the first tick after this deploy.
-    if (typeof o.last_touched !== 'number') o.last_touched = Date.now();
-    delete o.isolation; // replaced by the derived last_touched clock
+    if (typeof o.last_touched !== 'number') { o.last_touched = Date.now(); changed = true; }
+    if ('isolation' in o) { delete o.isolation; changed = true; } // replaced by the derived last_touched clock
+    return changed;
   }
 
   async #seed(force) {
@@ -292,9 +309,9 @@ export class WorldRoom {
       const setSeason = url.searchParams.get('season');
       if (setSeason != null) this.season = parseFloat(setSeason) || 0; // jump the season clock (testing)
       const before = this.objects.size;
-      let spawned = 0, gone = 0, checkpoints = 0;
-      for (let i = 0; i < n; i++) { const r = await this.#tick(Date.now()); spawned += r.spawned; gone += r.gone; if (r.checkpointed) checkpoints++; }
-      return Response.json({ ok: true, ticks: n, before, after: this.objects.size, spawned, gone, checkpoints, season: this.season });
+      let spawned = 0, gone = 0, checkpoints = 0, checkpointWrote = 0;
+      for (let i = 0; i < n; i++) { const r = await this.#tick(Date.now()); spawned += r.spawned; gone += r.gone; if (r.checkpointed) { checkpoints++; checkpointWrote += r.checkpointWrote; } }
+      return Response.json({ ok: true, ticks: n, before, after: this.objects.size, spawned, gone, checkpoints, checkpointWrote, season: this.season });
     }
 
     // Ops/testing only: spawn one anomaly (optionally at ?x=&y=). Gated.
@@ -407,6 +424,16 @@ export class WorldRoom {
       }
       if (indexed !== this.objects.size) consistent = false;
       return Response.json({ ok: true, cells: this.grid.size, indexed, objects: this.objects.size, consistent });
+    }
+
+    // Ops/testing only: force a checkpoint NOW (ignoring the wall-clock gate) and
+    // report how many objects it wrote — i.e. the size of the dirty set. Gated;
+    // inert in prod. Used by test/checkpoint.test.mjs to prove the dirty flush.
+    if (url.pathname === '/admin/checkpoint') {
+      if (!this.#adminOk(request)) return Response.json({ ok: false, error: 'forbidden' }, { status: 403 });
+      const total = this.objects.size, dirtyBefore = this.dirty.size;
+      const wrote = await this.#checkpoint(Date.now());
+      return Response.json({ ok: true, wrote, dirtyBefore, total });
     }
 
     return new Response('not found', { status: 404 });
@@ -534,7 +561,7 @@ export class WorldRoom {
       try { ws.send(s); } catch {}
     }
   }
-  async #persist(o) { await this.state.storage.put('obj:' + o.id, o); }
+  async #persist(o) { await this.state.storage.put('obj:' + o.id, o); this.dirty.delete(o.id); } // now byte-current on disk
 
   // ---- WebSocket message handling -------------------------------------------
   async webSocketMessage(ws, raw) {
@@ -565,6 +592,7 @@ export class WorldRoom {
       if (!o || o.held !== m.token) return;
       o.x = m.x; o.y = m.y;                    // in-memory only; persisted on place / reclaim
       this.#gridUpdate(o);                      // keep a carried object findable at its current spot
+      this.dirty.add(o.id);                     // carried position is unpersisted — let a checkpoint catch a long carry
       this.#bcast(this.#stateMsg(o, now), ws);
 
     } else if (m.t === 'place') {
@@ -579,7 +607,7 @@ export class WorldRoom {
         // Worn to grit by too much handling — a brief scatter, then gone (§4.3).
         if (o.handling >= GRIT_HANDLING) {
           this.#gridRemove(o);
-          this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id);
+          this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id); this.dirty.delete(o.id);
           await this.state.storage.delete('obj:' + o.id);
           this.#bcast({ t: 'object_gone', id: o.id, grit: true }, null);
           return;
@@ -596,7 +624,7 @@ export class WorldRoom {
       const o = this.objects.get(m.id);
       if (!o || o.family !== 'anomaly' || o.held !== m.token) return;
       this.#gridRemove(o);
-      this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id);
+      this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id); this.dirty.delete(o.id);
       await this.state.storage.delete('obj:' + o.id);
       this.#bcast({ t: 'object_gone', id: o.id }, null);
 
@@ -657,9 +685,10 @@ export class WorldRoom {
   }
 
   // ---- the breath: one growth/decay tick ------------------------------------
-  // `persist`: write the full survivor snapshot + field/season this tick. The
-  // One world tick. Discrete changes persist as they happen; a full-world
-  // snapshot runs only every CHECKPOINT_MS (see the persistence note below).
+  // One world tick. Discrete changes (broadcast lifecycle moves, spawns, deaths)
+  // persist as they happen; everything else that drifts in memory is recorded in
+  // the dirty set and flushed by the periodic checkpoint (see the persistence
+  // note above and #checkpoint).
   async #tick(now) {
     const changed = [], spawned = [], gone = [];
     // Season modulates how fast life grows and ages this tick.
@@ -679,10 +708,12 @@ export class WorldRoom {
       if (o.family === 'crystal') {         // crystals slowly dissolve (a brief flash, then gone)
         o.decay = Math.min(1, (o.decay || 0) + CRYSTAL_DECAY);
         if (o.decay >= 1) gone.push(o);
+        else this.dirty.add(o.id);          // decay advances with no discrete write — the checkpoint must catch it
         continue;
       }
       if (o.family !== 'seed') continue;    // stones / anomalies have no time-based change here
 
+      const beforeHeat = o.heat, beforeShed = o.shedAccum;
       o.heat = Math.min(1, o.heat * HEAT_DECAY + this.#warmth(o, now));
       const beforeMat = o.maturity, beforeAged = o.aged;
       // An anomaly nearby quietly accelerates growth and slows aging.
@@ -718,12 +749,16 @@ export class WorldRoom {
         // !changed.includes guards against a double-push when a hold also timed out this tick
         if (!gone.includes(o) && !changed.includes(o)) changed.push(o);
       }
+      // Sub-threshold lifecycle change (incl. checkpoint-only heat) that no
+      // discrete write captured: mark it so the next checkpoint can't lose it.
+      if ((o.maturity !== beforeMat || o.aged !== beforeAged || o.heat !== beforeHeat || o.shedAccum !== beforeShed) &&
+          !changed.includes(o) && !gone.includes(o)) this.dirty.add(o.id);
     }
 
     // Water drift: eligible free objects near the pool creep along the flow.
-    // Movement is sub-pixel/tick; we persist it via the survivor snapshot but
-    // BROADCAST only once an object has crept POS_BCAST_DELTA — otherwise a
-    // pool full of drifters would spam object_state every tick to every client.
+    // Movement is sub-pixel/tick; we mark it dirty (a checkpoint persists the
+    // creep) but BROADCAST only once an object has crept POS_BCAST_DELTA —
+    // otherwise a pool full of drifters would spam object_state every tick.
     for (const o of this.objects.values()) {
       if (gone.includes(o) || !this.#driftEligible(o) ||
           Math.hypot(o.x - POOL.x, o.y - POOL.y) > POOL.r * FLOW_REACH) {
@@ -737,6 +772,7 @@ export class WorldRoom {
       const f = this.#flowAt(o.x, o.y, sb);
       o.x += f.vx * FLOW_SPEED; o.y += f.vy * FLOW_SPEED;
       this.#gridUpdate(o);                      // re-index the drifted object (no-op until it crosses a cell)
+      this.dirty.add(o.id);                     // the creep is unpersisted until a checkpoint flushes it
       const mark = this.driftMark.get(o.id);
       if (!mark) { this.driftMark.set(o.id, { x: o.x, y: o.y }); continue; }
       if (Math.hypot(o.x - mark.x, o.y - mark.y) >= POS_BCAST_DELTA) {
@@ -751,7 +787,7 @@ export class WorldRoom {
     // tended and never fade.
     for (const o of this.objects.values()) {
       if (o.family === 'anomaly' || o.held !== '' || o.stack > 0) continue;
-      if (this.#heatAt(o.x, o.y) > WARM_EPS) { o.last_touched = now; continue; }
+      if (this.#heatAt(o.x, o.y) > WARM_EPS) { o.last_touched = now; this.dirty.add(o.id); continue; } // refresh is checkpoint-only
       if (o.family === 'stone' && (now - o.last_touched) >= STONE_FADE_MS && !gone.includes(o)) {
         gone.push(o);
       }
@@ -801,7 +837,7 @@ export class WorldRoom {
     for (const o of spawned) { this.objects.set(o.id, o); this.#gridAdd(o); await this.#persist(o); this.#bcast({ t: 'object_new', o: this.#pub(o) }, null); }
     for (const o of gone) {
       this.#gridRemove(o);
-      this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id);
+      this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id); this.dirty.delete(o.id);
       await this.state.storage.delete('obj:' + o.id);
       this.#bcast({ t: 'object_gone', id: o.id }, null);
     }
@@ -829,24 +865,36 @@ export class WorldRoom {
     if (this.heat && (this.heatActive || this.heatWasActive)) await this.state.storage.put('field:heat', this.heat);
     this.heatWasActive = this.heatActive;
 
-    // Full-world snapshot: only every CHECKPOINT_MS (wall-clock, persisted so it
-    // fires across eviction). Discrete per-tick changes were already persisted by
-    // the changed/spawned/gone loops above; the checkpoint is the backstop that
-    // captures sub-threshold drift in otherwise-static objects. This is what keeps
-    // a quiet, always-ticking world off the DO rows_written quota.
-    let checkpointed = false;
+    // Checkpoint: only every CHECKPOINT_MS (wall-clock, persisted so it fires
+    // across eviction). Flushes the dirty set — the in-memory drift no discrete
+    // write captured — and nothing else; clean objects are already byte-current
+    // on disk. This is what keeps the always-ticking world off the rows_written
+    // quota AND lets its write rate scale with change, not population.
+    let checkpointed = false, checkpointWrote = 0;
     if (now - this.lastCheckpoint >= CHECKPOINT_MS) {
-      const puts = {};
-      for (const o of this.objects.values()) puts['obj:' + o.id] = o;
-      if (Object.keys(puts).length) await this.#putAll(puts);
-      this.#gridRebuild();           // ~30-min in-memory self-heal against any missed hook / desync (zero storage cost)
-      this.lastCheckpoint = now;
-      await this.state.storage.put('meta:checkpoint', now);
+      checkpointWrote = await this.#checkpoint(now);
       checkpointed = true;
     }
     this.#bcast({ t: 'season', phase: this.season }, null); // let everyone feel the clock turn
 
-    return { spawned: spawned.length, gone: gone.length, checkpointed };
+    return { spawned: spawned.length, gone: gone.length, checkpointed, checkpointWrote };
+  }
+
+  // Flush the dirty set to storage and stamp the checkpoint mark. Writes only the
+  // objects whose in-memory state diverged from disk since their last #persist; an
+  // object NOT in the set is byte-identical on disk already, so skipping it loses
+  // nothing. Returns how many objects were written (0 when nothing has drifted).
+  async #checkpoint(now) {
+    const ids = [...this.dirty];     // snapshot, then clear only what we flush (defensive vs any interleave)
+    const puts = {};
+    for (const id of ids) { const o = this.objects.get(id); if (o) puts['obj:' + id] = o; }
+    const wrote = Object.keys(puts).length;
+    if (wrote) await this.#putAll(puts);
+    for (const id of ids) this.dirty.delete(id);
+    this.#gridRebuild();             // in-memory self-heal against any missed grid hook / desync (zero storage cost)
+    this.lastCheckpoint = now;
+    await this.state.storage.put('meta:checkpoint', now);
+    return wrote;
   }
 
   // ---- stone stacking --------------------------------------------------------
