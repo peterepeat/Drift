@@ -12,6 +12,7 @@
 // transform (dpr only) before calling.
 // =============================================================================
 import * as PG from './drift-procgen.js';
+import { FLOW_SEED, FLOW_SCALE, FLOW_REACH } from './flow.js'; // shared with the server flow field
 
 const PALETTE = PG.PALETTE;
 const SEASONS = PG.SEASONS;
@@ -90,6 +91,40 @@ export function paintWaterWorld(ctx, pool, t) {
   ctx.strokeStyle = PG.rgba('#cfe0ea', 0.04 + 0.05 * b);
   ctx.lineWidth = 2;
   ctx.beginPath(); ctx.ellipse(x, y, r * (0.5 + 0.28 * b), r * 0.7 * (0.5 + 0.28 * b), 0, 0, Math.PI * 2); ctx.stroke();
+  ctx.restore();
+}
+
+// ---- water flow traces ------------------------------------------------------
+// Faint streaks that reveal the flow PATH the server drifts objects along. The
+// FLOW_SEED + FLOW_SCALE + FLOW_REACH come from the shared flow.js the server
+// also reads, so the visible sheen and the actual drift agree and cover the same
+// band. Geometry is fixed; brightness crests travel downstream so it reads as
+// slow-moving water without particles.
+let _flowNoise = null, _flowPts = null;
+export function paintFlow(ctx, pool, t) {
+  if (!pool) return;
+  if (!_flowNoise) _flowNoise = PG.makeNoise(FLOW_SEED);
+  if (!_flowPts) { // a deterministic scatter of sample points across the whole drift band
+    const r = PG.rng(FLOW_SEED); _flowPts = [];
+    for (let i = 0; i < 80; i++) {
+      const a = r() * Math.PI * 2, rr = Math.sqrt(r()) * pool.r * FLOW_REACH;
+      _flowPts.push({ x: pool.x + Math.cos(a) * rr, y: pool.y + Math.sin(a) * rr * 0.72, ph: r() * Math.PI * 2 });
+    }
+  }
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  for (const p of _flowPts) {
+    const ang = _flowNoise(p.x * FLOW_SCALE, p.y * FLOW_SCALE) * Math.PI;
+    const along = p.x * Math.cos(ang) + p.y * Math.sin(ang); // project onto flow -> crests travel downstream
+    const b = 0.5 + 0.5 * Math.sin(t * 0.5 - along * 0.02 + p.ph);
+    const len = 16;
+    ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(ang);
+    const g = ctx.createLinearGradient(-len, 0, len, 0);
+    g.addColorStop(0, PG.rgba(PALETTE.waterCore, 0));
+    g.addColorStop(0.5, PG.rgba(PALETTE.waterCore, 0.06 * b));
+    g.addColorStop(1, PG.rgba(PALETTE.waterCore, 0));
+    ctx.fillStyle = g; ctx.fillRect(-len, -0.7, len * 2, 1.4); ctx.restore();
+  }
   ctx.restore();
 }
 

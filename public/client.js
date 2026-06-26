@@ -4,7 +4,7 @@
 // no visual data is ever stored or transmitted.
 // =============================================================================
 import * as PG from './drift-procgen.js';
-import { paintGround, paintGlows, paintNoise, paintPresence, paintSeasonGrade, seasonGround, seasonSat, paintWaterWorld } from './render.js';
+import { paintGround, paintGlows, paintNoise, paintPresence, paintSeasonGrade, seasonGround, seasonSat, paintWaterWorld, paintFlow } from './render.js';
 
 // ---- tuning constants -------------------------------------------------------
 const Z0 = 1.0, ZMIN = 0.2, ZMAX = 4.0;     // zoom = CSS px per world unit
@@ -18,6 +18,7 @@ const SPROUT_C = 0.14;                        // maturity below this renders as 
 const ANOM_DISSOLVE_MS = 10000, ANOM_FADE_MS = 3000; // hold an anomaly 10s and it fades from your hands
 const STACK_STEP_C = 12, STACK_TALL_C = 4;   // stone-stack rise/level + tall-stack-tap-to-scatter (mirror server)
 const GRIT_MS = 500;                          // a worn-out stone's grit scatter lifetime (spec §4.3)
+const POS_EASE_MAX = 24;                       // a position change up to this (a drift hop) eases; larger snaps
 
 // Spec easing curves (Visual Bible §06).
 const EASE_RISE = cubicBezier(0.22, 1, 0.36, 1);     // pickup / place lift
@@ -196,6 +197,21 @@ function updateGrowth(now) {
     o._agedShown += ((o.aged || 0) - o._agedShown) * k;
   }
 }
+// Ease each object's rendered position toward its target so a water-drift hop
+// (a small server position update) creeps instead of popping. Snap updates set
+// _tx==x so this is a no-op for them; the locally-carried object is excluded.
+let _lastPosFrame = 0;
+function updatePositions(now) {
+  const dt = _lastPosFrame ? (now - _lastPosFrame) / 1000 : 0;
+  _lastPosFrame = now;
+  const k = dt > 0 ? 1 - Math.pow(0.0002, dt) : 0; // ~reaches target in ~1s
+  for (const o of objects.values()) {
+    if (o._tx == null) { o._tx = o.x; o._ty = o.y; continue; }
+    if (o.id === heldId) { o._tx = o.x; o._ty = o.y; continue; } // locally carried — follows the finger
+    o.x += (o._tx - o.x) * k;
+    o.y += (o._ty - o.y) * k;
+  }
+}
 // Holding an anomaly for 10s dissolves it (it fades from your hands — never explained).
 function updateDissolve(now) {
   if (!heldId) return;
@@ -291,7 +307,7 @@ function handleTap(cx, cy) {
   if (heldId) { // place
     const w = screenToWorld(cx, cy);
     const o = objects.get(heldId);
-    if (o) { o.x = w.x; o.y = w.y; o.held = false; }
+    if (o) { o.x = w.x; o.y = w.y; o._tx = w.x; o._ty = w.y; o.held = false; }
     send({ t: 'place', id: heldId, token, x: w.x, y: w.y, ts: Date.now() });
     setLift(heldId, 0, SETTLE_MS, EASE_SETTLE);
     heldId = null; carry = null; preGrab = null;
@@ -372,7 +388,7 @@ function onMessage(raw) {
     case 'world_state': {
       myPid = m.pid;
       objects.clear(); lifts.clear();
-      for (const o of m.objects) objects.set(o.id, { ...o, held: !!o.held, _matShown: o.maturity || 0, _agedShown: o.aged || 0 });
+      for (const o of m.objects) objects.set(o.id, { ...o, held: !!o.held, _matShown: o.maturity || 0, _agedShown: o.aged || 0, _tx: o.x, _ty: o.y });
       if (m.season != null) seasonPhase = m.season;
       if (m.pool) pool = m.pool;
       if (m.cog) startArrive(m.cog.x, m.cog.y);
@@ -382,7 +398,15 @@ function onMessage(raw) {
       const o = objects.get(m.id);
       if (!o) break; // unknown (already dissolved) — ignore
       const wasHeld = o.held;
-      o.x = m.x; o.y = m.y; o.handling = m.handling; o.held = !!m.held;
+      // A small move on a free object is water-drift — ease it (no pop), like growth.
+      // Larger jumps (place, scatter, topple, initial) snap. Held objects always snap.
+      const dx = m.x - o.x, dy = m.y - o.y;
+      if (!m.held && m.id !== heldId && dx * dx + dy * dy <= POS_EASE_MAX * POS_EASE_MAX) {
+        o._tx = m.x; o._ty = m.y; // leave o.x/o.y to glide toward the target
+      } else {
+        o.x = m.x; o.y = m.y; o._tx = m.x; o._ty = m.y;
+      }
+      o.handling = m.handling; o.held = !!m.held;
       if (m.maturity != null) o.maturity = m.maturity;
       if (m.aged != null) o.aged = m.aged;
       if (m.stack != null) o.stack = m.stack;
@@ -399,7 +423,7 @@ function onMessage(raw) {
     }
     case 'object_new': { // a shed seed (or other runtime-spawned object)
       const o = m.o;
-      objects.set(o.id, { ...o, held: !!o.held, _matShown: o.maturity || 0, _agedShown: o.aged || 0 });
+      objects.set(o.id, { ...o, held: !!o.held, _matShown: o.maturity || 0, _agedShown: o.aged || 0, _tx: o.x, _ty: o.y });
       break;
     }
     case 'object_gone': {
@@ -416,7 +440,7 @@ function onMessage(raw) {
         const o = objects.get(m.id);
         // held=false so the server's corrective object_state (held:true, from the
         // real holder) re-lifts it; leaving it true would suppress that re-lift.
-        if (o && preGrab) { o.x = preGrab.x; o.y = preGrab.y; o.held = false; }
+        if (o && preGrab) { o.x = preGrab.x; o.y = preGrab.y; o._tx = preGrab.x; o._ty = preGrab.y; o.held = false; }
         setLift(m.id, 0, SETTLE_MS, EASE_SETTLE);
         heldId = null; carry = null; preGrab = null;
       }
@@ -450,6 +474,7 @@ function frame(now) {
   animT = now / 1000;
   updateLifts(now);
   updateGrowth(now);
+  updatePositions(now);
   updateDissolve(now);
   updateArrive(now);
 
@@ -465,6 +490,7 @@ function frame(now) {
   ctx.setTransform(dpr * camera.z, 0, 0, dpr * camera.z,
     dpr * (vw / 2 - camera.x * camera.z), dpr * (vh / 2 - camera.y * camera.z));
   paintWaterWorld(ctx, pool, animT); // wet sheen beneath the objects
+  paintFlow(ctx, pool, animT);       // faint moving streaks tracing the flow path
   const list = [];
   for (const o of objects.values()) if (!isLifted(o.id)) list.push(o);
   // painter's depth by ground line, then bottom-up within a stack so the top stone occludes

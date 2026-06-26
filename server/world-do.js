@@ -18,7 +18,8 @@
 // for hold ownership; broadcasts carry an ephemeral per-connection `pid` and a
 // boolean `held` — never the token.
 // =============================================================================
-import { generateWorld, makeSeedRecord, makeAnomalyRecord, ANOMALY_KINDS, makeCrystalRecord, rng } from './seed.js';
+import { generateWorld, makeSeedRecord, makeAnomalyRecord, ANOMALY_KINDS, makeCrystalRecord, rng, makeNoise } from './seed.js';
+import { FLOW_SEED, FLOW_SCALE, FLOW_REACH } from '../public/flow.js'; // shared with the client visual
 
 const TICK_MS = 60000;
 const HOLD_TIMEOUT_MS = 45000;            // reclaim a hold if its connection vanished
@@ -79,6 +80,21 @@ const TOPPLE_CHANCE = 0.12;               // per-tick topple chance, scaled by h
 // Stone footprint in world units — MUST match the client's stoneSize(seed).
 function stoneRadius(seed) { return 12 + rng(seed >>> 0)() * 34; }
 
+// ---- water: flow, drift & stone-channelling (Family 3, Phase 3) -------------
+// A slow persistent flow moves across the world. Its direction at a point is a
+// deterministic noise field (the SAME makeNoise + scale the client paints the
+// water sheen from, so what you see and how things drift agree) bent tangentially
+// around nearby stones — that deflection IS channelling (PRD §4.2, never told).
+// Free objects sitting in the flow drift very slowly along it. Season gates the
+// magnitude: Resting is near-frozen, Rising active, Turning disperses.
+// FLOW_SEED / FLOW_SCALE / FLOW_REACH are shared with the client via public/flow.js.
+const FLOW_SPEED = 1.6;                   // world units/tick at full strength — "very slowly"
+const FLOW_STONE_R = 70;                  // a stone deflects flow within this radius
+const FLOW_STONE_PUSH = 1.0;              // tangential deflection strength (channelling)
+const FLOW_STONE_RADIAL = 0.35;           // small radial-away term so flow never runs into a stone
+const FLOW_SEASON = { growing: 0.4, turning: 0.85, resting: 0.05, rising: 1.0 }; // magnitude by season
+const POS_BCAST_DELTA = 6;                // broadcast a drifting object only once it has crept this far
+
 function seasonBlend(phase) {
   const i = Math.floor(phase) % 4, frac = phase - Math.floor(phase);
   let f = frac < 0.7 ? 0 : (frac - 0.7) / 0.3;
@@ -95,6 +111,8 @@ export class WorldRoom {
     this.lastSeen = new Map();     // pid -> ts (presence liveness)
     this.presencePos = new Map();  // pid -> { x, y, ts } (drives warmth)
     this.bcastMark = new Map();    // id -> { maturity, aged } last broadcast (chatter control)
+    this.driftMark = new Map();    // id -> { x, y } last-broadcast position (water-drift chatter control)
+    this.flowNoise = null;         // lazily-built makeNoise(FLOW_SEED); shared with the client visual
     this.season = 0;               // monotonic season phase (floor % 4 = current season)
     this.state.blockConcurrencyWhile(async () => { await this.#load(); });
   }
@@ -209,6 +227,30 @@ export class WorldRoom {
       return Response.json({ ok: true, crystal: { id: cr.id, x: cr.x, y: cr.y } });
     }
 
+    // Ops/testing only: read the water flow vector at (?x=&y=). Gated.
+    if (url.pathname === '/admin/flow') {
+      if (!this.#adminOk(request)) return Response.json({ ok: false, error: 'forbidden' }, { status: 403 });
+      const x = parseFloat(url.searchParams.get('x') || '0'), y = parseFloat(url.searchParams.get('y') || '0');
+      const f = this.#flowAt(x, y, seasonBlend(this.season));
+      return Response.json({ ok: true, x, y, vx: f.vx, vy: f.vy, season: this.season });
+    }
+
+    // Ops/testing only: force an object's position (bypasses hold). Gated.
+    if (url.pathname === '/admin/place') {
+      if (!this.#adminOk(request)) return Response.json({ ok: false, error: 'forbidden' }, { status: 403 });
+      const o = this.objects.get(url.searchParams.get('id') || '');
+      if (!o) return Response.json({ ok: false, error: 'no such object' }, { status: 404 });
+      const x = parseFloat(url.searchParams.get('x')), y = parseFloat(url.searchParams.get('y'));
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return Response.json({ ok: false, error: 'bad coords' }, { status: 400 });
+      const now = Date.now();
+      if (o.family === 'stone') await this.#detachFromStack(o, now); // relocating a stacked stone leaves the stack
+      o.x = x; o.y = y; o.stack = 0; o.stackBase = '';
+      this.driftMark.delete(o.id);
+      await this.#persist(o);
+      this.#bcast(this.#stateMsg(o, now), null);
+      return Response.json({ ok: true, id: o.id, x: o.x, y: o.y });
+    }
+
     return new Response('not found', { status: 404 });
   }
 
@@ -291,7 +333,7 @@ export class WorldRoom {
       if (o.family === 'stone') {
         // Worn to grit by too much handling — a brief scatter, then gone (§4.3).
         if (o.handling >= GRIT_HANDLING) {
-          this.objects.delete(o.id); this.bcastMark.delete(o.id);
+          this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id);
           await this.state.storage.delete('obj:' + o.id);
           this.#bcast({ t: 'object_gone', id: o.id, grit: true }, null);
           return;
@@ -306,7 +348,7 @@ export class WorldRoom {
       // Only the current holder can dissolve an anomaly (the deliberate 10s hold).
       const o = this.objects.get(m.id);
       if (!o || o.family !== 'anomaly' || o.held !== m.token) return;
-      this.objects.delete(o.id); this.bcastMark.delete(o.id);
+      this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id);
       await this.state.storage.delete('obj:' + o.id);
       this.#bcast({ t: 'object_gone', id: o.id }, null);
 
@@ -417,6 +459,31 @@ export class WorldRoom {
       }
     }
 
+    // Water drift: eligible free objects near the pool creep along the flow.
+    // Movement is sub-pixel/tick; we persist it via the survivor snapshot but
+    // BROADCAST only once an object has crept POS_BCAST_DELTA — otherwise a
+    // pool full of drifters would spam object_state every tick to every client.
+    const stones = this.#stones();
+    for (const o of this.objects.values()) {
+      if (gone.includes(o) || !this.#driftEligible(o) ||
+          Math.hypot(o.x - POOL.x, o.y - POOL.y) > POOL.r * FLOW_REACH) {
+        // If it drifted some un-broadcast distance before becoming ineligible,
+        // flush a final state so clients don't stay stuck up to POS_BCAST_DELTA behind.
+        const m0 = this.driftMark.get(o.id);
+        if (m0 && (o.x !== m0.x || o.y !== m0.y) && !gone.includes(o) && !changed.includes(o)) changed.push(o);
+        this.driftMark.delete(o.id);
+        continue;
+      }
+      const f = this.#flowAt(o.x, o.y, sb, stones);
+      o.x += f.vx * FLOW_SPEED; o.y += f.vy * FLOW_SPEED;
+      const mark = this.driftMark.get(o.id);
+      if (!mark) { this.driftMark.set(o.id, { x: o.x, y: o.y }); continue; }
+      if (Math.hypot(o.x - mark.x, o.y - mark.y) >= POS_BCAST_DELTA) {
+        this.driftMark.set(o.id, { x: o.x, y: o.y });
+        if (!changed.includes(o)) changed.push(o);
+      }
+    }
+
     // Prune stale presence so the warmth map can't grow unbounded from
     // connections that never closed cleanly.
     for (const [pid, p] of this.presencePos) {
@@ -442,7 +509,7 @@ export class WorldRoom {
     for (const o of changed) { await this.#persist(o); this.#bcast(this.#stateMsg(o, now), null); }
     for (const o of spawned) { this.objects.set(o.id, o); await this.#persist(o); this.#bcast({ t: 'object_new', o: this.#pub(o) }, null); }
     for (const o of gone) {
-      this.objects.delete(o.id); this.bcastMark.delete(o.id);
+      this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id);
       await this.state.storage.delete('obj:' + o.id);
       this.#bcast({ t: 'object_gone', id: o.id }, null);
     }
@@ -531,6 +598,46 @@ export class WorldRoom {
     s.stack = 0; s.stackBase = '';
     await this.#persist(s);
     this.#bcast(this.#stateMsg(s, now), null);
+  }
+
+  // ---- water flow ------------------------------------------------------------
+  // Flow vector at world (x,y) for the current season blend `sb`. Base direction
+  // is the shared noise field (same makeNoise + FLOW_SCALE the client paints from).
+  // Nearby stones bend the flow TANGENTIALLY around themselves — it curves past
+  // them rather than running in, and that deflection IS channelling. The push is
+  // mostly tangential (so a head-on flow is steered aside, never reversed) with a
+  // small radial-away term to keep flow out of the stone. `stones` is passed in so
+  // the tick doesn't re-scan the whole object map per drifter.
+  #flowAt(x, y, sb, stones) {
+    if (!this.flowNoise) this.flowNoise = makeNoise(FLOW_SEED);
+    const a = this.flowNoise(x * FLOW_SCALE, y * FLOW_SCALE) * Math.PI;
+    let vx = Math.cos(a), vy = Math.sin(a);
+    for (const s of (stones || this.#stones())) {
+      const dx = x - s.x, dy = y - s.y, d = Math.hypot(dx, dy);
+      if (d > 0.001 && d < FLOW_STONE_R) {
+        const f = 1 - d / FLOW_STONE_R, rx = dx / d, ry = dy / d;
+        // tangent perpendicular to the radial, oriented to agree with the base flow
+        let tx = -ry, ty = rx;
+        if (tx * vx + ty * vy < 0) { tx = -tx; ty = -ty; }
+        vx += (tx * FLOW_STONE_PUSH + rx * FLOW_STONE_RADIAL) * f;
+        vy += (ty * FLOW_STONE_PUSH + ry * FLOW_STONE_RADIAL) * f;
+      }
+    }
+    const m = Math.hypot(vx, vy) || 1;
+    const mag = lerp(FLOW_SEASON[sb.cur], FLOW_SEASON[sb.next], sb.fade);
+    return { vx: (vx / m) * mag, vy: (vy / m) * mag };
+  }
+
+  #stones() { const out = []; for (const o of this.objects.values()) if (o.family === 'stone') out.push(o); return out; }
+
+  // What drifts on the water: free, unheld, unstacked things that aren't stones
+  // (the channel walls) or anomalies, and aren't pre-sprout seeds (those must be
+  // left undisturbed to take root). So mature plants and crystals creep along.
+  #driftEligible(o) {
+    if (o.held !== '' || o.stack > 0) return false;
+    if (o.family === 'stone' || o.family === 'anomaly') return false;
+    if (o.family === 'seed' && o.maturity < SPROUT) return false;
+    return true;
   }
 
   #shed(parent, now) {

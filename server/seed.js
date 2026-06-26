@@ -4,8 +4,9 @@
 // script. Pure: no DOM, no platform APIs. Uses only rng() from the lifted
 // procgen module so a given WORLD_SEED always rebuilds the identical world.
 // =============================================================================
-import { rng } from '../public/drift-procgen.js';
-export { rng }; // re-exported so the DO can size stones identically (stack footprint)
+import { rng, makeNoise } from '../public/drift-procgen.js';
+export { rng, makeNoise }; // re-exported so the DO shares the client's EXACT primitives
+// (rng -> identical stone footprints; makeNoise -> identical water flow field)
 
 const WORLD_SEED = 0x44524946;   // 'DRIF'
 const N = 200, N_SEED = 130;     // ~65% seeds / ~35% stones
