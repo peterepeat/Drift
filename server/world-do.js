@@ -115,6 +115,17 @@ const FLOW_SEASON = { growing: 0.4, turning: 0.85, resting: 0.05, rising: 1.0 };
 const POS_BCAST_DELTA = 6;                // broadcast a drifting object only once it has crept this far
 const FLOW_HEAT = 0.6;                     // how strongly the heat gradient bends flow toward cooler areas
 
+// ---- interest management (PRD §7.3 — toward a 10k-object world) -------------
+// A connecting client sends its viewport half-extents (hw/hh, world units) so the
+// initial world_state carries only the objects it can actually see (centred on the
+// world's centre-of-gravity, where the camera arrives), not the whole world. As it
+// pans, presence_move re-reports the viewport and the server streams in any in-view
+// objects the client lacks (`world_patch`). PURELY in-memory: no storage writes, no
+// new alarms — this never touches the DO rows_written budget. Falls back to the full
+// payload when a client sends no viewport (old clients / tests stay correct).
+const INTEREST_MARGIN = 1.6;              // send a ring this many viewport half-extents beyond the screen
+const PATCH_MAX = 400;                     // cap objects streamed per viewport update (rest follow next tick)
+
 // ---- thermal field & stone formation (PRD §4.1) ----------------------------
 // Every area carries a slow, invisible heat value (0..1) that rises where people
 // linger and decays over time (season-modulated: Growing lets heat linger,
@@ -148,6 +159,8 @@ export class WorldRoom {
     this.presencePos = new Map();  // pid -> { x, y, ts } (drives warmth)
     this.bcastMark = new Map();    // id -> { maturity, aged } last broadcast (chatter control)
     this.driftMark = new Map();    // id -> { x, y } last-broadcast position (water-drift chatter control)
+    this.viewports = new Map();    // pid -> { cx, cy, hw, hh } last-reported interest box (in-memory only)
+    this.known = new Map();        // pid -> Set(id) objects already sent to this connection (interest streaming)
     this.flowNoise = null;         // lazily-built makeNoise(FLOW_SEED); shared with the client visual
     this.heat = null;              // coarse thermal field { w, data[], form[] } (lazy; PRD §4.1)
     this.heatActive = false;       // any heat/formation this tick (skip persisting an inert field)
@@ -223,7 +236,19 @@ export class WorldRoom {
       const pid = crypto.randomUUID();          // ephemeral; not tied to the token
       this.state.acceptWebSocket(server);
       server.serializeAttachment({ pid });
-      this.#send(server, this.#worldState(pid));
+      // Interest-managed initial payload: if the client tells us its viewport size,
+      // send only what it can see (centred on the cog, where its camera arrives).
+      const hw = parseFloat(url.searchParams.get('hw'));
+      const hh = parseFloat(url.searchParams.get('hh'));
+      const box = (hw > 0 && hh > 0) ? this.#boxFrom(this.cog.x, this.cog.y, hw, hh) : null;
+      const state = this.#worldState(pid, box);
+      this.#send(server, state);
+      if (box) {
+        this.viewports.set(pid, { cx: this.cog.x, cy: this.cog.y, hw, hh });
+        this.known.set(pid, new Set(state.objects.map((o) => o.id)));
+      } else {
+        this.known.set(pid, new Set(this.objects.keys())); // got the whole world
+      }
       return new Response(null, { status: 101, webSocket: client });
     }
 
@@ -234,7 +259,13 @@ export class WorldRoom {
       let n = before;
       if (force) n = await this.#seed(true);
       else if (before === 0) n = await this.#seed(false);
-      if (force) for (const ws of this.state.getWebSockets()) this.#send(ws, this.#worldState(ws.deserializeAttachment()?.pid));
+      if (force) for (const ws of this.state.getWebSockets()) {
+        const wpid = ws.deserializeAttachment()?.pid;
+        const v = this.viewports.get(wpid);
+        const state = this.#worldState(wpid, v ? this.#boxFrom(v.cx, v.cy, v.hw, v.hh) : null);
+        this.known.set(wpid, new Set(state.objects.map((o) => o.id))); // reset known to the fresh world
+        this.#send(ws, state);
+      }
       return Response.json({ ok: true, seeded: n, was: before, forced: force });
     }
 
@@ -363,10 +394,30 @@ export class WorldRoom {
       stack: o.stack || 0, stackBase: o.stackBase || '', ts: now,
     };
   }
-  #worldState(pid) {
+  #worldState(pid, box) {
     const objects = [];
-    for (const o of this.objects.values()) objects.push(this.#pub(o));
+    for (const o of this.objects.values()) { if (box && !this.#inBox(o, box)) continue; objects.push(this.#pub(o)); }
     return { t: 'world_state', now: Date.now(), pid, season: this.season, pool: POOL, cog: { x: this.cog.x, y: this.cog.y }, objects };
+  }
+  // Interest box from a viewport centre + half-extents, widened by INTEREST_MARGIN.
+  #boxFrom(cx, cy, hw, hh) {
+    const mw = hw * INTEREST_MARGIN, mh = hh * INTEREST_MARGIN;
+    return { minX: cx - mw, maxX: cx + mw, minY: cy - mh, maxY: cy + mh };
+  }
+  #inBox(o, b) { return o.x >= b.minX && o.x <= b.maxX && o.y >= b.minY && o.y <= b.maxY; }
+  // Stream any in-view objects this connection hasn't been sent yet (interest paging).
+  // Reads in-memory state only; never writes storage.
+  #streamInterest(ws, pid, box) {
+    let known = this.known.get(pid);
+    if (!known) { known = new Set(); this.known.set(pid, known); }
+    const objects = [];
+    for (const o of this.objects.values()) {
+      if (known.has(o.id) || !this.#inBox(o, box)) continue;
+      objects.push(this.#pub(o));
+      known.add(o.id);
+      if (objects.length >= PATCH_MAX) break; // rest follow on the next viewport report
+    }
+    if (objects.length) this.#send(ws, { t: 'world_patch', objects });
   }
 
   #send(ws, obj) { try { ws.send(JSON.stringify(obj)); } catch {} }
@@ -449,6 +500,11 @@ export class WorldRoom {
       this.lastSeen.set(pid, now);
       this.presencePos.set(pid, { x: m.x, y: m.y, ts: now });
       this.#bcast({ t: 'presence', pid, x: m.x, y: m.y, ts: now }, ws);
+      // The same heartbeat carries the viewport: page in any objects now in view.
+      if (m.hw > 0 && m.hh > 0) {
+        this.viewports.set(pid, { cx: m.x, cy: m.y, hw: m.hw, hh: m.hh });
+        this.#streamInterest(ws, pid, this.#boxFrom(m.x, m.y, m.hw, m.hh));
+      }
     }
   }
 
@@ -460,6 +516,8 @@ export class WorldRoom {
     if (!pid) return;
     this.lastSeen.delete(pid);
     this.presencePos.delete(pid);
+    this.viewports.delete(pid);
+    this.known.delete(pid);
     const now = Date.now();
     for (const o of this.objects.values()) {
       if (o.heldConn === pid) {

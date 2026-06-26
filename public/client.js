@@ -399,7 +399,14 @@ if (localStorage.getItem('drift_sound') === '1') {
 }
 document.addEventListener('visibilitychange', () => { document.hidden ? Audio.onHidden() : Audio.onVisible(); });
 
-function wsUrl() { return (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws'; }
+// Half-extents of the current viewport in world units — what the server needs to
+// know which objects we can see (interest management). dpr is already folded out.
+function viewHalf() { return { hw: (vw / 2) / camera.z, hh: (vh / 2) / camera.z }; }
+function wsUrl() {
+  const h = viewHalf();
+  const q = `?hw=${Math.round(h.hw)}&hh=${Math.round(h.hh)}`;
+  return (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws' + q;
+}
 function connect() {
   ws = new WebSocket(wsUrl());
   ws.addEventListener('open', () => { wsReady = true; attempts = 0; setDot(true); });
@@ -465,6 +472,13 @@ function onMessage(raw) {
       objects.set(o.id, { ...o, held: !!o.held, _matShown: o.maturity || 0, _agedShown: o.aged || 0, _tx: o.x, _ty: o.y });
       break;
     }
+    case 'world_patch': { // interest streaming: objects paging into view as we pan
+      for (const o of m.objects) {
+        if (objects.has(o.id)) continue; // already known — leave its animation state alone
+        objects.set(o.id, { ...o, held: !!o.held, _matShown: o.maturity || 0, _agedShown: o.aged || 0, _tx: o.x, _ty: o.y });
+      }
+      break;
+    }
     case 'object_gone': {
       const og = objects.get(m.id);
       if (og && og.family === 'crystal') flashes.push({ x: og.x, y: og.y, start: performance.now() }); // brief flash
@@ -504,7 +518,8 @@ function onMessage(raw) {
 setInterval(() => {
   if (!wsReady) return;
   const c = screenToWorld(vw / 2, vh / 2);
-  send({ t: 'presence_move', x: c.x, y: c.y, ts: Date.now() });
+  const h = viewHalf();
+  send({ t: 'presence_move', x: c.x, y: c.y, hw: h.hw, hh: h.hh, ts: Date.now() });
 }, PRESENCE_SEND_MS);
 
 // ---- render loop ------------------------------------------------------------
