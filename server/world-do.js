@@ -237,6 +237,9 @@ export class WorldRoom {
       this.state.acceptWebSocket(server);
       server.serializeAttachment({ pid });
       this.#send(server, this.#worldState(pid));
+      // Make sure the world is ticking: if a previous arm failed (e.g. writes were
+      // quota-blocked), this re-arms it now so a visit wakes the world back up.
+      if ((await this.state.storage.getAlarm()) == null) await this.#arm(Date.now() + TICK_MS);
       return new Response(null, { status: 101, webSocket: client });
     }
 
