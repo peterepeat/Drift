@@ -268,7 +268,7 @@ function updateDissolve(now) {
   if (ho && ho.family === 'anomaly' && (now - heldSince) >= ANOM_DISSOLVE_MS) {
     send({ t: 'dissolve', id: heldId, token, ts: Date.now() });
     objects.delete(heldId); lifts.delete(heldId);
-    heldId = null; carry = null; preGrab = null;
+    clearHold();
   }
 }
 
@@ -309,32 +309,79 @@ function updateHover(cx, cy) { // desktop: attend whatever the mouse rests on
   attendId = o ? o.id : null;
 }
 
-// ---- pointer input (Pointer Events only) ------------------------------------
+// ---- pointer input (Pointer Events only) — direct manipulation --------------
+// A pointerdown on a free object becomes a CARRY as soon as it moves (drag to
+// move); a press-release without moving is a "follow" pickup that tracks the
+// cursor until you tap to place. Dragging the empty background pans; two pointers
+// pinch-zoom; hover (mouse) / long-press (touch) on an object attends it (§5.2).
 const pointers = new Map(); // id -> { x, y, sx, sy, maxMove }
 let pinch = null, multiTouched = false;
 let lastMouse = { x: 0, y: 0 };  // last mouse screen position (anchors desktop gesture-zoom)
+let grab = null;                 // pending press on an object: { id, ox, oy } (object-centre − pointer, world units)
+let holdMode = null;             // null | 'drag' (carried by a pressed pointer) | 'follow' (tap-picked, tracks the cursor)
+let holdOff = { x: 0, y: 0 };    // world-unit offset object-centre − pointer, so a grab doesn't snap to centre
+
+function beginHold(o, mode, off) {
+  preGrab = { x: o.x, y: o.y };
+  heldId = o.id; holdMode = mode; holdOff = off || { x: 0, y: 0 };
+  heldSince = performance.now();
+  carry = { x: o.x, y: o.y };
+  o.held = true;                                  // optimistic; the server confirms via pickup_ack
+  setLift(o.id, 1, LIFT_MS, EASE_RISE);
+  send({ t: 'pickup', id: o.id, token, ts: Date.now() });
+}
+function carryTo(cx, cy) {                         // keep the grab point under the pointer
+  if (!heldId) return;
+  const w = screenToWorld(cx, cy);
+  carry = { x: w.x + holdOff.x, y: w.y + holdOff.y };
+  const o = objects.get(heldId); if (o) { o.x = carry.x; o.y = carry.y; }
+  maybeSendCarry();
+}
+function placeHold() {                             // settle the held object where it is
+  if (!heldId) return;
+  const o = objects.get(heldId);
+  if (o) { o.x = carry.x; o.y = carry.y; o._tx = carry.x; o._ty = carry.y; o.held = false; }
+  send({ t: 'place', id: heldId, token, x: carry.x, y: carry.y, ts: Date.now() });
+  setLift(heldId, 0, SETTLE_MS, EASE_SETTLE);
+  clearHold();
+}
+function clearHold() { heldId = null; holdMode = null; carry = null; preGrab = null; grab = null; }
 
 canvas.addEventListener('pointerdown', (e) => {
   canvas.setPointerCapture(e.pointerId);
   pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, maxMove: 0 });
   attendId = null; clearLongPress(); lpFired = false;   // any press interrupts a hover/long-press
-  if (pointers.size >= 2) {
-    multiTouched = true;
+  if (pointers.size >= 2) {                              // second finger → pinch; abandon a pending grab
+    multiTouched = true; grab = null;
     const [a, b] = [...pointers.values()];
     pinch = { d0: Math.hypot(a.x - b.x, a.y - b.y), z0: camera.z };
-  } else if (!heldId && e.pointerType !== 'mouse') {
-    // arm a long-press: dwell stationary on an object → attend it (touch/pen §5.2).
-    // NOT for the mouse — desktop attend is hover (updateHover); arming it here would
-    // make a held ≥ATTEND_MS click fire the long-press and suppress its pickup tap.
-    const hit = hitTest(screenToWorld(e.clientX, e.clientY));
-    if (hit) lpTimer = setTimeout(() => { attendId = hit.id; lpFired = true; lpTimer = null; }, ATTEND_MS);
+    return;
   }
+  const w = screenToWorld(e.clientX, e.clientY);
+  if (heldId) {                                          // pressing while holding: a tap places, a drag re-carries
+    const o = objects.get(heldId);
+    grab = { id: heldId, ox: (o ? o.x : w.x) - w.x, oy: (o ? o.y : w.y) - w.y };
+    return;
+  }
+  const hit = hitTest(w);
+  if (hit) {
+    grab = { id: hit.id, ox: hit.x - w.x, oy: hit.y - w.y };
+    // touch/pen: dwell still on it → attend (§5.2), don't grab. The mouse uses hover-attend.
+    if (e.pointerType !== 'mouse') lpTimer = setTimeout(() => { attendId = hit.id; lpFired = true; lpTimer = null; grab = null; }, ATTEND_MS);
+  }
+  // else: empty background → a pan candidate (handled in pointermove once it moves)
 });
 
 canvas.addEventListener('pointermove', (e) => {
   if (e.pointerType === 'mouse') { lastMouse.x = e.clientX; lastMouse.y = e.clientY; }
   const p = pointers.get(e.pointerId);
-  if (!p) { if (e.pointerType === 'mouse') updateHover(e.clientX, e.clientY); return; }
+  if (!p) {                                       // no pressed pointer for this id
+    if (e.pointerType === 'mouse') {
+      if (heldId && holdMode === 'follow') carryTo(e.clientX, e.clientY); // a follow-held object tracks the cursor
+      else updateHover(e.clientX, e.clientY);                              // else attend on hover
+    }
+    return;
+  }
   const dx = e.clientX - p.x, dy = e.clientY - p.y;
   p.x = e.clientX; p.y = e.clientY;
   p.maxMove = Math.max(p.maxMove, Math.hypot(e.clientX - p.sx, e.clientY - p.sy));
@@ -349,14 +396,23 @@ canvas.addEventListener('pointermove', (e) => {
     const after = screenToWorld(mx, my);
     camera.x += before.x - after.x; camera.y += before.y - after.y;
     arrive = null;
-  } else if (pointers.size === 1) {
-    if (heldId) {
-      carry = screenToWorld(e.clientX, e.clientY);
-      const o = objects.get(heldId); if (o) { o.x = carry.x; o.y = carry.y; }
-      maybeSendCarry();
-    } else if (p.maxMove > SLOP) {
-      camera.x -= dx / camera.z; camera.y -= dy / camera.z; arrive = null;
+    return;
+  }
+  if (pointers.size !== 1) return;
+
+  if (holdMode === 'drag') {
+    carryTo(e.clientX, e.clientY);                       // actively carrying
+  } else if (grab && p.maxMove > SLOP) {                 // a press that has now moved → carry it
+    const o = objects.get(grab.id);
+    if (!o) { grab = null; }
+    else {
+      holdOff = { x: grab.ox, y: grab.oy };
+      if (heldId === o.id) holdMode = 'drag';            // a follow-held object grabbed again → drag it
+      else beginHold(o, 'drag', holdOff);                // fresh grab → pick up + carry
+      carryTo(e.clientX, e.clientY);
     }
+  } else if (!grab && !heldId && p.maxMove > SLOP) {     // empty background → pan
+    camera.x -= dx / camera.z; camera.y -= dy / camera.z; arrive = null;
   }
 });
 
@@ -367,11 +423,27 @@ function endPointer(e) {
   if (pointers.size < 2) pinch = null;
   clearLongPress();
   const wasLong = lpFired; lpFired = false;
+  const moved = p ? p.maxMove >= SLOP : false;
+
+  if (holdMode === 'drag') {
+    placeHold();                                          // released an active carry → place where it is
+  } else if (grab && !moved && !wasLong && !multiTouched) {
+    const o = objects.get(grab.id);
+    if (heldId === grab.id) {                             // tap while follow-holding → place at the tap
+      carry = screenToWorld(e.clientX, e.clientY);
+      placeHold();
+    } else if (o && o.family === 'stone' && stackHeight(o) >= STACK_TALL_C) {
+      send({ t: 'scatter', id: o.id, token, ts: Date.now() }); // tall stack → topple
+      grab = null;
+    } else if (o) {
+      beginHold(o, 'follow', { x: grab.ox, y: grab.oy });      // tap pickup → follows the cursor
+      grab = null;
+    } else grab = null;
+  } else if (holdMode !== 'follow') {
+    grab = null;                                          // background tap / aborted gesture (keep a follow-hold)
+  }
   if (e.pointerType !== 'mouse') attendId = null; // touch attend ends on release (a mouse keeps hovering)
-  // Tap = single stationary pointer, no multi-touch, and NOT a long-press attend.
-  const wasTap = p && p.maxMove < SLOP && pointers.size === 0 && !multiTouched && !wasLong;
   if (pointers.size === 0) multiTouched = false;
-  if (wasTap) handleTap(e.clientX, e.clientY);
 }
 canvas.addEventListener('pointerup', endPointer);
 canvas.addEventListener('pointercancel', (e) => {
@@ -379,6 +451,8 @@ canvas.addEventListener('pointercancel', (e) => {
   if (pointers.size < 2) pinch = null;
   if (pointers.size === 0) multiTouched = false;
   clearLongPress(); lpFired = false; attendId = null;
+  if (holdMode === 'drag') placeHold();           // don't leave a dragged object stuck held
+  else grab = null;                               // a 'follow' hold survives a cancel (no pressed pointer)
   try { canvas.releasePointerCapture(e.pointerId); } catch {}
 });
 
@@ -412,32 +486,6 @@ document.addEventListener('gesturechange', (e) => {
   camera.x += before.x - after.x; camera.y += before.y - after.y; arrive = null;
 }, { passive: false });
 document.addEventListener('gestureend', (e) => e.preventDefault(), { passive: false });
-
-function handleTap(cx, cy) {
-  if (heldId) { // place
-    const w = screenToWorld(cx, cy);
-    const o = objects.get(heldId);
-    if (o) { o.x = w.x; o.y = w.y; o._tx = w.x; o._ty = w.y; o.held = false; }
-    send({ t: 'place', id: heldId, token, x: w.x, y: w.y, ts: Date.now() });
-    setLift(heldId, 0, SETTLE_MS, EASE_SETTLE);
-    heldId = null; carry = null; preGrab = null;
-    return;
-  }
-  // pick up topmost: the top of a stack wins, else the frontmost (largest y)
-  const pick = hitTest(screenToWorld(cx, cy));
-  // Tapping a tall stack topples it instead of lifting a stone off the top.
-  if (pick && pick.family === 'stone' && stackHeight(pick) >= STACK_TALL_C) {
-    send({ t: 'scatter', id: pick.id, token, ts: Date.now() });
-    return;
-  }
-  if (pick) {
-    preGrab = { x: pick.x, y: pick.y };
-    heldId = pick.id; carry = { x: pick.x, y: pick.y }; heldSince = performance.now();
-    pick.held = true;                       // optimistic
-    setLift(pick.id, 1, LIFT_MS, EASE_RISE);
-    send({ t: 'pickup', id: pick.id, token, ts: Date.now() });
-  }
-}
 
 let lastCarry = 0;
 function maybeSendCarry() {
@@ -520,7 +568,7 @@ function send(o) { if (ws && wsReady) { try { ws.send(JSON.stringify(o)); } catc
 function onDisconnect() {
   // Our hold is lost; the server reclaims it and drops the object server-side.
   if (heldId) { const o = objects.get(heldId); if (o) o.held = false; setLift(heldId, 0, SETTLE_MS, EASE_SETTLE); }
-  heldId = null; carry = null; preGrab = null;
+  clearHold();
 }
 
 function onMessage(raw) {
@@ -582,7 +630,7 @@ function onMessage(raw) {
       else if (og && (og.family === 'stone' || m.grit)) // worn to grit — a brief scatter of dust
         grits.push({ x: og.x, y: og.y, seed: og.seed, r: objRadius(og), start: performance.now() });
       objects.delete(m.id); lifts.delete(m.id);
-      if (heldId === m.id) { heldId = null; carry = null; preGrab = null; }
+      if (heldId === m.id) clearHold();
       break;
     }
     case 'pickup_ack': {
@@ -592,7 +640,7 @@ function onMessage(raw) {
         // real holder) re-lifts it; leaving it true would suppress that re-lift.
         if (o && preGrab) { o.x = preGrab.x; o.y = preGrab.y; o._tx = preGrab.x; o._ty = preGrab.y; o.held = false; }
         setLift(m.id, 0, SETTLE_MS, EASE_SETTLE);
-        heldId = null; carry = null; preGrab = null;
+        clearHold();
       }
       break;
     }
