@@ -11,7 +11,8 @@ import { Audio } from './audio.js';
 // ---- tuning constants -------------------------------------------------------
 const Z0 = 1.0, ZMIN = 0.2, ZMAX = 4.0;     // zoom = CSS px per world unit
 const SLOP = 8;                              // px of movement that turns a tap into a pan
-const HIT_MIN = 24;                          // min tap radius in CSS px (accessibility)
+const HIT_MIN = 30;                          // min tap radius in CSS px (accessibility)
+const HIT_PAD = 6, HIT_GROW = 1.35;          // grab area exceeds the drawn form, so the tiniest things (leaves, seeds, crystals) are easy to lift
 const LIFT_MS = 300, SETTLE_MS = 260;        // pickup / place timings (spec)
 const CARRY_SEND_MS = 50;                    // throttle for streaming a carried object
 const PRESENCE_SEND_MS = 500;                // presence cadence (spec)
@@ -287,13 +288,17 @@ let attendId = null, attendT = 0;
 let lpTimer = null, lpFired = false;   // long-press arming (touch)
 function clearLongPress() { if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; } }
 // Topmost free object under world point w (shared by tap-to-pick and attend).
+function hitRadius(o) { return Math.max(objRadius(o) * HIT_GROW + HIT_PAD, HIT_MIN / camera.z); }
 function hitTest(w) {
   let pick = null, best = -Infinity;
   for (const o of objects.values()) {
     if (o.held) continue;
-    const r = Math.max(objRadius(o), HIT_MIN / camera.z);
-    if (Math.hypot(o.x - w.x, o.y - w.y) > r) continue;
-    const score = (o.stack || 0) * 1e6 + o.y;
+    const d = Math.hypot(o.x - w.x, o.y - w.y);
+    if (d > hitRadius(o)) continue;
+    // The top of a stack wins (lift a cairn from the top); otherwise the object
+    // whose centre is NEAREST the tap — so a small thing directly under the cursor
+    // beats a larger neighbour whose body merely overlaps the point.
+    const score = (o.stack || 0) * 1e6 - d;
     if (score > best) { best = score; pick = o; }
   }
   return pick;
@@ -307,6 +312,7 @@ function updateHover(cx, cy) { // desktop: attend whatever the mouse rests on
 // ---- pointer input (Pointer Events only) ------------------------------------
 const pointers = new Map(); // id -> { x, y, sx, sy, maxMove }
 let pinch = null, multiTouched = false;
+let lastMouse = { x: 0, y: 0 };  // last mouse screen position (anchors desktop gesture-zoom)
 
 canvas.addEventListener('pointerdown', (e) => {
   canvas.setPointerCapture(e.pointerId);
@@ -326,6 +332,7 @@ canvas.addEventListener('pointerdown', (e) => {
 });
 
 canvas.addEventListener('pointermove', (e) => {
+  if (e.pointerType === 'mouse') { lastMouse.x = e.clientX; lastMouse.y = e.clientY; }
   const p = pointers.get(e.pointerId);
   if (!p) { if (e.pointerType === 'mouse') updateHover(e.clientX, e.clientY); return; }
   const dx = e.clientX - p.x, dy = e.clientY - p.y;
@@ -378,14 +385,33 @@ canvas.addEventListener('pointercancel', (e) => {
 canvas.addEventListener('wheel', (e) => {
   e.preventDefault();
   const before = screenToWorld(e.clientX, e.clientY);
-  camera.z = clamp(camera.z * Math.exp(-e.deltaY * 0.0015), ZMIN, ZMAX);
+  // A trackpad pinch arrives as a ctrlKey wheel (Chrome/Edge/Firefox) with tiny
+  // deltas — give it a much larger step so a pinch actually zooms; a real scroll
+  // wheel keeps the gentle factor.
+  const factor = e.ctrlKey ? 0.01 : 0.0015;
+  camera.z = clamp(camera.z * Math.exp(-e.deltaY * factor), ZMIN, ZMAX);
   const after = screenToWorld(e.clientX, e.clientY);
   camera.x += before.x - after.x; camera.y += before.y - after.y; arrive = null;
 }, { passive: false });
 
-// Kill Safari's page pinch-zoom that touch-action alone misses.
-['gesturestart', 'gesturechange', 'gestureend'].forEach((t) =>
-  document.addEventListener(t, (e) => e.preventDefault(), { passive: false }));
+// Safari (desktop) reports a trackpad pinch as non-standard gesture* events, NOT a
+// ctrlKey wheel — without handling these, pinch-to-zoom is dead on Safari. Anchor
+// the zoom on the gesture's cursor position (falling back to the last mouse point).
+let gestureZ0 = Z0, gestureAnchor = null;
+document.addEventListener('gesturestart', (e) => {
+  e.preventDefault();
+  gestureZ0 = camera.z;
+  gestureAnchor = { x: Number.isFinite(e.clientX) ? e.clientX : lastMouse.x, y: Number.isFinite(e.clientY) ? e.clientY : lastMouse.y };
+}, { passive: false });
+document.addEventListener('gesturechange', (e) => {
+  e.preventDefault();
+  const ax = gestureAnchor ? gestureAnchor.x : vw / 2, ay = gestureAnchor ? gestureAnchor.y : vh / 2;
+  const before = screenToWorld(ax, ay);
+  camera.z = clamp(gestureZ0 * (e.scale || 1), ZMIN, ZMAX);
+  const after = screenToWorld(ax, ay);
+  camera.x += before.x - after.x; camera.y += before.y - after.y; arrive = null;
+}, { passive: false });
+document.addEventListener('gestureend', (e) => e.preventDefault(), { passive: false });
 
 function handleTap(cx, cy) {
   if (heldId) { // place
