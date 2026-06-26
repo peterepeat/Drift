@@ -184,7 +184,7 @@ function drawObjectWorld(o) {
 // made briefly legible without a single word or number.
 function ageFactor(o) {
   if (o.family === 'stone') return Math.min(1, (o.handling || 0) / 26);   // worn smooth = old (mirror GRIT_HANDLING)
-  if (o.family === 'crystal') return Math.min(1, o.decay || 0);           // closer to its flash-dissolution
+  if (o.family === 'crystal') return 0.4;                                 // decay isn't on the wire — a steady, modest reveal
   if (o.family === 'anomaly') return 0.5;                                 // timeless — a steady, even reveal
   return Math.min(1, shownMat(o) * 0.55 + shownAged(o) * 0.65);           // seed → plant → aged
 }
@@ -316,8 +316,10 @@ canvas.addEventListener('pointerdown', (e) => {
     multiTouched = true;
     const [a, b] = [...pointers.values()];
     pinch = { d0: Math.hypot(a.x - b.x, a.y - b.y), z0: camera.z };
-  } else if (!heldId) {
-    // arm a long-press: dwell stationary on an object → attend it (mobile §5.2)
+  } else if (!heldId && e.pointerType !== 'mouse') {
+    // arm a long-press: dwell stationary on an object → attend it (touch/pen §5.2).
+    // NOT for the mouse — desktop attend is hover (updateHover); arming it here would
+    // make a held ≥ATTEND_MS click fire the long-press and suppress its pickup tap.
     const hit = hitTest(screenToWorld(e.clientX, e.clientY));
     if (hit) lpTimer = setTimeout(() => { attendId = hit.id; lpFired = true; lpTimer = null; }, ATTEND_MS);
   }
