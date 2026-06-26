@@ -7,6 +7,7 @@ import * as PG from './drift-procgen.js';
 import { paintGround, paintGlows, paintNoise, paintPresence, paintSeasonGrade, seasonGround, seasonSat, paintWaterWorld, paintFlow } from './render.js';
 import { inViewport, CULL_MARGIN } from './cull.js';
 import { Audio } from './audio.js';
+import { flingStep, ema } from './physics.js';
 
 // ---- tuning constants -------------------------------------------------------
 const Z0 = 1.0, ZMIN = 0.2, ZMAX = 4.0;     // zoom = CSS px per world unit
@@ -15,6 +16,10 @@ const HIT_MIN = 30;                          // min tap radius in CSS px (access
 const HIT_PAD = 6, HIT_GROW = 1.35;          // grab area exceeds the drawn form, so the tiniest things (leaves, seeds, crystals) are easy to lift
 const LIFT_MS = 300, SETTLE_MS = 260;        // pickup / place timings (spec)
 const CARRY_SEND_MS = 50;                    // throttle for streaming a carried object
+const THROW_MIN = 180;                       // release speed (world units/s) below which a drag just places — no fling
+const THROW_FRICTION = 0.045;                // velocity retained per second mid-fling (fast, natural settle)
+const THROW_STOP = 28;                        // a fling settles to a place once it slows below this (wu/s)
+const THROW_MAX = 1600;                       // cap the launch speed so a hard flick can't hurl a thing across the world
 const PRESENCE_SEND_MS = 500;                // presence cadence (spec)
 const P_IN = 1500, P_OUT = 2500, P_IDLE = 2000; // bloom fade-in / fade-out / idle-before-fade
 const SPROUT_C = 0.14;                        // maturity below this renders as a seed (mirrors server)
@@ -121,6 +126,9 @@ let animT = 0;                 // seconds, drives the only animated objects (ano
 // local hold
 let heldId = null, carry = null, preGrab = null;
 let heldSince = 0;             // when the local hold began (drives anomaly dissolution)
+// Throw momentum: the carried object's recent velocity (world units/s), sampled as
+// it moves, so releasing a moving drag flings it on instead of freezing it (Wave 3).
+let flingVel = { x: 0, y: 0 }, lastCarryPos = null, lastCarryT = 0;
 
 // ---- lift animation ---------------------------------------------------------
 function setLift(id, target, dur, ease) {
@@ -272,6 +280,21 @@ function updateDissolve(now) {
   }
 }
 
+// Advance a thrown object: friction decays its velocity, it glides, and once slow
+// enough it settles into a place. Streams carry so others see the glide (it stays
+// owned until it rests). dt is clamped so a backgrounded tab doesn't teleport it.
+let _lastFlingT = 0;
+function updateFling(now) {
+  if (holdMode !== 'fling' || !carry) { _lastFlingT = now; return; }
+  const dt = _lastFlingT ? Math.min(0.05, (now - _lastFlingT) / 1000) : 0; _lastFlingT = now;
+  if (dt <= 0) return;
+  const s = flingStep(carry, flingVel, dt, THROW_FRICTION, THROW_STOP);
+  carry.x = s.x; carry.y = s.y; flingVel.x = s.vx; flingVel.y = s.vy;
+  const o = objects.get(heldId); if (o) { o.x = carry.x; o.y = carry.y; }
+  maybeSendCarry();
+  if (s.stopped) placeHold();
+}
+
 // ---- presence fade envelope -------------------------------------------------
 function presenceIntensity(p, now) {
   let inF = Math.min(1, (now - p.born) / P_IN); inF = 1 - Math.pow(1 - inF, 3);
@@ -326,6 +349,7 @@ function beginHold(o, mode, off) {
   heldId = o.id; holdMode = mode; holdOff = off || { x: 0, y: 0 };
   heldSince = performance.now();
   carry = { x: o.x, y: o.y };
+  flingVel.x = 0; flingVel.y = 0; lastCarryPos = null; lastCarryT = 0; // fresh velocity
   o.held = true;                                  // optimistic; the server confirms via pickup_ack
   setLift(o.id, 1, LIFT_MS, EASE_RISE);
   send({ t: 'pickup', id: o.id, token, ts: Date.now() });
@@ -335,7 +359,28 @@ function carryTo(cx, cy) {                         // keep the grab point under 
   const w = screenToWorld(cx, cy);
   carry = { x: w.x + holdOff.x, y: w.y + holdOff.y };
   const o = objects.get(heldId); if (o) { o.x = carry.x; o.y = carry.y; }
+  trackVel();
   maybeSendCarry();
+}
+// Sample carry velocity (EMA toward the latest), so a release can throw the object.
+function trackVel() {
+  const t = performance.now();
+  if (lastCarryPos && lastCarryT) {
+    const dt = (t - lastCarryT) / 1000;
+    if (dt > 0.001) {
+      flingVel.x = ema(flingVel.x, (carry.x - lastCarryPos.x) / dt, 0.6);
+      flingVel.y = ema(flingVel.y, (carry.y - lastCarryPos.y) / dt, 0.6);
+    }
+  }
+  lastCarryPos = { x: carry.x, y: carry.y }; lastCarryT = t;
+}
+// A drag released while moving keeps gliding (a throw) instead of freezing — the
+// hold persists, streaming carry, until friction settles it into a place.
+function startFling() {
+  const sp = Math.hypot(flingVel.x, flingVel.y);
+  if (sp > THROW_MAX) { const k = THROW_MAX / sp; flingVel.x *= k; flingVel.y *= k; }
+  holdMode = 'fling';
+  setLift(heldId, 0, SETTLE_MS, EASE_SETTLE);      // ground it — a thrown thing slides, not floats
 }
 function placeHold() {                             // settle the held object where it is
   if (!heldId) return;
@@ -359,6 +404,8 @@ canvas.addEventListener('pointerdown', (e) => {
   }
   const w = screenToWorld(e.clientX, e.clientY);
   if (heldId) {                                          // pressing while holding: a tap places, a drag re-carries
+    flingVel.x = 0; flingVel.y = 0;                       // catching a thing stops its momentum
+    if (holdMode === 'fling') holdMode = 'follow';        // caught mid-flight → it waits to be re-dragged or set down
     const o = objects.get(heldId);
     grab = { id: heldId, ox: (o ? o.x : w.x) - w.x, oy: (o ? o.y : w.y) - w.y };
     return;
@@ -426,7 +473,10 @@ function endPointer(e) {
   const moved = p ? p.maxMove >= SLOP : false;
 
   if (holdMode === 'drag') {
-    placeHold();                                          // released an active carry → place where it is
+    // released an active carry: if it was still moving, throw it; else place it.
+    const speed = Math.hypot(flingVel.x, flingVel.y);
+    if (speed > THROW_MIN && (performance.now() - lastCarryT) < 90) startFling();
+    else placeHold();
   } else if (grab && !moved && !wasLong && !multiTouched) {
     const o = objects.get(grab.id);
     if (heldId === grab.id) {                             // tap while follow-holding → place at the tap
@@ -675,6 +725,7 @@ function frame(now) {
   updateLifts(now);
   updateGrowth(now);
   updatePositions(now);
+  updateFling(now);
   updateDissolve(now);
   updateArrive(now);
 

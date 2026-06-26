@@ -34,7 +34,7 @@ boot() {
 fail=0
 
 # Pure unit suites — no worker boot needed.
-for unit in cull audio-map; do
+for unit in cull audio-map physics; do
   echo "=== $unit (unit) ==="
   node "test/$unit.test.mjs" || fail=1
 done
