@@ -32,7 +32,7 @@ boot() {
 }
 
 fail=0
-for suite in protocol growth seasons anomalies water-crystals stones water-flow; do
+for suite in protocol growth seasons anomalies water-crystals stones water-flow thermal; do
   boot
   echo "=== $suite ==="
   PORT="$PORT" node "test/$suite.test.mjs" || fail=1
