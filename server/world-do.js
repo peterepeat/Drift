@@ -18,7 +18,7 @@
 // for hold ownership; broadcasts carry an ephemeral per-connection `pid` and a
 // boolean `held` — never the token.
 // =============================================================================
-import { generateWorld, makeSeedRecord, makeAnomalyRecord, ANOMALY_KINDS, makeCrystalRecord } from './seed.js';
+import { generateWorld, makeSeedRecord, makeAnomalyRecord, ANOMALY_KINDS, makeCrystalRecord, rng } from './seed.js';
 
 const TICK_MS = 60000;
 const HOLD_TIMEOUT_MS = 45000;            // reclaim a hold if its connection vanished
@@ -66,6 +66,19 @@ const CRYSTAL_CAP = 10;                    // at most this many crystals at once
 const CRYSTAL_SPAWN_CHANCE = 0.05;        // per tick, while under the cap
 const CRYSTAL_DECAY = 1 / 300;            // decay/tick (~5h to dissolve) — slow, impermanent
 
+// ---- stones: erosion-to-grit & stacking (Family 1) -------------------------
+// Stones don't grow; they erode by handling (each place wears them smoother and
+// smaller, client-side from `handling`) and eventually dissolve into grit. They
+// also STACK: drop one within another's footprint and it balances on top; a
+// stack that grows tall becomes unstable and topples, scattering its stones.
+const GRIT_HANDLING = 26;                 // handled this many times, a stone is worn to grit and gone
+const STACK_STEP = 12;                    // world units a stone rises per level in a stack
+const STACK_TALL = 4;                     // a stack this tall is unstable (and scatter-on-tap)
+const STACK_MAX = 6;                      // taller than this always topples on the next tick
+const TOPPLE_CHANCE = 0.12;               // per-tick topple chance, scaled by how far past STACK_TALL
+// Stone footprint in world units — MUST match the client's stoneSize(seed).
+function stoneRadius(seed) { return 12 + rng(seed >>> 0)() * 34; }
+
 function seasonBlend(phase) {
   const i = Math.floor(phase) % 4, frac = phase - Math.floor(phase);
   let f = frac < 0.7 ? 0 : (frac - 0.7) / 0.3;
@@ -104,6 +117,8 @@ export class WorldRoom {
     if (typeof o.heat !== 'number') o.heat = 0;
     if (typeof o.shedAccum !== 'number') o.shedAccum = 0;
     if (typeof o.decay !== 'number') o.decay = 0;
+    if (typeof o.stack !== 'number') o.stack = 0;
+    if (typeof o.stackBase !== 'string') o.stackBase = '';
   }
 
   async #seed(force) {
@@ -207,6 +222,7 @@ export class WorldRoom {
       id: o.id, family: o.family, x: o.x, y: o.y, seed: o.seed,
       handling: o.handling, held: o.held !== '',
       maturity: o.maturity, aged: o.aged, created_at: o.created_at,
+      stack: o.stack || 0, stackBase: o.stackBase || '',
     };
     if (o.kind) p.kind = o.kind; // anomalies carry their form
     return p;
@@ -214,7 +230,8 @@ export class WorldRoom {
   #stateMsg(o, now) {
     return {
       t: 'object_state', id: o.id, x: o.x, y: o.y, handling: o.handling,
-      held: o.held !== '', maturity: o.maturity, aged: o.aged, ts: now,
+      held: o.held !== '', maturity: o.maturity, aged: o.aged,
+      stack: o.stack || 0, stackBase: o.stackBase || '', ts: now,
     };
   }
   #worldState(pid) {
@@ -245,6 +262,9 @@ export class WorldRoom {
       if (o.held === '') {
         // Single-threaded DO -> this read-then-write IS the atomic compare-and-set.
         o.held = m.token; o.heldConn = pid; o.held_at = now;
+        // Lifting a stone out of a stack: anything resting above it loses its
+        // support and scatters; the lifted stone leaves the stack.
+        if (o.family === 'stone') await this.#detachFromStack(o, now);
         await this.#persist(o);
         this.#send(ws, { t: 'pickup_ack', id: o.id, ok: true });
         this.#bcast(this.#stateMsg(o, now), ws);
@@ -268,6 +288,16 @@ export class WorldRoom {
       o.handling += 1;
       // Disturbing a pre-sprout seed resets its growth — it must be left be to take.
       if (o.family === 'seed' && o.maturity < SPROUT) { o.maturity = 0; o.heat = 0; }
+      if (o.family === 'stone') {
+        // Worn to grit by too much handling — a brief scatter, then gone (§4.3).
+        if (o.handling >= GRIT_HANDLING) {
+          this.objects.delete(o.id); this.bcastMark.delete(o.id);
+          await this.state.storage.delete('obj:' + o.id);
+          this.#bcast({ t: 'object_gone', id: o.id, grit: true }, null);
+          return;
+        }
+        this.#tryStack(o); // drop within another stone's footprint -> balance on top
+      }
       await this.#persist(o);
       this.#bcast(this.#stateMsg(o, now), null);
       this.#updateCog(o.x, o.y);
@@ -279,6 +309,12 @@ export class WorldRoom {
       this.objects.delete(o.id); this.bcastMark.delete(o.id);
       await this.state.storage.delete('obj:' + o.id);
       this.#bcast({ t: 'object_gone', id: o.id }, null);
+
+    } else if (m.t === 'scatter') {
+      // Tapping a tall stack topples it (no ownership — anyone can knock it down).
+      const o = this.objects.get(m.id);
+      if (!o || o.family !== 'stone') return;
+      await this.#toppleStack(o.stackBase || o.id, now);
 
     } else if (m.t === 'presence_move') {
       this.lastSeen.set(pid, now);
@@ -410,6 +446,23 @@ export class WorldRoom {
       await this.state.storage.delete('obj:' + o.id);
       this.#bcast({ t: 'object_gone', id: o.id }, null);
     }
+
+    // Tall stacks are unstable: the world topples them on its own, sooner the
+    // taller they are. (Height = top level + 1; the base is level 0.)
+    const tops = new Map();               // baseId -> highest level in the stack
+    for (const o of this.objects.values()) {
+      if (o.family !== 'stone') continue;
+      const baseId = o.stackBase || o.id; // base has stack 0, so o.stack is the level either way
+      tops.set(baseId, Math.max(tops.get(baseId) || 0, o.stack));
+    }
+    for (const [baseId, top] of tops) {
+      const height = top + 1;
+      if (height < STACK_TALL) continue;
+      if (height > STACK_MAX || Math.random() < TOPPLE_CHANCE * (height - STACK_TALL + 1)) {
+        await this.#toppleStack(baseId, now);
+      }
+    }
+
     // Snapshot survivors so growth survives a restart.
     const puts = {};
     for (const o of this.objects.values()) puts['obj:' + o.id] = o;
@@ -421,6 +474,63 @@ export class WorldRoom {
     this.#bcast({ t: 'season', phase: this.season }, null);
 
     return { spawned: spawned.length, gone: gone.length };
+  }
+
+  // ---- stone stacking --------------------------------------------------------
+  // Place-time: if the stone landed within another free stone's footprint, it
+  // balances on top of that stone's stack. Snaps to the base position, rising
+  // STACK_STEP per level (so the stored y carries the visual height).
+  #tryStack(o) {
+    let target = null, bestD = Infinity;
+    for (const s of this.objects.values()) {
+      if (s.id === o.id || s.family !== 'stone' || s.held !== '') continue;
+      const d = Math.hypot(s.x - o.x, s.y - o.y);
+      if (d < stoneRadius(s.seed) && d < bestD) { bestD = d; target = s; }
+    }
+    if (!target) { o.stack = 0; o.stackBase = ''; return; }
+    const baseId = target.stackBase || target.id;
+    const base = this.objects.get(baseId) || target;
+    let topLevel = 0; // highest level currently in this stack (base is 0)
+    for (const s of this.objects.values()) {
+      if (s.id !== o.id && (s.stackBase || '') === baseId) topLevel = Math.max(topLevel, s.stack);
+    }
+    o.stack = topLevel + 1;
+    o.stackBase = baseId;
+    o.x = base.x + (Math.random() * 2 - 1) * 4; // slight cairn wobble, not a ruler-straight column
+    o.y = base.y - o.stack * STACK_STEP;
+  }
+
+  // Lifting stone `o` out of its stack: everything resting above it scatters.
+  async #detachFromStack(o, now) {
+    const baseId = o.stackBase || o.id, lvl = o.stack || 0;
+    const base = this.objects.get(baseId);
+    const gx = base ? base.x : o.x, gy = base ? base.y : o.y;
+    for (const s of this.objects.values()) {
+      if (s.id !== o.id && (s.stackBase || '') === baseId && (s.stack || 0) > lvl) {
+        await this.#scatterStone(s, gx, gy, now);
+      }
+    }
+    o.stack = 0; o.stackBase = '';
+  }
+
+  // Topple a whole stack: base stays put, everything above it scatters around it.
+  async #toppleStack(baseId, now) {
+    const base = this.objects.get(baseId);
+    const gx = base ? base.x : 0, gy = base ? base.y : 0;
+    const members = [];
+    for (const s of this.objects.values()) if ((s.stackBase || '') === baseId && s.stack > 0) members.push(s);
+    for (const s of members) await this.#scatterStone(s, gx, gy, now);
+    if (base) { base.stack = 0; base.stackBase = ''; } // base was already level 0; nothing to move
+  }
+
+  // Move a stone off a stack to a scattered spot around the stack's ground point.
+  async #scatterStone(s, gx, gy, now) {
+    const ang = Math.random() * Math.PI * 2, dist = 18 + s.stack * 10 + Math.random() * 28;
+    s.x = gx + Math.cos(ang) * dist;
+    s.y = gy + Math.sin(ang) * dist;
+    s.stack = 0; s.stackBase = '';
+    await this.#persist(s);
+    this.#bcast(this.#stateMsg(s, now), null);
   }
 
   #shed(parent, now) {

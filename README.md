@@ -12,6 +12,8 @@ A single-URL, real-time, anonymous shared world of slow objects. No accounts, no
 
 **Phase 2 — water & crystals:** a slow **water pool** lies in the world's low centre (a wet grey-blue sheen beneath the objects), and **crystalline formations** grow at its edge — small, geometric, glinting, and pickable like anything else. They're impermanent: each slowly dissolves in a brief flash and another forms. (The full flow/drift/stone-channelling water system is Phase 3, per the PRD.)
 
+**Phase 2 — stone stacking & erosion-to-grit:** **stones balance** when you drop one within another's footprint, building a cairn that rises and casts soft contact shadows. A stack that grows tall is **unstable** — the world topples it on its own (sooner the taller it is), and tapping a tall stack scatters it on the spot. Lifting a stone off the top leaves the rest standing; pulling one from underneath drops what was above. And stones **erode**: each handling wears one smoother, smaller, and faintly luminous, until a much-handled stone finally crumbles into a brief scatter of grit and is gone.
+
 ## Architecture
 
 One **Cloudflare Durable Object** (`WorldRoom`) is the entire world:
@@ -77,4 +79,4 @@ That single deploy serves both the client and the WebSocket world at one global 
 
 ## What this is not (yet)
 
-Still to come: stone stacking & erosion-to-grit, the full water flow/drift system, sound — those are the remaining Phase 2/3 threads. And by design, forever: no accounts, no chat, no notifications, no sharing, no scores, no onboarding, no words in the world.
+Still to come: the full water flow/drift system, the object ceiling/scale logic, and sound — those are the remaining Phase 3 threads. And by design, forever: no accounts, no chat, no notifications, no sharing, no scores, no onboarding, no words in the world.

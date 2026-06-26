@@ -5,6 +5,7 @@
 // procgen module so a given WORLD_SEED always rebuilds the identical world.
 // =============================================================================
 import { rng } from '../public/drift-procgen.js';
+export { rng }; // re-exported so the DO can size stones identically (stack footprint)
 
 const WORLD_SEED = 0x44524946;   // 'DRIF'
 const N = 200, N_SEED = 130;     // ~65% seeds / ~35% stones
@@ -35,6 +36,7 @@ export function makeRecord(id, family, seed, x, y, now, maturity = 0, aged = 0) 
   return {
     id, family, x, y, seed,
     handling: 0, maturity, aged, heat: 0, shedAccum: 0,
+    stack: 0, stackBase: '', // stone stacking: level above the ground stone, and its base id
     last_eval: now, created_at: now,
     held: '', heldConn: '', held_at: 0,
   };

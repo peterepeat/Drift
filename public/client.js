@@ -16,6 +16,8 @@ const PRESENCE_SEND_MS = 500;                // presence cadence (spec)
 const P_IN = 1500, P_OUT = 2500, P_IDLE = 2000; // bloom fade-in / fade-out / idle-before-fade
 const SPROUT_C = 0.14;                        // maturity below this renders as a seed (mirrors server)
 const ANOM_DISSOLVE_MS = 10000, ANOM_FADE_MS = 3000; // hold an anomaly 10s and it fades from your hands
+const STACK_STEP_C = 12, STACK_TALL_C = 4;   // stone-stack rise/level + tall-stack-tap-to-scatter (mirror server)
+const GRIT_MS = 500;                          // a worn-out stone's grit scatter lifetime (spec §4.3)
 
 // Spec easing curves (Visual Bible §06).
 const EASE_RISE = cubicBezier(0.22, 1, 0.36, 1);     // pickup / place lift
@@ -83,6 +85,7 @@ const objects = new Map();     // id -> { id, family, x, y, seed, handling, held
 const presences = new Map();   // pid -> { x, y, born, last, gone }
 const lifts = new Map();       // id -> lift animation state
 const flashes = [];            // brief crystal-dissolution flashes { x, y, start }
+const grits = [];              // brief stone-to-grit scatters { x, y, seed, r, start }
 let pool = null;               // the world water pool { x, y, r }
 let myPid = null;
 let seasonPhase = 0;           // monotonic season clock from the server (feels, never labelled)
@@ -141,7 +144,28 @@ function paintObject(o, cx, cy) {
   if (mat < SPROUT_C) PG.drawSeed(ctx, o.seed >>> 0, cx, cy, seedScale(o.seed) * (1 + mat * 1.4));
   else PG.drawPlant(ctx, o.seed >>> 0, cx, cy, mat, aged);
 }
-function drawObjectWorld(o) { paintObject(o, o.x, o.y); }
+function drawObjectWorld(o) {
+  if (o.family === 'stone' && (o.stack || 0) > 0) { // seat each stacked stone with a soft contact shadow
+    const rad = objRadius(o);
+    ctx.save();
+    ctx.fillStyle = PG.rgba('#000000', 0.22);
+    ctx.beginPath(); ctx.ellipse(o.x, o.y + rad * 0.5, rad * 0.8, rad * 0.32, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+  paintObject(o, o.x, o.y);
+}
+// A stack's ground line (the base sits here; each level is stored STACK_STEP up).
+function groundY(o) { return o.y + (o.stack || 0) * STACK_STEP_C; }
+// Height of the stack a stone belongs to (1 = a lone stone on the ground).
+function stackHeight(o) {
+  const baseId = o.stackBase || o.id;
+  let top = 0;
+  for (const s of objects.values()) {
+    if (s.family !== 'stone') continue;
+    if ((s.stackBase || s.id) === baseId) top = Math.max(top, s.stackBase ? (s.stack || 0) : 0);
+  }
+  return top + 1;
+}
 // Lifted object drawn in screen space so the 10px rise / shadow stay constant
 // regardless of zoom; intrinsic size still scales with zoom via camera.z.
 function drawHeldScreen(o, sx, sy, lift) {
@@ -273,13 +297,20 @@ function handleTap(cx, cy) {
     heldId = null; carry = null; preGrab = null;
     return;
   }
-  // pick up topmost (largest y is drawn last / on top)
+  // pick up topmost: the top of a stack wins, else the frontmost (largest y)
   const w = screenToWorld(cx, cy);
   let pick = null, best = -Infinity;
   for (const o of objects.values()) {
     if (o.held) continue;
     const r = Math.max(objRadius(o), HIT_MIN / camera.z);
-    if (Math.hypot(o.x - w.x, o.y - w.y) <= r && o.y > best) { best = o.y; pick = o; }
+    if (Math.hypot(o.x - w.x, o.y - w.y) > r) continue;
+    const score = (o.stack || 0) * 1e6 + o.y;
+    if (score > best) { best = score; pick = o; }
+  }
+  // Tapping a tall stack topples it instead of lifting a stone off the top.
+  if (pick && pick.family === 'stone' && stackHeight(pick) >= STACK_TALL_C) {
+    send({ t: 'scatter', id: pick.id, token, ts: Date.now() });
+    return;
   }
   if (pick) {
     preGrab = { x: pick.x, y: pick.y };
@@ -354,6 +385,8 @@ function onMessage(raw) {
       o.x = m.x; o.y = m.y; o.handling = m.handling; o.held = !!m.held;
       if (m.maturity != null) o.maturity = m.maturity;
       if (m.aged != null) o.aged = m.aged;
+      if (m.stack != null) o.stack = m.stack;
+      if (m.stackBase != null) o.stackBase = m.stackBase;
       if (m.id !== heldId) {
         if (o.held && !wasHeld) setLift(o.id, 1, LIFT_MS, EASE_RISE);
         else if (!o.held && wasHeld) setLift(o.id, 0, SETTLE_MS, EASE_SETTLE);
@@ -372,6 +405,8 @@ function onMessage(raw) {
     case 'object_gone': {
       const og = objects.get(m.id);
       if (og && og.family === 'crystal') flashes.push({ x: og.x, y: og.y, start: performance.now() }); // brief flash
+      else if (og && (og.family === 'stone' || m.grit)) // worn to grit — a brief scatter of dust
+        grits.push({ x: og.x, y: og.y, seed: og.seed, r: objRadius(og), start: performance.now() });
       objects.delete(m.id); lifts.delete(m.id);
       if (heldId === m.id) { heldId = null; carry = null; preGrab = null; }
       break;
@@ -432,8 +467,16 @@ function frame(now) {
   paintWaterWorld(ctx, pool, animT); // wet sheen beneath the objects
   const list = [];
   for (const o of objects.values()) if (!isLifted(o.id)) list.push(o);
-  list.sort((a, b) => (a.y - b.y) || (a.id < b.id ? -1 : 1)); // painter's depth, stable
+  // painter's depth by ground line, then bottom-up within a stack so the top stone occludes
+  list.sort((a, b) => (groundY(a) - groundY(b)) || ((a.stack || 0) - (b.stack || 0)) || (a.id < b.id ? -1 : 1));
   for (const o of list) drawObjectWorld(o);
+  // worn-out stones crumble to a brief scatter of grit (world space, ~500ms)
+  for (let i = grits.length - 1; i >= 0; i--) {
+    const g = grits[i], age = now - g.start;
+    if (age > GRIT_MS) { grits.splice(i, 1); continue; }
+    const p = age / GRIT_MS;
+    PG.drawGrit(ctx, g.seed >>> 0, g.x, g.y, g.r * (0.4 + p * 1.5), 0.8 * (1 - p));
+  }
 
   // overlays (screen space)
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
