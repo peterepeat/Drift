@@ -207,18 +207,24 @@ export class WorldRoom {
   // rows_written quota is exhausted — must NOT crash the world: it keeps running
   // in memory (still viewable + interactive over WebSockets) and resumes
   // persisting once writes are allowed again. Reads never go through here.
+  // allowUnconfirmed: don't hold the response on the write's durability. DO buffers
+  // writes and surfaces a quota failure at the output gate (after our try/catch has
+  // returned) — which would 500 the request, even a read-only connect or DO
+  // construction. With allowUnconfirmed the write commits in the background and a
+  // failure (e.g. rows_written exhausted) is dropped instead of crashing the world.
+  #UNCONF = { allowUnconfirmed: true };
   #writeWarn(e) {
     if (!this._warnedWrite) { this._warnedWrite = true; console.warn('drift: storage write failed (quota?), running in-memory:', e?.message || e); }
   }
-  async #put(key, val) { try { await this.state.storage.put(key, val); } catch (e) { this.#writeWarn(e); } }
-  async #del(key) { try { await this.state.storage.delete(key); } catch (e) { this.#writeWarn(e); } }
-  async #arm(t) { try { await this.state.storage.setAlarm(t); } catch (e) { this.#writeWarn(e); } }
+  async #put(key, val) { try { await this.state.storage.put(key, val, this.#UNCONF); } catch (e) { this.#writeWarn(e); } }
+  async #del(key) { try { await this.state.storage.delete(key, this.#UNCONF); } catch (e) { this.#writeWarn(e); } }
+  async #arm(t) { try { await this.state.storage.setAlarm(t, this.#UNCONF); } catch (e) { this.#writeWarn(e); } }
 
   // storage.put accepts at most 128 entries per call.
   async #putAll(map) {
     const entries = Object.entries(map);
     for (let i = 0; i < entries.length; i += 128) {
-      try { await this.state.storage.put(Object.fromEntries(entries.slice(i, i + 128))); }
+      try { await this.state.storage.put(Object.fromEntries(entries.slice(i, i + 128)), this.#UNCONF); }
       catch (e) { this.#writeWarn(e); }
     }
   }
