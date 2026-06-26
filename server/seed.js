@@ -9,7 +9,17 @@ export { rng, makeNoise }; // re-exported so the DO shares the client's EXACT pr
 // (rng -> identical stone footprints; makeNoise -> identical water flow field)
 
 const WORLD_SEED = 0x44524946;   // 'DRIF'
-const N = 200, N_SEED = 130;     // ~65% seeds / ~35% stones
+// The world now seeds wider and fuller (was 200 in one central σ=400 clump, which
+// read as "everything piled at the centre, emptiness around"). Objects gather into
+// GROVES scattered across a wide area with open clearings between, plus a few loners
+// in the open — so arrival feels spacious and inhabited, not a clump in a void. The
+// population still grows into the 10k cap over time; this just spreads the start.
+const N = 900;                   // default population (prod). env.SEED_N overrides it per-deploy
+const SEED_FRAC = 0.64;          // ~64% seeds / ~36% stones
+const GROVES = 14;               // distinct thickets/clearings
+const GROVE_SPREAD = 1800;       // grove centres scatter within ~±this (gaussian σ = half)
+const GROVE_SIGMA = 300;         // local spread of objects within a grove
+const LONER_FRAC = 0.16;         // fraction scattered in the open between groves
 
 // Deterministic, UUID-formatted id (valid 8-4-4-4-12, version/variant bits set).
 // Derived from the seeded master RNG, so re-seeding upserts the same 200 ids
@@ -77,17 +87,36 @@ export const makeCreatureRecord = (id, seed, kind, x, y, now) => {
 // `now` anchors creation time to the moment the world is born. The procedural
 // FORM of each object (id, position, seed) is fully deterministic; the starting
 // lifecycle mix makes the arrival world feel already in progress.
-export function generateWorld(now = Date.now()) {
+export function generateWorld(now = Date.now(), count = N) {
+  const n = Math.max(1, count | 0);              // env-overridable population (small for fast tests)
+  const nSeed = Math.round(n * SEED_FRAC);
   const rand = rng(WORLD_SEED);
+  // Grove centres first (fixed draw order). Grove 0 is the "heart" near the origin,
+  // so an arrival at the cog lands somewhere already alive, not in a bare clearing.
+  const groves = [{ x: 0, y: 0 }]; // grove 0 is the dense "heart" at the cog, where arrivals land
+  for (let g = 1; g < GROVES; g++) {
+    groves.push({ x: +(gaussian(rand) * GROVE_SPREAD * 0.5).toFixed(2), y: +(gaussian(rand) * GROVE_SPREAD * 0.5).toFixed(2) });
+  }
   const out = [];
-  for (let i = 0; i < N; i++) {
-    // Fixed draw order so DO and script agree byte-for-byte:
-    // id (16) -> x -> y -> seed -> [seed-family lifecycle].
-    const family = i < N_SEED ? 'seed' : 'stone';
+  for (let i = 0; i < n; i++) {
+    // Fixed per-object draw order so DO and script agree byte-for-byte:
+    // family(by index) -> id(16) -> loner-roll -> position -> seed -> [lifecycle].
+    const family = i < nSeed ? 'seed' : 'stone';
     const id = detUuid(rand);
-    const x = +(gaussian(rand) * 400).toFixed(2);
-    const y = +(gaussian(rand) * 400).toFixed(2);
-    const seed = Math.floor(rand() * 4294967296) >>> 0; // 32-bit procgen seed
+    let x, y;
+    if (rand() < LONER_FRAC) {                                  // scattered in the open between groves
+      x = gaussian(rand) * GROVE_SPREAD * 0.7;
+      y = gaussian(rand) * GROVE_SPREAD * 0.7;
+    } else {                                                    // gathered into a grove
+      const r1 = rand();                                        // ~30% land in the heart, the rest spread across the others
+      const gi = r1 < 0.30 ? 0 : 1 + Math.floor(((r1 - 0.30) / 0.70) * (GROVES - 1));
+      const grove = groves[gi];
+      const sig = gi === 0 ? GROVE_SIGMA * 0.6 : GROVE_SIGMA;   // the heart is tighter, so the cog stays reliably alive
+      x = grove.x + gaussian(rand) * sig;
+      y = grove.y + gaussian(rand) * sig;
+    }
+    x = +x.toFixed(2); y = +y.toFixed(2);
+    const seed = Math.floor(rand() * 4294967296) >>> 0;        // 32-bit procgen seed
     let maturity = 0, aged = 0;
     if (family === 'seed') {
       const roll = rand();
@@ -101,3 +130,18 @@ export function generateWorld(now = Date.now()) {
 }
 
 export { N as SEED_COUNT };
+
+// Bump when generateWorld changes meaningfully: a stored world stamped with an
+// older version is reseeded ONCE on load (see the DO's #load), so a deployed
+// generator change actually reaches the live world without an admin key or a wipe
+// route. 1 = the old single central clump; 2 = groves spread across a wide world.
+export const SEED_VERSION = 2;
+// Decide what a loading world needs: seed a fresh empty world, reseed a world left
+// by an older generator (one-time, version-gated), or nothing. Pure + unit-tested —
+// it carries the only loop-risk (a wrong "reseed" would wipe on every restart), so
+// it is isolated here and exhaustively tested.
+export function reseedAction(size, storedVersion) {
+  if (size === 0) return 'seed-fresh';
+  if (storedVersion !== SEED_VERSION) return 'reseed';
+  return 'none';
+}

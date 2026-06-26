@@ -18,7 +18,7 @@
 // for hold ownership; broadcasts carry an ephemeral per-connection `pid` and a
 // boolean `held` — never the token.
 // =============================================================================
-import { generateWorld, makeRecord, makeSeedRecord, makeAnomalyRecord, ANOMALY_KINDS, makeCrystalRecord, makeCreatureRecord, CREATURE_KINDS, rng, makeNoise } from './seed.js';
+import { generateWorld, makeRecord, makeSeedRecord, makeAnomalyRecord, ANOMALY_KINDS, makeCrystalRecord, makeCreatureRecord, CREATURE_KINDS, reseedAction, SEED_VERSION, rng, makeNoise } from './seed.js';
 import { FLOW_SEED, FLOW_SCALE, FLOW_REACH } from '../public/flow.js'; // shared with the client visual
 
 const TICK_MS = 60000;
@@ -202,6 +202,10 @@ export class WorldRoom {
     // Clamped to a sane range so a typo can't set a runaway cap.
     const envMax = parseInt(env.MAX_OBJECTS, 10);
     this.maxObjects = Number.isFinite(envMax) ? Math.max(200, Math.min(50000, envMax)) : DEFAULT_MAX_OBJECTS;
+    // Seed population is env-overridable (env.SEED_N) — small for fast local tests;
+    // prod leaves it unset and gets the full grove world. undefined ⇒ generator default.
+    const envSeedN = parseInt(env.SEED_N, 10);
+    this.seedCount = Number.isFinite(envSeedN) ? Math.max(20, Math.min(50000, envSeedN)) : undefined;
     this.objects = new Map();      // id -> record
     this.cog = { x: 0, y: 0, n: 0 };
     this.lastSeen = new Map();     // pid -> ts (presence liveness)
@@ -235,7 +239,12 @@ export class WorldRoom {
     this.season = (await this.state.storage.get('meta:season')) || 0;
     this.heat = (await this.state.storage.get('field:heat')) || null; // rebuilt lazily if absent
     this.lastCheckpoint = (await this.state.storage.get('meta:checkpoint')) || 0;
-    if (this.objects.size === 0) await this.#seed(false);
+    // Seed a fresh world, OR reseed once if this world was left by an older generator
+    // (version-gated; stamps the new version so it never loops). This is how a
+    // deployed generator change reaches the live world — no admin key, no wipe route.
+    const action = reseedAction(this.objects.size, await this.state.storage.get('meta:seedVersion'));
+    if (action === 'seed-fresh') await this.#seed(false);
+    else if (action === 'reseed') await this.#seed(true);
     this.#gridRebuild();           // index every loaded/seeded object (in-memory; the grid is empty after a DO restart)
     if ((await this.state.storage.getAlarm()) == null) {
       await this.state.storage.setAlarm(Date.now() + TICK_MS);
@@ -269,7 +278,7 @@ export class WorldRoom {
       if (old.size) await this.state.storage.delete([...old.keys()]);
       this.objects.clear();
     }
-    const recs = generateWorld();
+    const recs = generateWorld(Date.now(), this.seedCount);
     const puts = {};
     for (const r of recs) { this.objects.set(r.id, r); puts['obj:' + r.id] = r; }
     await this.#putAll(puts);
@@ -277,6 +286,7 @@ export class WorldRoom {
     this.cog = { x: 0, y: 0, n: 0 };
     await this.state.storage.put('cog', this.cog);
     await this.state.storage.put('meta:seeded', { at: Date.now(), n: recs.length });
+    await this.state.storage.put('meta:seedVersion', SEED_VERSION); // stamp so the one-time reseed never loops
     return recs.length;
   }
 
@@ -441,6 +451,21 @@ export class WorldRoom {
       await this.#putAll(puts);
       this.#gridRebuild();           // cheaper than n incremental adds for a bulk fill
       return Response.json({ ok: true, added: n, total: this.objects.size });
+    }
+
+    // Ops/testing only: set an object's lifecycle (maturity/aged) directly, so a
+    // test can make a plant dissolution-ready without ticking it there naturally
+    // (natural timing is marginal and balloons the world). Gated; inert in prod.
+    if (url.pathname === '/admin/lifecycle') {
+      if (!this.#adminOk(request)) return Response.json({ ok: false, error: 'forbidden' }, { status: 403 });
+      const o = this.objects.get(url.searchParams.get('id') || '');
+      if (!o) return Response.json({ ok: false, error: 'no such object' }, { status: 404 });
+      const mat = parseFloat(url.searchParams.get('maturity')), ag = parseFloat(url.searchParams.get('aged'));
+      if (Number.isFinite(mat)) o.maturity = Math.max(0, Math.min(1, mat));
+      if (Number.isFinite(ag)) o.aged = Math.max(0, Math.min(1, ag));
+      await this.#persist(o);
+      this.#bcast(this.#stateMsg(o, Date.now()), null);
+      return Response.json({ ok: true, id: o.id, maturity: o.maturity, aged: o.aged });
     }
 
     // Ops/testing only: age an object's last_touched clock by N ticks (drive
@@ -836,10 +861,11 @@ export class WorldRoom {
 
     // Isolation (PRD §4.3): derived from last_touched — no per-tick write. Warmth
     // refreshes the clock (in memory; persisted at the next checkpoint); a forgotten
-    // free stone crumbles to grit. Anomalies, held, and stacked (cairn) stones are
-    // tended and never fade.
+    // free stone crumbles to grit. Anomalies, creatures, held, and stacked (cairn)
+    // objects are tended/alive and never fade — and skipping creatures keeps them
+    // from being dirtied every tick (their last_touched is never read).
     for (const o of this.objects.values()) {
-      if (o.family === 'anomaly' || o.held !== '' || o.stack > 0) continue;
+      if (o.family === 'anomaly' || o.family === 'creature' || o.held !== '' || o.stack > 0) continue;
       if (this.#heatAt(o.x, o.y) > WARM_EPS) { o.last_touched = now; this.dirty.add(o.id); continue; } // refresh is checkpoint-only
       if (o.family === 'stone' && (now - o.last_touched) >= STONE_FADE_MS && !gone.includes(o)) {
         gone.push(o);
@@ -887,14 +913,18 @@ export class WorldRoom {
     }
 
     // Creatures: ramp quickly to a baseline so the world feels inhabited, then top
-    // up toward the cap. Only existence is written; their motion costs the tick nothing.
+    // up toward the cap. Only existence is written; their motion costs the tick
+    // nothing. Gated BELOW the ceiling's breathing room (maxObjects − CEIL_TRIM) so
+    // the guaranteed ramp can't keep refilling exactly what the trim just freed (a
+    // full world would otherwise oscillate at the cap instead of breathing).
+    const creRoom = this.maxObjects - CEIL_TRIM;
     let creatureCount = 0;
     for (const o of this.objects.values()) if (o.family === 'creature') creatureCount++;
     let creAdded = 0;
-    while (creatureCount + creAdded < MIN_CREATURES && this.objects.size + spawned.length < this.maxObjects) {
+    while (creatureCount + creAdded < MIN_CREATURES && this.objects.size + spawned.length < creRoom) {
       spawned.push(this.#spawnCreature(now)); creAdded++;
     }
-    if (creatureCount + creAdded < MAX_CREATURES && this.objects.size + spawned.length < this.maxObjects && Math.random() < CREATURE_SPAWN_CHANCE) {
+    if (creatureCount + creAdded < MAX_CREATURES && this.objects.size + spawned.length < creRoom && Math.random() < CREATURE_SPAWN_CHANCE) {
       spawned.push(this.#spawnCreature(now));
     }
 

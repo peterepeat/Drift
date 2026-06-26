@@ -345,10 +345,14 @@ function updateNudge(now) {
   const active = speed > NUDGE_MIN_SPEED;
   for (const o of objects.values()) {
     const resting = !o._ox && !o._oy && !o._ovx && !o._ovy;
-    if (resting && !active) continue;                 // nothing to do
+    // Only objects near the moving cursor are stirred; already-displaced ones still
+    // spring back. A resting object that's neither is skipped — so the cost is ~the
+    // few things near the cursor + the few in motion, not the whole population.
+    const near = active && Math.abs(o.x - mouseWorld.x) < NUDGE_RADIUS && Math.abs(o.y - mouseWorld.y) < NUDGE_RADIUS;
+    if (resting && !near) continue;
     if (lightnessOf(o) <= 0) { if (!resting) { o._ox = o._oy = o._ovx = o._ovy = 0; } continue; }
     o._ox = o._ox || 0; o._oy = o._oy || 0; o._ovx = o._ovx || 0; o._ovy = o._ovy || 0;
-    if (active && o.id !== heldId) {
+    if (near && o.id !== heldId) {
       const n = nudge(mouseWorld.x, mouseWorld.y, o.x + o._ox, o.y + o._oy, NUDGE_RADIUS, speed, NUDGE_STR, lightnessOf(o));
       o._ovx += n.vx * dt; o._ovy += n.vy * dt;
     }
@@ -426,10 +430,13 @@ let holdMode = null;             // null | 'drag' (carried by a pressed pointer)
 let holdOff = { x: 0, y: 0 };    // world-unit offset object-centre − pointer, so a grab doesn't snap to centre
 
 function beginHold(o, mode, off) {
-  preGrab = { x: o.x, y: o.y };
+  // Start the carry where the object is actually DRAWN: a free creature wanders off
+  // its stored home, so seeding carry from o.x/o.y would snap it home on pickup.
+  const live = (o.family === 'creature') ? creaturePos(o) : { x: o.x, y: o.y };
+  preGrab = { x: o.x, y: o.y };                   // the true stored position (restore target if rejected)
   heldId = o.id; holdMode = mode; holdOff = off || { x: 0, y: 0 };
   heldSince = performance.now();
-  carry = { x: o.x, y: o.y };
+  carry = { x: live.x, y: live.y };
   flingVel.x = 0; flingVel.y = 0; lastCarryPos = null; lastCarryT = 0; // fresh velocity
   o.held = true;                                  // optimistic; the server confirms via pickup_ack
   setLift(o.id, 1, LIFT_MS, EASE_RISE);
@@ -481,6 +488,7 @@ canvas.addEventListener('pointerdown', (e) => {
   attendId = null; clearLongPress(); lpFired = false;   // any press interrupts a hover/long-press
   if (pointers.size >= 2) {                              // second finger → pinch; abandon a pending grab
     multiTouched = true; grab = null;
+    if (holdMode === 'drag' || holdMode === 'fling') placeHold(); // dropping into a pinch sets a dragged/thrown thing down
     const [a, b] = [...pointers.values()];
     pinch = { d0: Math.hypot(a.x - b.x, a.y - b.y), z0: camera.z };
     return;
@@ -490,12 +498,14 @@ canvas.addEventListener('pointerdown', (e) => {
     flingVel.x = 0; flingVel.y = 0;                       // catching a thing stops its momentum
     if (holdMode === 'fling') holdMode = 'follow';        // caught mid-flight → it waits to be re-dragged or set down
     const o = objects.get(heldId);
-    grab = { id: heldId, ox: (o ? o.x : w.x) - w.x, oy: (o ? o.y : w.y) - w.y };
+    const base = carry || (o ? { x: o.x, y: o.y } : w);  // a held thing is drawn at carry, not its stored pos
+    grab = { id: heldId, ox: base.x - w.x, oy: base.y - w.y };
     return;
   }
   const hit = hitTest(w);
   if (hit) {
-    grab = { id: hit.id, ox: hit.x - w.x, oy: hit.y - w.y };
+    const c = posOf(hit);                                // a creature is drawn at its wander, not its home
+    grab = { id: hit.id, ox: c.x - w.x, oy: c.y - w.y };
     // touch/pen: dwell still on it → attend (§5.2), don't grab. The mouse uses hover-attend.
     if (e.pointerType !== 'mouse') lpTimer = setTimeout(() => { attendId = hit.id; lpFired = true; lpTimer = null; grab = null; }, ATTEND_MS);
   }
