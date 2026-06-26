@@ -5,6 +5,7 @@
 // =============================================================================
 import * as PG from './drift-procgen.js';
 import { paintGround, paintGlows, paintNoise, paintPresence, paintSeasonGrade, seasonGround, seasonSat, paintWaterWorld, paintFlow } from './render.js';
+import { inViewport, CULL_MARGIN } from './cull.js';
 
 // ---- tuning constants -------------------------------------------------------
 const Z0 = 1.0, ZMIN = 0.2, ZMAX = 4.0;     // zoom = CSS px per world unit
@@ -69,6 +70,12 @@ function screenToWorld(sx, sy) {
 }
 function worldToScreen(wx, wy) {
   return { x: (wx - camera.x) * camera.z + vw / 2, y: (wy - camera.y) * camera.z + vh / 2 };
+}
+// Is the water pool's drift band anywhere on screen? (gates the flow-trace pass)
+function poolOnScreen() {
+  if (!pool) return false;
+  const s = worldToScreen(pool.x, pool.y), rr = pool.r * camera.z * 1.4;
+  return s.x + rr >= 0 && s.x - rr <= vw && s.y + rr >= 0 && s.y - rr <= vh;
 }
 function startArrive(tx, ty) {
   arrive = { fromX: camera.x, fromY: camera.y, toX: tx, toY: ty, start: performance.now(), dur: 1200 };
@@ -490,9 +497,16 @@ function frame(now) {
   ctx.setTransform(dpr * camera.z, 0, 0, dpr * camera.z,
     dpr * (vw / 2 - camera.x * camera.z), dpr * (vh / 2 - camera.y * camera.z));
   paintWaterWorld(ctx, pool, animT); // wet sheen beneath the objects
-  paintFlow(ctx, pool, animT);       // faint moving streaks tracing the flow path
+  if (poolOnScreen()) paintFlow(ctx, pool, animT); // faint flow streaks — only when the pool is in view
   const list = [];
-  for (const o of objects.values()) if (!isLifted(o.id)) list.push(o);
+  // Viewport culling: only the objects on (or just off) screen are sorted/drawn.
+  // Lifted/held objects are never culled — they're drawn in the screen-space pass.
+  for (const o of objects.values()) {
+    if (isLifted(o.id)) continue;
+    const s = worldToScreen(o.x, o.y);
+    if (!inViewport(s.x, s.y, vw, vh, CULL_MARGIN)) continue;
+    list.push(o);
+  }
   // painter's depth by ground line, then bottom-up within a stack so the top stone occludes
   list.sort((a, b) => (groundY(a) - groundY(b)) || ((a.stack || 0) - (b.stack || 0)) || (a.id < b.id ? -1 : 1));
   for (const o of list) drawObjectWorld(o);

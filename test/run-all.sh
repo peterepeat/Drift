@@ -32,6 +32,14 @@ boot() {
 }
 
 fail=0
+
+# Pure unit suites — no worker boot needed.
+for unit in cull; do
+  echo "=== $unit (unit) ==="
+  node "test/$unit.test.mjs" || fail=1
+done
+
+# Integration suites — each against a FRESH worker on an isolated port.
 for suite in protocol growth seasons anomalies water-crystals stones water-flow thermal; do
   boot
   echo "=== $suite ==="
