@@ -7,7 +7,7 @@ const PORT = process.env.PORT || 8787;
 const base = `http://127.0.0.1:${PORT}`;
 const WS = `ws://127.0.0.1:${PORT}/ws`;
 const KEY = { 'x-admin-key': 'local-dev-key' };
-const MAX = 2000, FADE = 1440; // MAX_OBJECTS; FADE = ticks-untouched that crumble a stone (STONE_FADE_MS / TICK_MS)
+const MAX = 10000, FADE = 1440; // MAX_OBJECTS; FADE = ticks-untouched that crumble a stone (STONE_FADE_MS / TICK_MS)
 let pass = 0, fail = 0;
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const check = (c, label) => { console.log((c ? '  PASS ' : '  FAIL ') + label); c ? pass++ : fail++; };

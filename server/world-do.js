@@ -37,7 +37,7 @@ const PRESENCE_STALE_MS = 12000;          // presence older than this stops warm
 const SHED_TICKS = 6;                     // a mature plant sheds ~every 6 ticks
 const SHED_MAX_AGED = 0.6;                // stop shedding once this aged
 const FINAL_SHED = 2;                     // seeds released when a plant dissolves
-const MAX_OBJECTS = 2000;                 // population ceiling (PRD §7.3; staged toward 10k once at scale)
+const MAX_OBJECTS = 10000;                // population ceiling (PRD §7.3 — raised to the 10k target; needs Workers Paid for rows_written headroom as the world fills, since the checkpoint flushes ~all active objects)
 const MAT_BCAST_DELTA = 0.025;            // broadcast growth when maturity moves this much
 
 // ---- isolation & the ceiling (PRD §4.3 + §7.3) -----------------------------
@@ -399,7 +399,7 @@ export class WorldRoom {
     // Ops/testing only: bulk-spawn N cheap dormant seeds to push toward the ceiling. Gated.
     if (url.pathname === '/admin/fill') {
       if (!this.#adminOk(request)) return Response.json({ ok: false, error: 'forbidden' }, { status: 403 });
-      const n = Math.max(1, Math.min(5000, parseInt(url.searchParams.get('n') || '1', 10)));
+      const n = Math.max(1, Math.min(20000, parseInt(url.searchParams.get('n') || '1', 10)));
       const now = Date.now(), puts = {};
       for (let i = 0; i < n; i++) {
         const r = makeSeedRecord(crypto.randomUUID(), (Math.random() * 4294967296) >>> 0,
