@@ -7,7 +7,7 @@ const PORT = process.env.PORT || 8787;
 const base = `http://127.0.0.1:${PORT}`;
 const WS = `ws://127.0.0.1:${PORT}/ws`;
 const KEY = { 'x-admin-key': 'local-dev-key' };
-const MAX = 2000, FADE = 1440; // mirror MAX_OBJECTS / STONE_FADE_TICKS
+const MAX = 2000, FADE = 1440; // MAX_OBJECTS; FADE = ticks-untouched that crumble a stone (STONE_FADE_MS / TICK_MS)
 let pass = 0, fail = 0;
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const check = (c, label) => { console.log((c ? '  PASS ' : '  FAIL ') + label); c ? pass++ : fail++; };
@@ -82,6 +82,11 @@ await tick(6, 0.0);                      // isolation builds; the ceiling trims 
 const after = (await snap()).objects.length;
 check(after < MAX, `a full world trims back under the ceiling (${after} < ${MAX})`);
 check(has(await snap(), an), 'the ceiling spares anomalies while trimming');
+
+// 6. write economy: the full-world snapshot must NOT run every tick (the DO
+// rows_written quota killer) — only on the occasional time-gated checkpoint.
+const burst = await tick(400, 0.0);
+check(burst.checkpoints <= 1, `a 400-tick burst writes at most one full checkpoint (was ${burst.checkpoints}, not 400)`);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
