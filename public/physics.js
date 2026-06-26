@@ -25,6 +25,14 @@ export function flingStep(pos, vel, dt, retain, stop) {
 // velocity so one jittery frame can't define a throw). a = weight of the sample.
 export function ema(prev, sample, a) { return prev * (1 - a) + sample * a; }
 
+// One damped-spring step pulling a scalar toward rest (0): `k` is stiffness, `retain`
+// the fraction of velocity kept per second. Returns the new position and velocity.
+// Drives the cursor-displacement spring-back (a nudged leaf settles home).
+export function spring(pos, vel, dt, k, retain) {
+  const v = (vel - k * pos * dt) * friction(retain, dt);
+  return { pos: pos + v * dt, vel: v };
+}
+
 // A soft radial push: an object within `radius` of a moving point is nudged away
 // along the point→object direction, strongest at the centre and zero at the rim,
 // scaled by the point's speed. Returns the velocity to ADD {vx,vy} (world units/s).

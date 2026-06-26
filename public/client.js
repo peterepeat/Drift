@@ -7,7 +7,7 @@ import * as PG from './drift-procgen.js';
 import { paintGround, paintGlows, paintNoise, paintPresence, paintSeasonGrade, seasonGround, seasonSat, paintWaterWorld, paintFlow } from './render.js';
 import { inViewport, CULL_MARGIN } from './cull.js';
 import { Audio } from './audio.js';
-import { flingStep, ema } from './physics.js';
+import { flingStep, ema, nudge, spring } from './physics.js';
 
 // ---- tuning constants -------------------------------------------------------
 const Z0 = 1.0, ZMIN = 0.2, ZMAX = 4.0;     // zoom = CSS px per world unit
@@ -28,6 +28,15 @@ const ATTEND_MS = 450;                        // long-press dwell before an obje
 const STACK_STEP_C = 12, STACK_TALL_C = 4;   // stone-stack rise/level + tall-stack-tap-to-scatter (mirror server)
 const GRIT_MS = 500;                          // a worn-out stone's grit scatter lifetime (spec §4.3)
 const POS_EASE_MAX = 24;                       // a position change up to this (a drift hop) eases; larger snaps
+// Mouse-displacement (Wave 6): a moving cursor brushes light things (leaves, seeds)
+// aside and they spring back. PURELY LOCAL & cosmetic — a render-only offset, never
+// the object's real position, so it touches no network, no storage, and can't desync.
+const NUDGE_RADIUS = 78;                      // world units the cursor disturbs around itself
+const NUDGE_STR = 6;                          // how strongly cursor speed transfers into a nudge
+const NUDGE_SPRING = 95;                      // spring pulling a displaced thing back to rest
+const NUDGE_DAMP = 0.02;                      // velocity retained per second (heavy damping → quick settle)
+const NUDGE_MAX = 150;                        // clamp the displacement so nothing flies off absurdly
+const NUDGE_MIN_SPEED = 45;                   // cursor must move faster than this (wu/s) to stir anything
 
 // Spec easing curves (Visual Bible §06).
 const EASE_RISE = cubicBezier(0.22, 1, 0.36, 1);     // pickup / place lift
@@ -186,7 +195,7 @@ function drawObjectWorld(o) {
     ctx.beginPath(); ctx.ellipse(o.x, o.y + rad * 0.5, rad * 0.8, rad * 0.32, 0, 0, Math.PI * 2); ctx.fill();
     ctx.restore();
   }
-  paintObject(o, o.x, o.y);
+  paintObject(o, o.x + (o._ox || 0), o.y + (o._oy || 0)); // + local cursor-displacement (Wave 6)
 }
 // The "reveal of age" (PRD §5.2): how far along its life an attended object is, so
 // the attend-bloom is larger and warmer the older/more-worn the object — its history
@@ -295,6 +304,43 @@ function updateFling(now) {
   if (s.stopped) placeHold('land');
 }
 
+// How easily a thing is stirred by a passing cursor (Wave 6): seeds & leaves fly,
+// growing plants get heavier as they mature and root, crystals stir a little, and
+// stones / anomalies / held things don't move at all.
+function lightnessOf(o) {
+  if (o.held || o.family === 'stone' || o.family === 'anomaly') return 0;
+  if (o.family === 'crystal') return 0.45;
+  return Math.max(0, 1 - shownMat(o) * 1.3); // ~1 at seed → 0 by ~maturity 0.77
+}
+// Local, cosmetic displacement: a moving cursor brushes light things aside (a render
+// offset _ox/_oy on a damped spring), and they settle back to rest. Never the real
+// position — no network, no storage. Idle objects are skipped, so a still cursor is
+// free and a moving one costs ~the cull pass already does.
+let _lastNudgeT = 0;
+function updateNudge(now) {
+  const dt = _lastNudgeT ? Math.min(0.05, (now - _lastNudgeT) / 1000) : 0; _lastNudgeT = now;
+  if (dt <= 0) return;
+  const speed = (now - lastHoverT) < 60 ? Math.hypot(mouseVelW.x, mouseVelW.y) : 0;
+  const active = speed > NUDGE_MIN_SPEED;
+  for (const o of objects.values()) {
+    const resting = !o._ox && !o._oy && !o._ovx && !o._ovy;
+    if (resting && !active) continue;                 // nothing to do
+    if (lightnessOf(o) <= 0) { if (!resting) { o._ox = o._oy = o._ovx = o._ovy = 0; } continue; }
+    o._ox = o._ox || 0; o._oy = o._oy || 0; o._ovx = o._ovx || 0; o._ovy = o._ovy || 0;
+    if (active && o.id !== heldId) {
+      const n = nudge(mouseWorld.x, mouseWorld.y, o.x + o._ox, o.y + o._oy, NUDGE_RADIUS, speed, NUDGE_STR, lightnessOf(o));
+      o._ovx += n.vx * dt; o._ovy += n.vy * dt;
+    }
+    const sx = spring(o._ox, o._ovx, dt, NUDGE_SPRING, NUDGE_DAMP); // damped spring-back to rest
+    const sy = spring(o._oy, o._ovy, dt, NUDGE_SPRING, NUDGE_DAMP);
+    o._ox = sx.pos; o._ovx = sx.vel; o._oy = sy.pos; o._ovy = sy.vel;
+    const off = Math.hypot(o._ox, o._oy);
+    if (off > NUDGE_MAX) { const k = NUDGE_MAX / off; o._ox *= k; o._oy *= k; }
+    if (Math.abs(o._ox) < 0.02 && Math.abs(o._oy) < 0.02 && Math.abs(o._ovx) < 0.5 && Math.abs(o._ovy) < 0.5)
+      { o._ox = o._oy = o._ovx = o._ovy = 0; }        // settle exactly to rest (no lingering jitter)
+  }
+}
+
 // ---- presence fade envelope -------------------------------------------------
 function presenceIntensity(p, now) {
   let inF = Math.min(1, (now - p.born) / P_IN); inF = 1 - Math.pow(1 - inF, 3);
@@ -340,6 +386,19 @@ function updateHover(cx, cy) { // desktop: attend whatever the mouse rests on
 const pointers = new Map(); // id -> { x, y, sx, sy, maxMove }
 let pinch = null, multiTouched = false;
 let lastMouse = { x: 0, y: 0 };  // last mouse screen position (anchors desktop gesture-zoom)
+// Hover velocity in WORLD units (Wave 6): a moving cursor stirs nearby light things.
+let mouseWorld = { x: 0, y: 0 }, mouseVelW = { x: 0, y: 0 }, lastHoverT = 0, lastHoverW = null;
+function trackMouseHover(cx, cy) {
+  const w = screenToWorld(cx, cy), t = performance.now();
+  if (lastHoverW && lastHoverT) {
+    const dt = (t - lastHoverT) / 1000;
+    if (dt > 0.001) {
+      mouseVelW.x = ema(mouseVelW.x, (w.x - lastHoverW.x) / dt, 0.5);
+      mouseVelW.y = ema(mouseVelW.y, (w.y - lastHoverW.y) / dt, 0.5);
+    }
+  }
+  mouseWorld = w; lastHoverW = w; lastHoverT = t;
+}
 let grab = null;                 // pending press on an object: { id, ox, oy } (object-centre − pointer, world units)
 let holdMode = null;             // null | 'drag' (carried by a pressed pointer) | 'follow' (tap-picked, tracks the cursor)
 let holdOff = { x: 0, y: 0 };    // world-unit offset object-centre − pointer, so a grab doesn't snap to centre
@@ -427,7 +486,8 @@ canvas.addEventListener('pointermove', (e) => {
   if (!p) {                                       // no pressed pointer for this id
     if (e.pointerType === 'mouse') {
       if (heldId && holdMode === 'follow') carryTo(e.clientX, e.clientY); // a follow-held object tracks the cursor
-      else updateHover(e.clientX, e.clientY);                              // else attend on hover
+      else { updateHover(e.clientX, e.clientY); trackMouseHover(e.clientX, e.clientY); } // attend + stir light things
+
     }
     return;
   }
@@ -728,6 +788,7 @@ function frame(now) {
   updateGrowth(now);
   updatePositions(now);
   updateFling(now);
+  updateNudge(now);
   updateDissolve(now);
   updateArrive(now);
 

@@ -1,5 +1,5 @@
 // Pure motion helpers (no worker needed) — throw momentum + pointer nudge.
-import { friction, flingStep, ema, nudge } from '../public/physics.js';
+import { friction, flingStep, ema, nudge, spring } from '../public/physics.js';
 let pass = 0, fail = 0;
 const check = (c, label) => { console.log((c ? '  PASS ' : '  FAIL ') + label); c ? pass++ : fail++; };
 const near = (a, b, e = 1e-9) => Math.abs(a - b) <= e;
@@ -36,6 +36,18 @@ const c0 = nudge(0, 0, 0, 0, 50, 10, 1);
 check(Number.isFinite(c0.vx) && Number.isFinite(c0.vy) && (c0.vx !== 0 || c0.vy !== 0), 'a dead-centre hit stays finite and still moves');
 check(nudge(0, 0, 10, 0, 50, 10, 1, 0).vx === 0, 'lightness 0 (a heavy thing) does not stir');
 check(nudge(0, 0, 10, 0, 50, 10, 1, 1).vx > nudge(0, 0, 10, 0, 50, 10, 1, 0.3).vx, 'lighter things are nudged more than heavier ones');
+
+// ---- spring: a damped pull back to rest (cursor-displacement settle) ----
+check(spring(10, 0, 0.1, 90, 0.02).vel < 0, 'a displaced-at-rest spring accelerates back toward 0');
+// from a displacement, it converges to ~rest over ~1s of small steps
+let sp = { pos: 40, vel: 0 };
+for (let i = 0; i < 120; i++) sp = spring(sp.pos, sp.vel, 1 / 60, 95, 0.02);
+check(Math.abs(sp.pos) < 1 && Math.abs(sp.vel) < 5, `a nudged thing settles home (pos ${sp.pos.toFixed(2)}, vel ${sp.vel.toFixed(2)})`);
+// heavier damping settles at least as fast (less residual energy) than lighter
+let a = { pos: 30, vel: 0 }, b = { pos: 30, vel: 0 };
+for (let i = 0; i < 30; i++) { a = spring(a.pos, a.vel, 1 / 60, 95, 0.001); b = spring(b.pos, b.vel, 1 / 60, 95, 0.5); }
+check(Math.abs(a.pos) <= Math.abs(b.pos) + 1e-9, 'heavier damping settles at least as fast as lighter damping');
+check(spring(0, 0, 0.1, 95, 0.02).pos === 0 && spring(0, 0, 0.1, 95, 0.02).vel === 0, 'a thing already at rest stays at rest');
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
