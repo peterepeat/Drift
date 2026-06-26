@@ -46,9 +46,26 @@ export function worldToAudioParams({ seasonPhase = 0, density = 0, warmth = 0, w
   };
 }
 
+// ---- interaction pings (generative, unique per touch; PRD §8.4 extended) -----
+// A short, consonant tone on each pickup/place/land — synthesised (no samples) and
+// never the same twice: scale degree, octave, detune, pan and length all derive
+// from the object's seed + a per-event nonce. Pitched on a just-pentatonic above
+// the SAME season tonic the ambient bed uses, so events always sit in the drone.
+// Gated by the one sound opt-in (the corner glyph), like the bed.
+const PING_LEVEL = 0.16;                          // peak gain of a ping (quiet, sits under the bed's presence)
+const PENT = [1, 9 / 8, 5 / 4, 3 / 2, 5 / 3, 2, 9 / 4, 8 / 3]; // just-intonation pentatonic-ish ratios
+// family flavour: octave multiplier, oscillator timbre, base length (s)
+const PING_FAMILY = {
+  stone:   { oct: 0.5, type: 'triangle', dur: 0.55 },
+  seed:    { oct: 1.0, type: 'sine',     dur: 0.32 },
+  crystal: { oct: 2.0, type: 'sine',     dur: 0.6  },
+  anomaly: { oct: 1.0, type: 'triangle', dur: 0.95 },
+  creature:{ oct: 1.5, type: 'sine',     dur: 0.28 },
+};
+
 // ---- the audio graph (browser only) ----------------------------------------
 const DRONE = [[0.5, 'sine', 0.5], [1.0, 'sine', 0.6], [1.5, 'triangle', 0.4]]; // [tonic mult, type, gain]
-let ctx = null, master = null, breath = null, drones = [], droneGains = [], bandpass = null, padGain = null, swellDepth = null;
+let ctx = null, master = null, breath = null, drones = [], droneGains = [], bandpass = null, padGain = null, swellDepth = null, fx = null;
 let enabled = false, timer = null;
 let lastState = { seasonPhase: 0, density: 0, warmth: 0, water: 0 };
 
@@ -83,6 +100,47 @@ function build() {
   const lfo = ctx.createOscillator(); lfo.frequency.value = LFO_RATE_HZ;
   swellDepth = ctx.createGain(); swellDepth.gain.value = 0; // breathing depth (fraction of 1), set per update
   lfo.connect(swellDepth); swellDepth.connect(breath.gain); lfo.start();
+  // Interaction pings bypass the bed's breath/master so they read as crisp events,
+  // not part of the drone. Their own gate is `enabled` (checked when a ping fires).
+  fx = ctx.createGain(); fx.gain.value = 1; fx.connect(ctx.destination);
+}
+
+// PURE: derive a ping's tonal parameters from the object + the season tonic + a
+// random source `r` (an rng()). Pentatonic-on-the-tonic keeps every event consonant
+// with the drone; the per-call rng makes no two identical (PRD: "must be unique").
+// kind: 'pickup' (a small rise) | 'place' (an octave-lower settle) | 'land' (a rest).
+export function pingParams(seed, family, kind, tonicHz, r) {
+  const fam = PING_FAMILY[family] || PING_FAMILY.seed;
+  const deg = PENT[Math.floor(r() * PENT.length)];
+  const freq = tonicHz * fam.oct * deg * (kind === 'place' ? 0.5 : 1) * (1 + (r() - 0.5) * 0.012);
+  const dur = fam.dur * (0.8 + r() * 0.5) * (kind === 'land' ? 0.7 : 1);
+  const peak = PING_LEVEL * (kind === 'pickup' ? 1 : kind === 'place' ? 0.85 : 0.7);
+  const slide = kind === 'pickup' ? 1.05 : 0.95;  // gesture contour: pickup lifts, place/land settle
+  return { freq, dur, peak, type: fam.type, slide };
+}
+
+// Build and fire one generative interaction tone. Pure synthesis; auto-cleans up.
+function ping({ seed = 0, family = 'seed', kind = 'pickup', x = 0 } = {}) {
+  if (!enabled || !ctx || ctx.state !== 'running' || !fx) return;
+  const t = ctx.currentTime;
+  const tonic = worldToAudioParams(lastState).tonicHz;             // harmonise with the season bed
+  const r = PG.rng(((seed >>> 0) ^ ((Math.random() * 4294967296) >>> 0)) >>> 0); // unique every time
+  const p = pingParams(seed, family, kind, tonic, r);
+  const env = ctx.createGain();
+  env.gain.setValueAtTime(0.0001, t);
+  env.gain.exponentialRampToValueAtTime(p.peak, t + 0.008);        // quick attack
+  env.gain.exponentialRampToValueAtTime(0.0001, t + p.dur);        // exponential decay
+  const osc = ctx.createOscillator(); osc.type = p.type; osc.frequency.setValueAtTime(p.freq, t);
+  osc.frequency.exponentialRampToValueAtTime(p.freq * p.slide, t + Math.min(p.dur, 0.12));
+  const osc2 = ctx.createOscillator(); osc2.type = 'sine'; osc2.frequency.setValueAtTime(p.freq * 2, t);
+  const g2 = ctx.createGain(); g2.gain.value = 0.28;               // a soft octave partial for body
+  osc.connect(env); osc2.connect(g2); g2.connect(env);
+  let out = env;
+  if (ctx.createStereoPanner) { const pan = ctx.createStereoPanner(); pan.pan.value = Math.max(-0.6, Math.min(0.6, x / 1400)); env.connect(pan); out = pan; }
+  out.connect(fx);
+  osc.start(t); osc2.start(t);
+  osc.stop(t + p.dur + 0.05); osc2.stop(t + p.dur + 0.05);
+  osc.onended = () => { try { env.disconnect(); g2.disconnect(); } catch (e) {} };
 }
 
 function apply(glide) {
@@ -102,6 +160,7 @@ function stopTimer() { if (timer) { clearInterval(timer); timer = null; } }
 export const Audio = {
   isEnabled: () => enabled,
   setState(s) { lastState = s; },
+  event(kind, info) { try { ping({ kind, ...(info || {}) }); } catch (e) {} }, // a generative interaction tone (no-op when silent)
   enable(s) {
     if (s) lastState = s;
     try { if (!ctx) build(); else if (ctx.state === 'suspended') ctx.resume(); } catch { return false; }

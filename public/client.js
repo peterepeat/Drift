@@ -292,7 +292,7 @@ function updateFling(now) {
   carry.x = s.x; carry.y = s.y; flingVel.x = s.vx; flingVel.y = s.vy;
   const o = objects.get(heldId); if (o) { o.x = carry.x; o.y = carry.y; }
   maybeSendCarry();
-  if (s.stopped) placeHold();
+  if (s.stopped) placeHold('land');
 }
 
 // ---- presence fade envelope -------------------------------------------------
@@ -353,6 +353,7 @@ function beginHold(o, mode, off) {
   o.held = true;                                  // optimistic; the server confirms via pickup_ack
   setLift(o.id, 1, LIFT_MS, EASE_RISE);
   send({ t: 'pickup', id: o.id, token, ts: Date.now() });
+  Audio.event('pickup', { seed: o.seed, family: o.family, x: o.x }); // a generative lift tone (silent unless sound is on)
 }
 function carryTo(cx, cy) {                         // keep the grab point under the pointer
   if (!heldId) return;
@@ -382,12 +383,13 @@ function startFling() {
   holdMode = 'fling';
   setLift(heldId, 0, SETTLE_MS, EASE_SETTLE);      // ground it — a thrown thing slides, not floats
 }
-function placeHold() {                             // settle the held object where it is
+function placeHold(kind) {                         // settle the held object where it is
   if (!heldId) return;
   const o = objects.get(heldId);
   if (o) { o.x = carry.x; o.y = carry.y; o._tx = carry.x; o._ty = carry.y; o.held = false; }
   send({ t: 'place', id: heldId, token, x: carry.x, y: carry.y, ts: Date.now() });
   setLift(heldId, 0, SETTLE_MS, EASE_SETTLE);
+  if (o) Audio.event(kind || 'place', { seed: o.seed, family: o.family, x: o.x }); // generative settle/land tone
   clearHold();
 }
 function clearHold() { heldId = null; holdMode = null; carry = null; preGrab = null; grab = null; }

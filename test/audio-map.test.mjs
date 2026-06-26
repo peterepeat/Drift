@@ -1,7 +1,8 @@
 // Ambient sound parameter mapping (pure — no AudioContext, no worker).
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { worldToAudioParams, SEASON_SEMITONES, TONIC_BASE_HZ, DENSITY_FULL } from '../public/audio.js';
+import { worldToAudioParams, pingParams, SEASON_SEMITONES, TONIC_BASE_HZ, DENSITY_FULL } from '../public/audio.js';
+import { rng } from '../public/drift-procgen.js';
 let pass = 0, fail = 0;
 const check = (c, label) => { console.log((c ? '  PASS ' : '  FAIL ') + label); c ? pass++ : fail++; };
 const near = (a, b, e = 1e-6) => Math.abs(a - b) < e;
@@ -34,6 +35,22 @@ check(p.brightness >= 0 && p.brightness <= 1 && p.padLevel >= 0 && p.padLevel <=
 check(p.tonicHz > 0 && Number.isFinite(p.tonicHz), 'tonic is a finite positive frequency');
 check(JSON.stringify(worldToAudioParams({})) === JSON.stringify(worldToAudioParams({ seasonPhase: 0, density: 0, warmth: 0, water: 0 })), 'empty input == explicit zero input (safe defaults)');
 check(JSON.stringify(p) === JSON.stringify(worldToAudioParams({ seasonPhase: 1.5, density: 12, warmth: 0.4, water: 0.7 })), 'mapping is deterministic');
+
+// 4b. interaction pings: consonant on the tonic, gesture-shaped, and unique per touch
+const TON = 110;
+const pk = pingParams(7, 'seed', 'pickup', TON, rng(7));
+check(pk.freq > 0 && Number.isFinite(pk.freq) && pk.dur > 0 && pk.peak > 0, 'a ping has a finite positive freq/dur/peak');
+check(near(pingParams(7, 'seed', 'place', TON, rng(99)).freq, pingParams(7, 'seed', 'pickup', TON, rng(99)).freq * 0.5), 'a place settles an octave below its pickup');
+check(pingParams(7, 'crystal', 'pickup', TON, rng(5)).freq > pingParams(7, 'stone', 'pickup', TON, rng(5)).freq, 'a crystal pings higher than a stone (family octave)');
+check(pk.slide > 1 && pingParams(7, 'seed', 'place', TON, rng(7)).slide < 1, 'pickup lifts in pitch, place settles down');
+const PENT_REF = [1, 9 / 8, 5 / 4, 3 / 2, 5 / 3, 2, 9 / 4, 8 / 3];
+const fr = pingParams(123, 'seed', 'pickup', TON, rng(123)).freq / TON; // seed octave = 1
+const nearest = PENT_REF.reduce((b, x) => Math.abs(x - fr) < Math.abs(b - fr) ? x : b, PENT_REF[0]);
+check(Math.abs(fr - nearest) / nearest < 0.01, 'a ping lands on a pentatonic ratio above the tonic (always consonant)');
+const pitches = new Set();
+for (let i = 0; i < 24; i++) pitches.add(Math.round(pingParams(i, 'seed', 'pickup', TON, rng(1000 + i)).freq * 100));
+check(pitches.size >= 4, `pings vary across touches — ${pitches.size} distinct pitches in 24 (never the same twice)`);
+check(Number.isFinite(pingParams(0, 'no-such-family', 'pickup', TON, rng(1)).freq), 'an unknown family falls back safely (finite freq)');
 
 // 5. purity guard: the audio module never touches identity or the network
 const src = readFileSync(fileURLToPath(new URL('../public/audio.js', import.meta.url)), 'utf8');
