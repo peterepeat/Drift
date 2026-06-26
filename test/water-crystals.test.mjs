@@ -4,7 +4,13 @@ const WS = `ws://127.0.0.1:${PORT}/ws`;
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 let pass = 0, fail = 0;
 const check = (c, label) => { console.log((c ? '  PASS ' : '  FAIL ') + label); c ? pass++ : fail++; };
-const tickG = (n) => fetch(`${base}/admin/tick?n=${n}&season=0.0`, { method: 'POST', headers: { 'x-admin-key': 'local-dev-key' } }).then((r) => r.json());
+// Crystal spawn/decay are season-independent, so we tick in RESTING (growth paused)
+// to keep the seed population from ballooning to the cap over these long bursts
+// (a packed world's per-tick ceiling-trim is what made this suite crawl). The
+// season CLOCK advances during a burst, so re-pin Resting in small chunks — one
+// big call would drift into the growing seasons and balloon anyway.
+const tickN = (n, s) => fetch(`${base}/admin/tick?n=${n}&season=${s}`, { method: 'POST', headers: { 'x-admin-key': 'local-dev-key' } }).then((r) => r.json());
+const tickG = async (n) => { let r; for (let d = 0; d < n; d += 50) r = await tickN(Math.min(50, n - d), 2.0); return r; };
 const spawn = (x, y) => fetch(`${base}/admin/crystal${x != null ? `?x=${x}&y=${y}` : ''}`, { method: 'POST', headers: { 'x-admin-key': 'local-dev-key' } }).then((r) => r.json());
 function open() {
   const ws = new WebSocket(WS);

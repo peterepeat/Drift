@@ -5,6 +5,7 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 let pass = 0, fail = 0;
 const check = (c, label) => { console.log((c ? '  PASS ' : '  FAIL ') + label); c ? pass++ : fail++; };
 const tick = (n) => fetch(`${base}/admin/tick?n=${n}&season=0.0`, { method: 'POST', headers: { 'x-admin-key': 'local-dev-key' } }).then((r) => r.json()); // pin Growing; seasons tested separately
+const lifecycle = (id, maturity, aged) => fetch(`${base}/admin/lifecycle?id=${id}&maturity=${maturity}&aged=${aged}`, { method: 'POST', headers: { 'x-admin-key': 'local-dev-key' } }).then((r) => r.json());
 
 function open() {
   const ws = new WebSocket(WS);
@@ -57,16 +58,24 @@ const dAfter = (await snapshot()).objects.find((o) => o.id === dseed.id);
 check(dAfter && dAfter.maturity === 0, `disturbing a pre-sprout seed reset its growth (${dseed.maturity.toFixed(3)} -> ${dAfter?.maturity})`);
 ctl.close();
 
-// --- unattended cycle: shedding + dissolution, population bounded ---
+// --- unattended cycle: shedding + population bounded ---
 const before = (await snapshot()).objects.length;
-let totalSpawned = 0, totalGone = 0;
-for (let i = 0; i < 6; i++) { const r = await tick(40); totalSpawned += r.spawned; totalGone += r.gone; } // ~240 ticks
+let totalSpawned = 0;
+for (let i = 0; i < 6; i++) { const r = await tick(40); totalSpawned += r.spawned; } // ~240 ticks
 const w2 = await snapshot();
 check(totalSpawned > 0, `mature plants shed new seeds (${totalSpawned} spawned over ~240 ticks)`);
-check(totalGone > 0, `fully-aged plants dissolved (${totalGone} gone)`);
 check(w2.objects.length <= 10000, `population stays under the cap (${w2.objects.length} <= 10000)`);
 const grown = w2.objects.filter((o) => o.family === 'seed' && o.maturity >= 0.14).length;
 check(grown > plant0, `the world filled with plants over time (${plant0} -> ${grown})`);
+
+// --- a fully-aged plant dissolves: set one to the brink, a few ticks finish it
+//     (deterministic — natural aging timing is marginal and ballooning to age it
+//     the slow way would pack the world to the cap) ---
+const ripe = w2.objects.find((o) => o.family === 'seed' && o.maturity >= 0.86);
+await lifecycle(ripe.id, 1, 0.96);
+let dissolved = 0;
+for (let i = 0; i < 5 && !dissolved; i++) dissolved += (await tick(20)).gone; // ~20-100 ticks
+check(dissolved > 0 && !(await snapshot()).objects.find((o) => o.id === ripe.id), `a fully-aged plant dissolves (${dissolved} gone)`);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

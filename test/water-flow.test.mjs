@@ -66,12 +66,16 @@ check(no && moved > 8, `an object in the pool drifts along the flow (crept ${mov
 check(downstream > 0, 'it drifts roughly downstream (positive along the flow vector)');
 check(fo && Math.hypot(fo.x - 6000, fo.y - 6000) < 0.001, 'an object far outside the pool does not drift');
 
-// 5. a stone deflects the local flow — channelling (isolate one stone's effect)
+// 5. a stone deflects the local flow — channelling (isolate one stone's effect).
+// Probe a CLEAR region far beyond every grove, so ONLY the placed stone is nearby
+// (the dense heart grove at the origin would otherwise contaminate a near-origin probe).
+await tick(1, 3.0);                          // Rising → full flow magnitude at the probe
+const PX = 8130, PY = 3000, SX = 8100, SY = 3000; // stone 30u from the probe (< FLOW_STONE_R)
 const stone = (await snap()).objects.find((o) => o.family === 'stone');
-await place(stone.id, 9000, 9000);          // stone far away: baseline flow at the probe
-const base0 = await flow(130, 0);
-await place(stone.id, 100, 0);              // stone beside the probe: should steer flow around it
-const base1 = await flow(130, 0);
+await place(stone.id, 12000, 12000);        // stone far away: baseline flow at the probe
+const base0 = await flow(PX, PY);
+await place(stone.id, SX, SY);              // stone beside the probe: should steer flow around it
+const base1 = await flow(PX, PY);
 check(base1.vx !== base0.vx || base1.vy !== base0.vy, 'a stone deflects the local flow (channelling)');
 check(Math.abs(base1.vy - base0.vy) > 1e-3, `the deflection curves the flow tangentially (Δvy=${(base1.vy - base0.vy).toFixed(3)})`);
 

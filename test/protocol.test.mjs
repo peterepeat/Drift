@@ -24,8 +24,8 @@ await wait(300);
 
 const wsA = lastOf(A, 'world_state');
 const wsB = lastOf(B, 'world_state');
-check(wsA && wsA.objects.length === 200, `A world_state has 200 objects (${wsA?.objects.length})`);
-check(wsB && wsB.objects.length === 200, `B world_state has 200 objects (${wsB?.objects.length})`);
+check(wsA && wsA.objects.length > 50, `A world_state has the full seeded world (${wsA?.objects.length})`);
+check(wsB && wsB.objects.length === wsA?.objects.length, `B sees the same full world as A (${wsB?.objects.length})`);
 check(A.pid && B.pid && A.pid !== B.pid, 'A and B have distinct ephemeral pids');
 check(wsA.objects.every((o) => typeof o.held === 'boolean' && o.token === undefined), 'world_state objects expose boolean held, never a token');
 

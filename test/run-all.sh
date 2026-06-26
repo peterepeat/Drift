@@ -7,11 +7,32 @@
 #   - Several suites pick "a dormant seed" or "a pre-sprout seed"; after heavy
 #     ticking the world saturates at the population cap and none remain, so each
 #     suite needs its OWN fresh world (we wipe .wrangler/state per suite).
-# Needs .dev.vars with ADMIN_KEY=local-dev-key (see .dev.vars.example).
+# Needs .dev.vars with ADMIN_KEY=local-dev-key (see .dev.vars.example). The dev
+# world is kept SMALL via .dev.vars SEED_N so each suite's ticks are fast; prod
+# (no SEED_N) seeds the full grove world.
+#
+# EVERY suite is run under a hard per-suite timeout (SUITE_TIMEOUT, default 75s):
+# a wedged worker/test is killed and counted as a failure instead of hanging the
+# whole run forever (learned the hard way — a single hung suite once ran for hours).
 set -u
 cd "$(dirname "$0")/.."
 PORT=${PORT:-8799}
 LOG=/tmp/drift-test-worker.log
+SUITE_TIMEOUT=${SUITE_TIMEOUT:-75}
+
+# Run `node <file>` with a hard wall-clock cap (portable — macOS has no `timeout`).
+# Returns the test's exit code, or 124 if it was killed for exceeding the cap.
+run_node() {
+  local f="$1"
+  PORT="$PORT" node "$f" &
+  local pid=$!
+  ( sleep "$SUITE_TIMEOUT"; kill -9 "$pid" 2>/dev/null ) &
+  local killer=$!
+  wait "$pid" 2>/dev/null; local rc=$?
+  kill -9 "$killer" 2>/dev/null; wait "$killer" 2>/dev/null || true
+  if [ "$rc" -ge 128 ]; then echo "  !! TIMEOUT — killed after ${SUITE_TIMEOUT}s"; return 124; fi
+  return "$rc"
+}
 
 boot() {
   pkill -9 -f "wrangler dev" 2>/dev/null || true
@@ -34,16 +55,17 @@ boot() {
 fail=0
 
 # Pure unit suites — no worker boot needed.
-for unit in cull audio-map physics creatures; do
+for unit in cull audio-map physics creatures seed; do
   echo "=== $unit (unit) ==="
-  node "test/$unit.test.mjs" || fail=1
+  run_node "test/$unit.test.mjs" || fail=1
 done
 
 # Integration suites — each against a FRESH worker on an isolated port.
 for suite in protocol interest grid checkpoint decouple growth seasons anomalies water-crystals stones water-flow thermal ceiling creature-world; do
   boot
   echo "=== $suite ==="
-  PORT="$PORT" node "test/$suite.test.mjs" || fail=1
+  run_node "test/$suite.test.mjs" || fail=1
 done
 pkill -9 -f "wrangler dev" 2>/dev/null || true
+pkill -9 -f workerd 2>/dev/null || true
 [ "$fail" = 0 ] && echo "ALL SUITES PASSED" || { echo "SOME SUITES FAILED"; exit 1; }

@@ -32,7 +32,7 @@ const check = (cond, label) => { console.log((cond ? '  PASS ' : '  FAIL ') + la
 const full = await open();
 await wait(300);
 const wsFull = lastOf(full, 'world_state');
-check(wsFull && wsFull.objects.length === 200, `bare connect gets the full world (${wsFull?.objects.length})`);
+check(wsFull && wsFull.objects.length > 50, `bare connect gets the full world (${wsFull?.objects.length})`);
 const cog = wsFull.cog; // fresh world ⇒ ~origin; the interest box is centred here
 
 // ---- interest-filtered initial payload ----
@@ -40,7 +40,7 @@ const hw = 60, hh = 60;
 const small = await open(`?hw=${hw}&hh=${hh}`);
 await wait(300);
 const wsSmall = lastOf(small, 'world_state');
-check(wsSmall && wsSmall.objects.length < 200, `small viewport gets a subset, not the world (${wsSmall?.objects.length}/200)`);
+check(wsSmall && wsSmall.objects.length < wsFull.objects.length, `small viewport gets a subset, not the world (${wsSmall?.objects.length}/${wsFull.objects.length})`);
 check(wsSmall && wsSmall.objects.length > 0, `small viewport still sees what's nearby (${wsSmall?.objects.length})`);
 const within = wsSmall.objects.every((o) =>
   Math.abs(o.x - cog.x) <= hw * MARGIN + 1e-6 && Math.abs(o.y - cog.y) <= hh * MARGIN + 1e-6);

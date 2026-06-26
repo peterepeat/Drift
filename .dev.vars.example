@@ -3,3 +3,6 @@
 # These endpoints are inert in production unless you set the secret there with:
 #   npx wrangler secret put ADMIN_KEY
 ADMIN_KEY=local-dev-key
+# Optional: shrink the seeded world for fast local/test ticks (prod leaves it unset
+# and seeds the full grove world). The test runner relies on this.
+SEED_N=200
