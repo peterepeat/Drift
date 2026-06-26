@@ -52,17 +52,33 @@ const STONE_FADE_MS = 1440 * TICK_MS;      // a stone untouched & unwarmed this 
 const CEIL_TRIM = 2;                       // how far under the ceiling to trim to (leaves room to breathe)
 
 // ---- persistence ------------------------------------------------------------
-// Per-tick we persist only what actually changed/spawned/vanished (the broadcast
-// loops below). The remaining in-memory drift that has no discrete write — sub-
-// threshold growth/aging, sub-POS_BCAST_DELTA water creep, per-object heat, the
-// warmth-refreshed last_touched clock, crystal decay — is tracked in a DIRTY SET
-// and flushed by the periodic checkpoint. The checkpoint writes ONLY the dirty
-// objects, never the whole population: an object absent from the set is byte-
-// identical on disk already, so skipping it loses nothing. This makes the always-
-// ticking world's write rate scale with CHANGE, not with population — the thing
-// that has to hold before the cap can rise toward the PRD's 10k (the DO
-// rows_written quota was, and remains, the binding constraint). A PERSISTED
-// wall-clock mark gates the cadence so it fires across DO eviction.
+// Broadcast cadence is DECOUPLED from write cadence. Each tick we broadcast every
+// lifecycle/drift threshold-crossing for smooth visuals, but those crossings DON'T
+// each write to storage — they're recorded in a DIRTY SET (alongside the sub-
+// threshold drift no broadcast captured: growth/aging, sub-POS_BCAST_DELTA water
+// creep, per-object heat, the warmth-refreshed last_touched clock, crystal decay)
+// and flushed together by the periodic checkpoint. The checkpoint writes ONLY the
+// dirty objects, never the whole population: an object absent from the set is byte-
+// identical on disk already, so skipping it loses nothing. So a warm/active object
+// that crosses the broadcast delta many times in a checkpoint window now costs ONE
+// write (at the flush) instead of one per crossing — the always-ticking world's
+// write rate tracks the CHECKPOINT CADENCE and the amount of CHANGE, not the
+// broadcast rate and not the population. That is the lever that has to hold before
+// the cap can rise toward the PRD's 10k (the DO rows_written quota was, and remains,
+// the binding constraint). STRUCTURAL / OWNERSHIP changes still write immediately:
+// spawns and deaths (so a new or gone object survives a pre-checkpoint eviction)
+// and a reclaimed hold (ownership must not silently revive). A PERSISTED wall-clock
+// mark gates the checkpoint cadence so it fires across DO eviction.
+//   TRADE-OFF (deliberate): the dirty set is in-memory only, so if the DO evicts
+//   between checkpoints the un-flushed drift reverts to its last on-disk value on
+//   reload. This is the SAME bound the dirty-set design already accepted for the
+//   sub-threshold drift; deferring the broadcast CROSSINGS too just widens what's
+//   subject to it. The revert is bounded by one checkpoint window of SLOW change
+//   (~0.05 maturity, ~a screen-pixel-scale drift) and the world's durable-growth
+//   cadence is unchanged — the checkpoint already flushes every actively-changing
+//   object (each mutates every tick ⇒ is dirty), so this removes the redundant
+//   per-crossing writes WITHOUT enlarging the checkpoint. Acceptable for a world
+//   this slow; revisit (shorter cadence / Workers Paid) if the cap rises far.
 const CHECKPOINT_MS = 30 * 60 * 1000;      // dirty-flush cadence (~30 min)
 
 // ---- seasons (the world's own slow clock; not correlated to real time) ------
@@ -182,6 +198,7 @@ export class WorldRoom {
     this.grid = new Map();         // "cx,cy" -> Set(record): in-memory spatial hash (never persisted)
     this.cellOf = new Map();       // id -> "cx,cy": each object's current grid cell (for move/remove)
     this.dirty = new Set();        // ids whose in-memory state diverged from disk since last #persist (checkpoint flushes these)
+    this.objWrites = 0;            // discrete per-object row writes+deletes (NOT the batched checkpoint) — the rows_written lever, exposed for ops/tests
     this.flowNoise = null;         // lazily-built makeNoise(FLOW_SEED); shared with the client visual
     this.heat = null;              // coarse thermal field { w, data[], form[] } (lazy; PRD §4.1)
     this.heatActive = false;       // any heat/formation this tick (skip persisting an inert field)
@@ -308,10 +325,12 @@ export class WorldRoom {
       const n = Math.max(1, Math.min(500, parseInt(url.searchParams.get('n') || '1', 10)));
       const setSeason = url.searchParams.get('season');
       if (setSeason != null) this.season = parseFloat(setSeason) || 0; // jump the season clock (testing)
-      const before = this.objects.size;
+      const before = this.objects.size, writesBefore = this.objWrites;
       let spawned = 0, gone = 0, checkpoints = 0, checkpointWrote = 0;
       for (let i = 0; i < n; i++) { const r = await this.#tick(Date.now()); spawned += r.spawned; gone += r.gone; if (r.checkpointed) { checkpoints++; checkpointWrote += r.checkpointWrote; } }
-      return Response.json({ ok: true, ticks: n, before, after: this.objects.size, spawned, gone, checkpoints, checkpointWrote, season: this.season });
+      // objWrites = discrete per-object row writes/deletes during these ticks (spawns + deaths + any
+      // hold-reclaim), NOT the batched checkpoint — growth/drift broadcasts are decoupled and cost zero here.
+      return Response.json({ ok: true, ticks: n, before, after: this.objects.size, spawned, gone, objWrites: this.objWrites - writesBefore, checkpoints, checkpointWrote, season: this.season });
     }
 
     // Ops/testing only: spawn one anomaly (optionally at ?x=&y=). Gated.
@@ -561,7 +580,7 @@ export class WorldRoom {
       try { ws.send(s); } catch {}
     }
   }
-  async #persist(o) { await this.state.storage.put('obj:' + o.id, o); this.dirty.delete(o.id); } // now byte-current on disk
+  async #persist(o) { await this.state.storage.put('obj:' + o.id, o); this.dirty.delete(o.id); this.objWrites++; } // now byte-current on disk
 
   // ---- WebSocket message handling -------------------------------------------
   async webSocketMessage(ws, raw) {
@@ -608,7 +627,7 @@ export class WorldRoom {
         if (o.handling >= GRIT_HANDLING) {
           this.#gridRemove(o);
           this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id); this.dirty.delete(o.id);
-          await this.state.storage.delete('obj:' + o.id);
+          await this.state.storage.delete('obj:' + o.id); this.objWrites++;
           this.#bcast({ t: 'object_gone', id: o.id, grit: true }, null);
           return;
         }
@@ -625,7 +644,7 @@ export class WorldRoom {
       if (!o || o.family !== 'anomaly' || o.held !== m.token) return;
       this.#gridRemove(o);
       this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id); this.dirty.delete(o.id);
-      await this.state.storage.delete('obj:' + o.id);
+      await this.state.storage.delete('obj:' + o.id); this.objWrites++;
       this.#bcast({ t: 'object_gone', id: o.id }, null);
 
     } else if (m.t === 'scatter') {
@@ -685,12 +704,14 @@ export class WorldRoom {
   }
 
   // ---- the breath: one growth/decay tick ------------------------------------
-  // One world tick. Discrete changes (broadcast lifecycle moves, spawns, deaths)
-  // persist as they happen; everything else that drifts in memory is recorded in
-  // the dirty set and flushed by the periodic checkpoint (see the persistence
-  // note above and #checkpoint).
+  // One world tick. Broadcasts every lifecycle move / spawn / death for smooth
+  // visuals, but only SPAWNS, DEATHS and ownership reclaims write to storage as they
+  // happen; the broadcast growth/drift moves (and all the sub-threshold drift) are
+  // recorded in the dirty set and flushed by the periodic checkpoint — broadcast
+  // cadence is decoupled from write cadence (see the persistence note and #checkpoint).
   async #tick(now) {
     const changed = [], spawned = [], gone = [];
+    const reclaimed = new Set(); // ids in `changed` that are an ownership release ⇒ persist now, don't defer
     // Season modulates how fast life grows and ages this tick.
     const sb = seasonBlend(this.season);
     const gMult = lerp(GROWTH_MULT[sb.cur], GROWTH_MULT[sb.next], sb.fade);
@@ -702,7 +723,7 @@ export class WorldRoom {
     for (const o of this.objects.values()) if (o.family === 'anomaly') anomalies.push(o);
     for (const o of this.objects.values()) {
       if (o.held !== '' && now - o.held_at > HOLD_TIMEOUT_MS) { // missed-close safety net
-        o.held = ''; o.heldConn = ''; o.held_at = 0; changed.push(o);
+        o.held = ''; o.heldConn = ''; o.held_at = 0; changed.push(o); reclaimed.add(o.id); // ownership ⇒ persist now
       }
       if (o.held !== '') continue;          // growth paused while held
       if (o.family === 'crystal') {         // crystals slowly dissolve (a brief flash, then gone)
@@ -833,12 +854,20 @@ export class WorldRoom {
       spawned.push(this.#spawnCrystal(now));
     }
 
-    for (const o of changed) { await this.#persist(o); this.#bcast(this.#stateMsg(o, now), null); }
+    // Broadcast every threshold-crossing for smooth visuals, but DON'T write per
+    // crossing: mark it dirty and let the periodic checkpoint persist it (the
+    // broadcast/persist decouple — write rate tracks the checkpoint cadence, not the
+    // broadcast rate). A reclaimed hold is the exception: ownership writes now, so a
+    // missed-close release can't silently revive after a pre-checkpoint eviction.
+    for (const o of changed) {
+      if (reclaimed.has(o.id)) await this.#persist(o); else this.dirty.add(o.id);
+      this.#bcast(this.#stateMsg(o, now), null);
+    }
     for (const o of spawned) { this.objects.set(o.id, o); this.#gridAdd(o); await this.#persist(o); this.#bcast({ t: 'object_new', o: this.#pub(o) }, null); }
     for (const o of gone) {
       this.#gridRemove(o);
       this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id); this.dirty.delete(o.id);
-      await this.state.storage.delete('obj:' + o.id);
+      await this.state.storage.delete('obj:' + o.id); this.objWrites++;
       this.#bcast({ t: 'object_gone', id: o.id }, null);
     }
 
