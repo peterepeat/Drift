@@ -98,6 +98,7 @@ const STACK_MAX = 6;                      // taller than this always topples on 
 const TOPPLE_CHANCE = 0.12;               // per-tick topple chance, scaled by how far past STACK_TALL
 // Stone footprint in world units — MUST match the client's stoneSize(seed).
 function stoneRadius(seed) { return 12 + rng(seed >>> 0)() * 34; }
+const MAX_STONE_RADIUS = 12 + 34;         // ceiling of stoneRadius(); the grid query radius for #tryStack
 
 // ---- water: flow, drift & stone-channelling (Family 3, Phase 3) -------------
 // A slow persistent flow moves across the world. Its direction at a point is a
@@ -125,6 +126,17 @@ const FLOW_HEAT = 0.6;                     // how strongly the heat gradient ben
 // payload when a client sends no viewport (old clients / tests stay correct).
 const INTEREST_MARGIN = 1.6;              // send a ring this many viewport half-extents beyond the screen
 const PATCH_MAX = 400;                     // cap objects streamed per viewport update (rest follow next tick)
+
+// ---- spatial grid (in-memory; PRD §7.3 — toward a 10k-object world) ---------
+// A uniform spatial hash over object positions makes the per-tick / per-message
+// neighbour queries (water-flow stone deflection, interest box scans, stack-on-
+// place) O(neighbours) instead of O(all objects), so the population can grow
+// toward the PRD's 10k without the tick or a viewport report scanning the whole
+// world. It is PURELY in-memory: built from this.objects on load, maintained as
+// objects move/spawn/vanish, and NEVER persisted (no record field, no storage
+// write) — so it costs nothing against the DO rows_written quota. The cell is
+// wider than FLOW_STONE_R so a "stones near a point" query spans few cells.
+const GRID_CELL = 256;                     // world units per grid cell (> FLOW_STONE_R = 70)
 
 // ---- thermal field & stone formation (PRD §4.1) ----------------------------
 // Every area carries a slow, invisible heat value (0..1) that rises where people
@@ -161,6 +173,8 @@ export class WorldRoom {
     this.driftMark = new Map();    // id -> { x, y } last-broadcast position (water-drift chatter control)
     this.viewports = new Map();    // pid -> { cx, cy, hw, hh } last-reported interest box (in-memory only)
     this.known = new Map();        // pid -> Set(id) objects already sent to this connection (interest streaming)
+    this.grid = new Map();         // "cx,cy" -> Set(record): in-memory spatial hash (never persisted)
+    this.cellOf = new Map();       // id -> "cx,cy": each object's current grid cell (for move/remove)
     this.flowNoise = null;         // lazily-built makeNoise(FLOW_SEED); shared with the client visual
     this.heat = null;              // coarse thermal field { w, data[], form[] } (lazy; PRD §4.1)
     this.heatActive = false;       // any heat/formation this tick (skip persisting an inert field)
@@ -178,6 +192,7 @@ export class WorldRoom {
     this.heat = (await this.state.storage.get('field:heat')) || null; // rebuilt lazily if absent
     this.lastCheckpoint = (await this.state.storage.get('meta:checkpoint')) || 0;
     if (this.objects.size === 0) await this.#seed(false);
+    this.#gridRebuild();           // index every loaded/seeded object (in-memory; the grid is empty after a DO restart)
     if ((await this.state.storage.getAlarm()) == null) {
       await this.state.storage.setAlarm(Date.now() + TICK_MS);
     }
@@ -209,6 +224,7 @@ export class WorldRoom {
     const puts = {};
     for (const r of recs) { this.objects.set(r.id, r); puts['obj:' + r.id] = r; }
     await this.#putAll(puts);
+    this.#gridRebuild();           // re-index from scratch (a force-reseed wiped the old grid too)
     this.cog = { x: 0, y: 0, n: 0 };
     await this.state.storage.put('cog', this.cog);
     await this.state.storage.put('meta:seeded', { at: Date.now(), n: recs.length });
@@ -289,7 +305,7 @@ export class WorldRoom {
       const matures = [...this.objects.values()].filter((o) => o.family === 'seed' && o.maturity >= 1);
       const parent = matures.length ? matures[Math.floor(Math.random() * matures.length)] : { x: 0, y: 0 };
       const an = this.#spawnAnomaly(parent, Date.now(), at, url.searchParams.get('kind'));
-      this.objects.set(an.id, an); await this.#persist(an);
+      this.objects.set(an.id, an); this.#gridAdd(an); await this.#persist(an);
       this.#bcast({ t: 'object_new', o: this.#pub(an) }, null);
       return Response.json({ ok: true, anomaly: { id: an.id, kind: an.kind, x: an.x, y: an.y } });
     }
@@ -300,7 +316,7 @@ export class WorldRoom {
       const px = url.searchParams.get('x'), py = url.searchParams.get('y');
       const at = (px != null && py != null) ? { x: parseFloat(px), y: parseFloat(py) } : null;
       const cr = this.#spawnCrystal(Date.now(), at);
-      this.objects.set(cr.id, cr); await this.#persist(cr);
+      this.objects.set(cr.id, cr); this.#gridAdd(cr); await this.#persist(cr);
       this.#bcast({ t: 'object_new', o: this.#pub(cr) }, null);
       return Response.json({ ok: true, crystal: { id: cr.id, x: cr.x, y: cr.y } });
     }
@@ -323,6 +339,7 @@ export class WorldRoom {
       const now = Date.now();
       if (o.family === 'stone') await this.#detachFromStack(o, now); // relocating a stacked stone leaves the stack
       o.x = x; o.y = y; o.stack = 0; o.stackBase = ''; o.last_touched = now;
+      this.#gridUpdate(o);
       this.driftMark.delete(o.id);
       await this.#persist(o);
       this.#bcast(this.#stateMsg(o, now), null);
@@ -354,6 +371,7 @@ export class WorldRoom {
         this.objects.set(r.id, r); puts['obj:' + r.id] = r;
       }
       await this.#putAll(puts);
+      this.#gridRebuild();           // cheaper than n incremental adds for a bulk fill
       return Response.json({ ok: true, added: n, total: this.objects.size });
     }
 
@@ -367,6 +385,28 @@ export class WorldRoom {
       o.last_touched = Date.now() - ticks * TICK_MS;
       await this.#persist(o);
       return Response.json({ ok: true, id: o.id, agedTicks: ticks });
+    }
+
+    // Ops/testing only: assert the in-memory spatial grid is consistent with the
+    // object map (every object indexed in exactly its computed cell, and nothing
+    // stale lingers). Gated; inert in prod. Used by test/grid.test.mjs.
+    if (url.pathname === '/admin/grid') {
+      if (!this.#adminOk(request)) return Response.json({ ok: false, error: 'forbidden' }, { status: 403 });
+      let indexed = 0, consistent = true;
+      for (const [k, cell] of this.grid) {
+        for (const o of cell) {
+          indexed++;
+          if (this.objects.get(o.id) !== o) consistent = false;   // grid holds a stale/foreign record
+          if (this.#cellKey(o.x, o.y) !== k) consistent = false;  // record sits in the wrong cell
+          if (this.cellOf.get(o.id) !== k) consistent = false;    // reverse index disagrees
+        }
+      }
+      for (const o of this.objects.values()) {                    // every live object is indexed
+        const k = this.cellOf.get(o.id);
+        if (k === undefined || !this.grid.get(k)?.has(o)) consistent = false;
+      }
+      if (indexed !== this.objects.size) consistent = false;
+      return Response.json({ ok: true, cells: this.grid.size, indexed, objects: this.objects.size, consistent });
     }
 
     return new Response('not found', { status: 404 });
@@ -396,7 +436,10 @@ export class WorldRoom {
   }
   #worldState(pid, box) {
     const objects = [];
-    for (const o of this.objects.values()) { if (box && !this.#inBox(o, box)) continue; objects.push(this.#pub(o)); }
+    // Box path uses the spatial grid (cell-aligned superset, re-tightened by
+    // #inBox); the box-less full world stays a plain scan (old / test clients).
+    const src = box ? this.#gridQueryBox(box) : this.objects.values();
+    for (const o of src) { if (box && !this.#inBox(o, box)) continue; objects.push(this.#pub(o)); }
     return { t: 'world_state', now: Date.now(), pid, season: this.season, pool: POOL, cog: { x: this.cog.x, y: this.cog.y }, objects };
   }
   // Interest box from a viewport centre + half-extents, widened by INTEREST_MARGIN.
@@ -405,13 +448,76 @@ export class WorldRoom {
     return { minX: cx - mw, maxX: cx + mw, minY: cy - mh, maxY: cy + mh };
   }
   #inBox(o, b) { return o.x >= b.minX && o.x <= b.maxX && o.y >= b.minY && o.y <= b.maxY; }
+
+  // ---- spatial grid (in-memory; never persisted) ----------------------------
+  #cellKey(x, y) { return Math.floor(x / GRID_CELL) + ',' + Math.floor(y / GRID_CELL); }
+  #gridAdd(o) {
+    const k = this.#cellKey(o.x, o.y);
+    let cell = this.grid.get(k);
+    if (!cell) { cell = new Set(); this.grid.set(k, cell); }
+    cell.add(o);
+    this.cellOf.set(o.id, k);
+  }
+  #gridRemove(o) {
+    const k = this.cellOf.get(o.id);
+    if (k === undefined) return;
+    const cell = this.grid.get(k);
+    if (cell) { cell.delete(o); if (!cell.size) this.grid.delete(k); }
+    this.cellOf.delete(o.id);
+  }
+  // Re-index after an object's x/y changed. No-op when it stayed in the same cell
+  // (the sub-pixel-drift common case = one Map.get + string compare). Self-heals
+  // an object that was never added (treats it as an add) rather than throwing.
+  #gridUpdate(o) {
+    const newK = this.#cellKey(o.x, o.y);
+    const oldK = this.cellOf.get(o.id);
+    if (oldK === newK) return;
+    if (oldK === undefined) { this.#gridAdd(o); return; }
+    const cell = this.grid.get(oldK);
+    if (cell) { cell.delete(o); if (!cell.size) this.grid.delete(oldK); }
+    let next = this.grid.get(newK);
+    if (!next) { next = new Set(); this.grid.set(newK, next); }
+    next.add(o);
+    this.cellOf.set(o.id, newK);
+  }
+  #gridRebuild() {
+    this.grid.clear(); this.cellOf.clear();
+    for (const o of this.objects.values()) this.#gridAdd(o);
+  }
+  // Records within radius r of (x,y), as a cell-aligned SUPERSET — the caller
+  // applies the exact distance test. `filter` trims per record while scanning.
+  #gridNear(x, y, r, filter) {
+    const cx0 = Math.floor((x - r) / GRID_CELL), cx1 = Math.floor((x + r) / GRID_CELL);
+    const cy0 = Math.floor((y - r) / GRID_CELL), cy1 = Math.floor((y + r) / GRID_CELL);
+    const out = [];
+    for (let cx = cx0; cx <= cx1; cx++) for (let cy = cy0; cy <= cy1; cy++) {
+      const cell = this.grid.get(cx + ',' + cy);
+      if (!cell) continue;
+      for (const o of cell) if (!filter || filter(o)) out.push(o);
+    }
+    return out;
+  }
+  // Records whose cell overlaps box, as a cell-aligned SUPERSET — the caller
+  // applies the exact #inBox test to tighten to the rectangle.
+  #gridQueryBox(b) {
+    const cx0 = Math.floor(b.minX / GRID_CELL), cx1 = Math.floor(b.maxX / GRID_CELL);
+    const cy0 = Math.floor(b.minY / GRID_CELL), cy1 = Math.floor(b.maxY / GRID_CELL);
+    const out = [];
+    for (let cx = cx0; cx <= cx1; cx++) for (let cy = cy0; cy <= cy1; cy++) {
+      const cell = this.grid.get(cx + ',' + cy);
+      if (!cell) continue;
+      for (const o of cell) out.push(o);
+    }
+    return out;
+  }
+
   // Stream any in-view objects this connection hasn't been sent yet (interest paging).
   // Reads in-memory state only; never writes storage.
   #streamInterest(ws, pid, box) {
     let known = this.known.get(pid);
     if (!known) { known = new Set(); this.known.set(pid, known); }
     const objects = [];
-    for (const o of this.objects.values()) {
+    for (const o of this.#gridQueryBox(box)) {
       if (known.has(o.id) || !this.#inBox(o, box)) continue;
       objects.push(this.#pub(o));
       known.add(o.id);
@@ -458,6 +564,7 @@ export class WorldRoom {
       const o = this.objects.get(m.id);
       if (!o || o.held !== m.token) return;
       o.x = m.x; o.y = m.y;                    // in-memory only; persisted on place / reclaim
+      this.#gridUpdate(o);                      // keep a carried object findable at its current spot
       this.#bcast(this.#stateMsg(o, now), ws);
 
     } else if (m.t === 'place') {
@@ -471,6 +578,7 @@ export class WorldRoom {
       if (o.family === 'stone') {
         // Worn to grit by too much handling — a brief scatter, then gone (§4.3).
         if (o.handling >= GRIT_HANDLING) {
+          this.#gridRemove(o);
           this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id);
           await this.state.storage.delete('obj:' + o.id);
           this.#bcast({ t: 'object_gone', id: o.id, grit: true }, null);
@@ -478,6 +586,7 @@ export class WorldRoom {
         }
         this.#tryStack(o); // drop within another stone's footprint -> balance on top
       }
+      this.#gridUpdate(o); // index the final position (after any stack snap)
       await this.#persist(o);
       this.#bcast(this.#stateMsg(o, now), null);
       this.#updateCog(o.x, o.y);
@@ -486,6 +595,7 @@ export class WorldRoom {
       // Only the current holder can dissolve an anomaly (the deliberate 10s hold).
       const o = this.objects.get(m.id);
       if (!o || o.family !== 'anomaly' || o.held !== m.token) return;
+      this.#gridRemove(o);
       this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id);
       await this.state.storage.delete('obj:' + o.id);
       this.#bcast({ t: 'object_gone', id: o.id }, null);
@@ -614,7 +724,6 @@ export class WorldRoom {
     // Movement is sub-pixel/tick; we persist it via the survivor snapshot but
     // BROADCAST only once an object has crept POS_BCAST_DELTA — otherwise a
     // pool full of drifters would spam object_state every tick to every client.
-    const stones = this.#stones();
     for (const o of this.objects.values()) {
       if (gone.includes(o) || !this.#driftEligible(o) ||
           Math.hypot(o.x - POOL.x, o.y - POOL.y) > POOL.r * FLOW_REACH) {
@@ -625,8 +734,9 @@ export class WorldRoom {
         this.driftMark.delete(o.id);
         continue;
       }
-      const f = this.#flowAt(o.x, o.y, sb, stones);
+      const f = this.#flowAt(o.x, o.y, sb);
       o.x += f.vx * FLOW_SPEED; o.y += f.vy * FLOW_SPEED;
+      this.#gridUpdate(o);                      // re-index the drifted object (no-op until it crosses a cell)
       const mark = this.driftMark.get(o.id);
       if (!mark) { this.driftMark.set(o.id, { x: o.x, y: o.y }); continue; }
       if (Math.hypot(o.x - mark.x, o.y - mark.y) >= POS_BCAST_DELTA) {
@@ -688,8 +798,9 @@ export class WorldRoom {
     }
 
     for (const o of changed) { await this.#persist(o); this.#bcast(this.#stateMsg(o, now), null); }
-    for (const o of spawned) { this.objects.set(o.id, o); await this.#persist(o); this.#bcast({ t: 'object_new', o: this.#pub(o) }, null); }
+    for (const o of spawned) { this.objects.set(o.id, o); this.#gridAdd(o); await this.#persist(o); this.#bcast({ t: 'object_new', o: this.#pub(o) }, null); }
     for (const o of gone) {
+      this.#gridRemove(o);
       this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id);
       await this.state.storage.delete('obj:' + o.id);
       this.#bcast({ t: 'object_gone', id: o.id }, null);
@@ -728,6 +839,7 @@ export class WorldRoom {
       const puts = {};
       for (const o of this.objects.values()) puts['obj:' + o.id] = o;
       if (Object.keys(puts).length) await this.#putAll(puts);
+      this.#gridRebuild();           // ~30-min in-memory self-heal against any missed hook / desync (zero storage cost)
       this.lastCheckpoint = now;
       await this.state.storage.put('meta:checkpoint', now);
       checkpointed = true;
@@ -743,8 +855,10 @@ export class WorldRoom {
   // STACK_STEP per level (so the stored y carries the visual height).
   #tryStack(o) {
     let target = null, bestD = Infinity;
-    for (const s of this.objects.values()) {
-      if (s.id === o.id || s.family !== 'stone' || s.held !== '') continue;
+    // Any stone whose footprint covers o is within MAX_STONE_RADIUS of it, so the
+    // grid neighbourhood is a safe superset; the exact d<stoneRadius(s) re-filters.
+    for (const s of this.#gridNear(o.x, o.y, MAX_STONE_RADIUS, (s) => s.family === 'stone')) {
+      if (s.id === o.id || s.held !== '') continue;
       const d = Math.hypot(s.x - o.x, s.y - o.y);
       if (d < stoneRadius(s.seed) && d < bestD) { bestD = d; target = s; }
     }
@@ -789,6 +903,7 @@ export class WorldRoom {
     const ang = Math.random() * Math.PI * 2, dist = 18 + s.stack * 10 + Math.random() * 28;
     s.x = gx + Math.cos(ang) * dist;
     s.y = gy + Math.sin(ang) * dist;
+    this.#gridUpdate(s);
     s.stack = 0; s.stackBase = ''; s.last_touched = now; // a just-scattered stone is freshly disturbed
     await this.#persist(s);
     this.#bcast(this.#stateMsg(s, now), null);
@@ -800,13 +915,14 @@ export class WorldRoom {
   // Nearby stones bend the flow TANGENTIALLY around themselves — it curves past
   // them rather than running in, and that deflection IS channelling. The push is
   // mostly tangential (so a head-on flow is steered aside, never reversed) with a
-  // small radial-away term to keep flow out of the stone. `stones` is passed in so
-  // the tick doesn't re-scan the whole object map per drifter.
-  #flowAt(x, y, sb, stones) {
+  // small radial-away term to keep flow out of the stone. Only stones within
+  // FLOW_STONE_R can deflect, so we ask the spatial grid for that neighbourhood
+  // instead of scanning every stone per drifter.
+  #flowAt(x, y, sb) {
     if (!this.flowNoise) this.flowNoise = makeNoise(FLOW_SEED);
     const a = this.flowNoise(x * FLOW_SCALE, y * FLOW_SCALE) * Math.PI;
     let vx = Math.cos(a), vy = Math.sin(a);
-    for (const s of (stones || this.#stones())) {
+    for (const s of this.#gridNear(x, y, FLOW_STONE_R, (s) => s.family === 'stone')) {
       const dx = x - s.x, dy = y - s.y, d = Math.hypot(dx, dy);
       if (d > 0.001 && d < FLOW_STONE_R) {
         const f = 1 - d / FLOW_STONE_R, rx = dx / d, ry = dy / d;
@@ -825,8 +941,6 @@ export class WorldRoom {
     const mag = lerp(FLOW_SEASON[sb.cur], FLOW_SEASON[sb.next], sb.fade);
     return { vx: (vx / m) * mag, vy: (vy / m) * mag };
   }
-
-  #stones() { const out = []; for (const o of this.objects.values()) if (o.family === 'stone') out.push(o); return out; }
 
   // ---- thermal field ---------------------------------------------------------
   #ensureHeat() {
