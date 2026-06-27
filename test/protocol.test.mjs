@@ -40,6 +40,7 @@ const heldOnB = lastOf(B, 'object_state', target.id);
 check(ackA && ackA.ok === true, 'A receives pickup_ack ok:true');
 check(heldOnB && heldOnB.held === true, `B sees object lifted (held:true) — ${Date.now() - t0}ms`);
 check(heldOnB && heldOnB.token === undefined && heldOnB.heldConn === undefined, 'broadcast carries no identity (no token/heldConn)');
+check(heldOnB && heldOnB.heldBy === A.pid, 'a carried object is tagged with the carrier\'s EPHEMERAL pid (heldBy) — links it to their presence, not the token');
 
 // ---- carry streams position ----
 A.send(JSON.stringify({ t: 'carry', id: target.id, token: tokenA, x: 123.5, y: -77.25, ts: Date.now() }));
@@ -58,6 +59,7 @@ A.send(JSON.stringify({ t: 'place', id: target.id, token: tokenA, x: 200, y: 200
 await wait(150);
 const placedB = lastOf(B, 'object_state', target.id);
 check(placedB && placedB.held === false && placedB.x === 200 && placedB.y === 200, 'B sees object placed (held:false) at new position');
+check(placedB && placedB.heldBy === '', 'a placed object clears heldBy (nobody is carrying it)');
 check(placedB && placedB.handling === (target.handling + 1), `handling incremented on place (${placedB?.handling})`);
 
 // ---- presence (ephemeral pid, no identity) ----

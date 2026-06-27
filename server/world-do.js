@@ -548,6 +548,7 @@ export class WorldRoom {
     };
     if (o.kind) p.kind = o.kind; // anomalies + creatures carry their form/kind
     if (o.family === 'creature') p.wanderT0 = o.wanderT0; // the shared wander anchor
+    if (o.held !== '') p.heldBy = o.heldConn; // the holder's EPHEMERAL pid (same id presence carries) — links a carried thing to its carrier; never the token
     return p;
   }
   #stateMsg(o, now) {
@@ -555,6 +556,7 @@ export class WorldRoom {
       t: 'object_state', id: o.id, x: o.x, y: o.y, handling: o.handling,
       held: o.held !== '', maturity: o.maturity, aged: o.aged,
       stack: o.stack || 0, stackBase: o.stackBase || '', ts: now,
+      heldBy: o.held !== '' ? o.heldConn : '', // who's carrying it ('' = nobody) — for the felt-presence tether
     };
     if (o.family === 'creature') m.wanderT0 = o.wanderT0; // re-anchor on the wire so a placed creature continues smoothly for everyone
     return m;

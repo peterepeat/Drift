@@ -71,6 +71,27 @@ export function paintPresence(ctx, w, h, x, y, rad, intensity) {
   ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.fillStyle = g; ctx.fillRect(0, 0, w, h); ctx.restore();
 }
 
+// A faint warm tether from a person (their presence bloom centre) to the object they
+// are carrying — so a carried thing reads as held by SOMEONE, not floating on its own.
+// Brightest at the person, fading to the object, with a soft halo where it's carried.
+// Same warm presence colour; drawn 'lighter' so it only ever adds glow (Wave E).
+export function paintCarryTether(ctx, px, py, ox, oy, intensity) {
+  if (intensity <= 0) return;
+  const a = 0.16 * intensity;
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  const g = ctx.createLinearGradient(px, py, ox, oy);
+  g.addColorStop(0, PG.rgba(PALETTE.presenceCore, a));
+  g.addColorStop(1, PG.rgba(PALETTE.presenceCore, a * 0.12));
+  ctx.strokeStyle = g; ctx.lineWidth = 1.5; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(ox, oy); ctx.stroke();
+  const halo = ctx.createRadialGradient(ox, oy, 0, ox, oy, 28);
+  halo.addColorStop(0, PG.rgba(PALETTE.presenceCore, a * 1.7));
+  halo.addColorStop(1, PG.rgba(PALETTE.presenceCore, 0));
+  ctx.fillStyle = halo; ctx.beginPath(); ctx.arc(ox, oy, 28, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+
 export const paintGrade = PG.paintGrade;
 
 // ---- water -----------------------------------------------------------------

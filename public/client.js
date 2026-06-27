@@ -4,7 +4,7 @@
 // no visual data is ever stored or transmitted.
 // =============================================================================
 import * as PG from './drift-procgen.js';
-import { paintGround, paintGlows, paintNoise, paintPresence, paintSeasonGrade, seasonGround, seasonSat, paintWaterWorld, paintFlow } from './render.js';
+import { paintGround, paintGlows, paintNoise, paintPresence, paintCarryTether, paintSeasonGrade, seasonGround, seasonSat, paintWaterWorld, paintFlow } from './render.js';
 import { inViewport, CULL_MARGIN } from './cull.js';
 import { Audio } from './audio.js';
 import { flingStep, ema, nudge, spring } from './physics.js';
@@ -24,6 +24,11 @@ const THROW_STOP = 28;                        // a fling settles to a place once
 const THROW_MAX = 1600;                       // cap the launch speed so a hard flick can't hurl a thing across the world
 const PRESENCE_SEND_MS = 500;                // presence cadence (spec)
 const P_IN = 1500, P_OUT = 2500, P_IDLE = 2000; // bloom fade-in / fade-out / idle-before-fade
+// Felt presence (Wave E): two people working the same patch share a warmth that
+// blooms BETWEEN them (mutual, not two separate glows); a faint tether links a
+// carried object to whoever is carrying it, so it reads that a PERSON is moving it.
+const SHARED_RADIUS = 620;                   // world units within which two presences share warmth
+const SHARED_BOOST = 3.2;                     // strength of the extra between-them bloom (intensifies the shared patch)
 const SPROUT_C = 0.14;                        // maturity below this renders as a seed (mirrors server)
 const ANOM_DISSOLVE_MS = 10000, ANOM_FADE_MS = 3000; // hold an anomaly 10s and it fades from your hands
 const ATTEND_MS = 450;                        // long-press dwell before an object is "attended" (PRD §5.2)
@@ -919,6 +924,7 @@ function onMessage(raw) {
       if (m.stack != null) o.stack = m.stack;
       if (m.stackBase != null) o.stackBase = m.stackBase;
       if (m.wanderT0 != null) o.wanderT0 = m.wanderT0; // a placed creature re-anchored its wander
+      o.heldBy = m.heldBy || ''; // who's carrying it (ephemeral pid) — drives the felt-presence tether
       if (m.id !== heldId) {
         if (o.held && !wasHeld) setLift(o.id, 1, LIFT_MS, EASE_RISE);
         else if (!o.held && wasHeld) setLift(o.id, 0, SETTLE_MS, EASE_SETTLE);
@@ -1047,6 +1053,7 @@ function frame(now) {
   // overlays (screen space)
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   let warmth = 0;
+  const active = []; // live presences this frame — reused for shared warmth + carry tethers
   for (const [pid, p] of presences) {
     const inten = presenceIntensity(p, now);
     if (inten <= 0) {
@@ -1056,6 +1063,30 @@ function frame(now) {
     if (inten > warmth) warmth = inten;
     const s = worldToScreen(p.x, p.y);
     paintPresence(ctx, vw, vh, s.x, s.y, vw * 0.55, inten);
+    active.push({ pid, wx: p.x, wy: p.y, inten });
+  }
+  // Shared warmth: working the same patch as someone blooms a brighter warmth BETWEEN
+  // you — presence felt as mutual, intensifying the closer you are (Wave E). My OWN
+  // position (the camera centre) joins the pairing so the warmth blooms between me and
+  // others, not only between two other people; my standalone bloom is never drawn.
+  const myC = screenToWorld(vw / 2, vh / 2);
+  const pairing = active.concat([{ wx: myC.x, wy: myC.y, inten: 1 }]);
+  for (let i = 0; i < pairing.length; i++) for (let j = i + 1; j < pairing.length; j++) {
+    const a = pairing[i], b = pairing[j];
+    const near = 1 - Math.min(1, Math.hypot(a.wx - b.wx, a.wy - b.wy) / SHARED_RADIUS);
+    if (near <= 0) continue;
+    const mid = worldToScreen((a.wx + b.wx) / 2, (a.wy + b.wy) / 2);
+    paintPresence(ctx, vw, vh, mid.x, mid.y, vw * 0.42, near * Math.min(a.inten, b.inten) * SHARED_BOOST);
+    warmth = Math.max(warmth, near * Math.min(a.inten, b.inten)); // shared work warms the world (and its sound)
+  }
+  // Carry tethers: link each object being carried by SOMEONE ELSE to that person, so
+  // it reads that a person is moving it (not a thing drifting on its own).
+  for (const o of objects.values()) {
+    if (!o.heldBy || o.heldBy === myPid) continue;
+    const p = presences.get(o.heldBy);
+    if (!p) continue;
+    const ps = worldToScreen(p.x, p.y), os = worldToScreen(o.x, o.y);
+    paintCarryTether(ctx, ps.x, ps.y, os.x, os.y, presenceIntensity(p, now));
   }
   aWarmth = warmth; // free (piggybacks the presence pass)
   if (Audio.isEnabled()) {
