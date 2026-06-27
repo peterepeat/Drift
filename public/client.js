@@ -981,6 +981,11 @@ if (localStorage.getItem('drift_sound') === '1') {
     window.removeEventListener('pointerdown', armStart);
   };
   window.addEventListener('pointerdown', armStart);
+} else if (!localStorage.getItem('drift_sound_hinted')) {
+  // First visit with sound OFF: pulse the glyph a few times (once ever) so the one
+  // sound control is findable — the answer to "I can't hear anything". Wordless.
+  localStorage.setItem('drift_sound_hinted', '1');
+  setTimeout(() => { snd.classList.add('show', 'hint'); setTimeout(() => snd.classList.remove('hint', 'show'), 5600); }, 1800);
 }
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) { settleFlying(); Audio.onHidden(); } // rAF pauses when hidden — don't leave thrown objects held
@@ -1029,7 +1034,7 @@ function onMessage(raw) {
       if (m.season != null) seasonPhase = m.season;
       if (m.now != null) clockSkew = m.now - Date.now(); // lock the creature wander clock to the server's
       if (m.pool) pool = m.pool;
-      if (m.bounds) worldBounds = m.bounds; // before the arrive, so a stranded home is pulled back in
+      if (m.bounds && Number.isFinite(m.bounds.x) && Number.isFinite(m.bounds.y)) worldBounds = m.bounds; // before the arrive, so a stranded home is pulled back in
       // Orient on the FIRST arrival only (a reconnect must not yank the camera back):
       // a returning visitor drifts toward their remembered home, a new one toward the cog.
       // A home saved BEFORE camera bounds existed could be out in the void — if it's
@@ -1073,7 +1078,7 @@ function onMessage(raw) {
     }
     case 'season': { // the world's slow clock advanced
       if (m.phase != null) seasonPhase = m.phase;
-      if (m.bounds) worldBounds = m.bounds; // keep the camera bound fresh as the world grows
+      if (m.bounds && Number.isFinite(m.bounds.x) && Number.isFinite(m.bounds.y)) worldBounds = m.bounds; // keep the camera bound fresh as the world grows
       break;
     }
     case 'object_new': { // a shed seed (or other runtime-spawned object)

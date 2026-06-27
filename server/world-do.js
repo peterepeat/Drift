@@ -131,7 +131,7 @@ const FIGHT_CHANCE = 0.2;                 // per eligible pair, per tick
 const DEATH_CHANCE = 0.28;                // a clash that kills the loser (else it just routs)
 const FLEE_DIST = 130;                    // how far a routed creature bolts
 const MIN_PER_SPECIES = 12;               // a kind never falls below this (no extinction)
-const MAX_PER_SPECIES = 72;               // ...nor breeds past this (no single kind hogs the cap — keeps the mix)
+const MAX_PER_SPECIES = 60;               // ...nor past this (== MAX_CREATURES/2, so the ceiling ITSELF enforces parity — no kind hogs the cap)
 // ---- creatures: goal-seeking drift (Wave G1) -------------------------------
 // Each tick a creature steps its HOME toward what it needs — a plant to feed at, the
 // pool to drink, a stone to rest by — cycling slowly through those drives (seed-
@@ -1384,6 +1384,7 @@ export class WorldRoom {
       creatures.push(o); kindCount[o.kind] = (kindCount[o.kind] || 0) + 1;
     }
     let total = creatures.length;
+    let pendingCre = 0; for (const s of spawned) if (s.family === 'creature') pendingCre++; // creature-only pending (floor refills) — NOT shed seeds/crystals/etc., so the mate cap is exact
     const dead = new Set();
     for (const a of creatures) {
       if (dead.has(a.id)) continue;
@@ -1391,10 +1392,10 @@ export class WorldRoom {
       for (const b of this.#gridNear(a.x, a.y, SOCIAL_R, (o) => o.family === 'creature' && o.held === '' && o.id > a.id && !dead.has(o.id))) {
         const d = Math.hypot(a.x - b.x, a.y - b.y);
         if (a.kind === b.kind) {
-          if (d <= MATE_DIST && total + spawned.length < MAX_CREATURES &&
+          if (d <= MATE_DIST && total + pendingCre < MAX_CREATURES &&  // count only pending CREATURES, not other lifecycle spawns this tick
               (kindCount[a.kind] || 0) < MAX_PER_SPECIES &&   // a kind can't breed past its ceiling — neither species hogs the cap
               this.objects.size + spawned.length < this.maxObjects && Math.random() < MATE_CHANCE) {
-            spawned.push(this.#breed(a, b, now)); kindCount[a.kind] = (kindCount[a.kind] || 0) + 1;
+            spawned.push(this.#breed(a, b, now)); kindCount[a.kind] = (kindCount[a.kind] || 0) + 1; pendingCre++;
           }
         } else if (d <= FIGHT_DIST && Math.random() < FIGHT_CHANCE) {
           const loser = this.#strength(a) <= this.#strength(b) ? a : b;

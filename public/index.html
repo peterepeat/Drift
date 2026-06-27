@@ -39,6 +39,13 @@
     }
     #snd.on { background: #8a8478; border-color: #8a8478; }
     #snd.show { opacity: .4; }
+    /* First-visit hint: a few gentle pulses so the one sound control is findable
+       (wordless — no label, true to the spec). Removed by JS after it plays. */
+    @keyframes sndHint {
+      0%, 100% { opacity: .3;  box-shadow: 0 0 0 0 rgba(200,146,42,0); }
+      50%      { opacity: .9;  box-shadow: 0 0 8px 2px rgba(200,146,42,.45); }
+    }
+    #snd.hint { animation: sndHint 1.8s ease-in-out 3; }
     #sndhit { position: fixed; left: 0; bottom: 0; width: 44px; height: 44px; }
   </style>
 </head>
