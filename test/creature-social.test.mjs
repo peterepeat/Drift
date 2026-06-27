@@ -55,7 +55,7 @@ for (const o of creatures(w3)) byKind[o.kind] = (byKind[o.kind] || 0) + 1;
 const cw = byKind.crawler || 0, fl3 = byKind.flier || 0;
 // both above the floor (no extinction) AND below the ceiling (no single kind hogging
 // the cap) — even after a breeding cluster that, unchecked, ran one kind to 70.
-check(cw >= 6 && fl3 >= 6 && cw <= 52 && fl3 <= 52, `both species persist, neither dominates (crawler=${cw}, flier=${fl3})`);
+check(cw >= 6 && fl3 >= 6 && cw <= 76 && fl3 <= 76, `both species persist, neither dominates (crawler=${cw}, flier=${fl3})`);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -24,12 +24,13 @@ function open() {
 }
 async function snap() { const ws = await open(); const w = await ws.world; ws.close(); return w; }
 const creatures = (w) => w.objects.filter((o) => o.family === 'creature');
-const MIN = 36, MAX = 80;
+const MIN = 50, MAX = 120;
 
 // 1. fresh world is uninhabited; one tick ramps to the baseline
 const w0 = await snap();
 check(creatures(w0).length === 0, 'a fresh world has no creatures');
 check(w0.now && typeof w0.now === 'number', 'world_state carries a server clock (now) for the shared wander');
+check(w0.bounds && Number.isFinite(w0.bounds.x) && Number.isFinite(w0.bounds.y) && w0.bounds.x >= 900, `world_state carries camera bounds (${w0.bounds ? w0.bounds.x.toFixed(0) : 'none'}u)`);
 await tickG(1);
 const n1 = creatures(await snap()).length;
 check(n1 >= MIN, `one tick ramps creatures to the baseline (${n1} >= ${MIN})`);

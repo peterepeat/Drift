@@ -13,6 +13,12 @@ import { wanderAt, drawCreature, creatureR } from './creatures.js';
 // ---- tuning constants -------------------------------------------------------
 const Z0 = 1.0, ZMIN = 0.2, ZMAX = 4.0;     // zoom = CSS px per world unit
 const SLOP = 8;                              // px of movement that turns a tap into a pan
+// Camera bounds (Wave J): the camera centre is held within the object field (sent by
+// the server as world half-extents) so you can never wander far into empty space —
+// panning SLOWS as you approach the edge and STOPS at it. Zoom-aware: when zoomed out
+// (the viewport already covers the world) the pannable range collapses toward centre.
+const EDGE_MARGIN = 320;                      // how far past the furthest object the centre may go (when zoomed in)
+const EDGE_SOFT = 0.72;                        // fraction of the limit past which panning starts to resist
 const HIT_MIN = 26;                          // min tap radius in CSS px (accessibility)
 const HIT_PAD = 3, HIT_GROW = 1.18;          // grab area modestly exceeds the drawn form — easy to grab, but not so greedy it steals pans
 const BIG_TREE_MAT = 0.8;                     // plants this mature have ROOTED — immovable landmarks you can drag across to pan
@@ -109,6 +115,7 @@ resize();
 // ---- camera + transforms (all in CSS px; dpr only folded into the matrix) ---
 const camera = { x: 0, y: 0, z: Z0 };
 let arrive = null; // soft-pan-to-active-area animation
+let worldBounds = null; // {x,y} half-extents of the object field (from the server) — the camera is clamped to it
 
 // Return thread (PRD §6.3): the area a visitor was last active in is remembered
 // CLIENT-side (never sent as identity — only as a transient viewport hint) so a
@@ -137,6 +144,36 @@ function poolOnScreen() {
   const s = worldToScreen(pool.x, pool.y), rr = pool.r * camera.z * 1.4;
   return s.x + rr >= 0 && s.x - rr <= vw && s.y + rr >= 0 && s.y - rr <= vh;
 }
+// How far the camera CENTRE may stray from origin on each axis right now. Shrinks as
+// you zoom out (the viewport already covers more world), so the view always overlaps
+// the object field — collapses toward 0 once the whole world fits on screen.
+function camLimits() {
+  if (!worldBounds) return { x: Infinity, y: Infinity };
+  const h = viewHalf();
+  return { x: Math.max(0, worldBounds.x + EDGE_MARGIN - h.hw), y: Math.max(0, worldBounds.y + EDGE_MARGIN - h.hh) };
+}
+// Hard backstop: pull the camera within the limits (used after a zoom/anchor jump).
+function clampCam() {
+  const L = camLimits();
+  camera.x = clamp(camera.x, -L.x, L.x);
+  camera.y = clamp(camera.y, -L.y, L.y);
+}
+// Apply a pan (world-unit deltas) with edge RESISTANCE: free near the centre, easing
+// to a stop at the limit. Only OUTWARD motion is resisted — you can always pan back in.
+function approachLimit(cur, d, limit) {
+  let next = cur + d;
+  if (Math.abs(next) > Math.abs(cur) && Math.abs(cur) > limit * EDGE_SOFT) {
+    const slack = Math.max(1, limit * (1 - EDGE_SOFT));
+    const t = Math.min(1, (Math.abs(cur) - limit * EDGE_SOFT) / slack);
+    next = cur + d * (1 - t); // scale the outward step toward 0 at the limit
+  }
+  return clamp(next, -limit, limit);
+}
+function applyPan(wdx, wdy) {
+  const L = camLimits();
+  camera.x = approachLimit(camera.x, wdx, L.x);
+  camera.y = approachLimit(camera.y, wdy, L.y);
+}
 function startArrive(tx, ty) {
   arrive = { fromX: camera.x, fromY: camera.y, toX: tx, toY: ty, start: performance.now(), dur: 1200 };
 }
@@ -145,6 +182,7 @@ function updateArrive(now) {
   const t = Math.min(1, (now - arrive.start) / arrive.dur), e = 1 - Math.pow(1 - t, 3);
   camera.x = arrive.fromX + (arrive.toX - arrive.fromX) * e;
   camera.y = arrive.fromY + (arrive.toY - arrive.fromY) * e;
+  clampCam(); // a remembered home from before bounds existed (or a stranded one) is pulled back into the world
   if (t >= 1) arrive = null;
 }
 
@@ -783,8 +821,9 @@ canvas.addEventListener('pointermove', (e) => {
     camera.z = clamp(pinch.z0 * (d / pinch.d0), ZMIN, ZMAX);
     const after = screenToWorld(mx, my);
     camera.x += before.x - after.x; camera.y += before.y - after.y;     // zoom, anchored at the centroid
-    camera.x -= (mx - pinch.mx) / camera.z; camera.y -= (my - pinch.my) / camera.z; // + two-finger pan (always works, even over objects)
+    applyPan(-(mx - pinch.mx) / camera.z, -(my - pinch.my) / camera.z); // + two-finger pan (resisted at the edge)
     pinch.mx = mx; pinch.my = my;
+    clampCam(); // keep the zoom-anchor jump inside the world too
     arrive = null;
     return;
   }
@@ -798,7 +837,7 @@ canvas.addEventListener('pointermove', (e) => {
     else { beginHold(o, 'drag', { x: grab.ox, y: grab.oy }); carryTo(e.clientX, e.clientY); }
   } else if (!grab && p.maxMove > SLOP) {                // empty ground or a rooted tree → pan
     if (swayId) { const o = objects.get(swayId); if (o) { o._bendV = (o._bendV || 0) + dx * SWAY_IMPULSE; swaying.add(swayId); } } // lean the pressed tree with the drag
-    camera.x -= dx / camera.z; camera.y -= dy / camera.z; arrive = null;
+    applyPan(-dx / camera.z, -dy / camera.z); arrive = null;
   }
 });
 
@@ -851,11 +890,12 @@ canvas.addEventListener('wheel', (e) => {
     camera.z = clamp(camera.z * Math.exp(-e.deltaY * 0.01), ZMIN, ZMAX);
     const after = screenToWorld(e.clientX, e.clientY);
     camera.x += before.x - after.x; camera.y += before.y - after.y;
+    clampCam();
   } else {
     // deltaX/deltaY are in CSS px (or lines, mode 1) — fold zoom out so the world
     // tracks the fingers 1:1; a line-mode wheel gets a per-line nudge.
     const k = e.deltaMode === 1 ? 16 : 1;
-    camera.x += (e.deltaX * k) / camera.z; camera.y += (e.deltaY * k) / camera.z;
+    applyPan((e.deltaX * k) / camera.z, (e.deltaY * k) / camera.z);
   }
   arrive = null;
 }, { passive: false });
@@ -875,7 +915,7 @@ document.addEventListener('gesturechange', (e) => {
   const before = screenToWorld(ax, ay);
   camera.z = clamp(gestureZ0 * (e.scale || 1), ZMIN, ZMAX);
   const after = screenToWorld(ax, ay);
-  camera.x += before.x - after.x; camera.y += before.y - after.y; arrive = null;
+  camera.x += before.x - after.x; camera.y += before.y - after.y; clampCam(); arrive = null;
 }, { passive: false });
 document.addEventListener('gestureend', (e) => e.preventDefault(), { passive: false });
 
@@ -978,9 +1018,17 @@ function onMessage(raw) {
       if (m.season != null) seasonPhase = m.season;
       if (m.now != null) clockSkew = m.now - Date.now(); // lock the creature wander clock to the server's
       if (m.pool) pool = m.pool;
+      if (m.bounds) worldBounds = m.bounds; // before the arrive, so a stranded home is pulled back in
       // Orient on the FIRST arrival only (a reconnect must not yank the camera back):
       // a returning visitor drifts toward their remembered home, a new one toward the cog.
-      if (!arrivedOnce) { arrivedOnce = true; const t = home || m.cog; if (t) startArrive(t.x, t.y); }
+      // A home saved BEFORE camera bounds existed could be out in the void — if it's
+      // beyond the world, fall back to the cog so a stranded visitor lands among objects.
+      if (!arrivedOnce) {
+        arrivedOnce = true;
+        let t = home || m.cog;
+        if (t && worldBounds && (Math.abs(t.x) > worldBounds.x || Math.abs(t.y) > worldBounds.y)) t = m.cog;
+        if (t) startArrive(t.x, t.y);
+      }
       break;
     }
     case 'object_state': {
@@ -1014,6 +1062,7 @@ function onMessage(raw) {
     }
     case 'season': { // the world's slow clock advanced
       if (m.phase != null) seasonPhase = m.phase;
+      if (m.bounds) worldBounds = m.bounds; // keep the camera bound fresh as the world grows
       break;
     }
     case 'object_new': { // a shed seed (or other runtime-spawned object)
@@ -1087,6 +1136,7 @@ function frame(now) {
   updateLeaves(now);
   updateDissolve(now);
   updateArrive(now);
+  clampCam(); // backstop: keep the camera in bounds across resize / a shrinking world bound
 
   // background (screen space) — world-locked objects pan over a near-fixed
   // backdrop, which reads as subtle parallax depth.

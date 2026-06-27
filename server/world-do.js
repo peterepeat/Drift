@@ -114,9 +114,9 @@ const CRYSTAL_DECAY = 1 / 300;            // decay/tick (~5h to dissolve) — sl
 // broadcast — the always-ticking world spends nothing keeping them moving. They
 // ramp to a baseline quickly so an arriving world feels inhabited, then top up to
 // a cap. Spared from water-drift, isolation-fade and the ceiling trim (they're alive).
-const MIN_CREATURES = 36;                 // more of them now the world is social — but still not a swarm
-const MAX_CREATURES = 80;
-const CREATURE_SPAWN_CHANCE = 0.08;       // per tick, between MIN and MAX
+const MIN_CREATURES = 50;                 // a livelier world — you should spot several wherever you look
+const MAX_CREATURES = 120;
+const CREATURE_SPAWN_CHANCE = 0.12;       // per tick, between MIN and MAX (ramps up a touch quicker)
 // ---- creatures: social life & population homeostasis (Wave G2) -------------
 // Creatures that share a patch interact: same species may MATE (an offspring with a
 // blended seed), different species may CLASH (the smaller routs — fleeing far, rarely
@@ -130,8 +130,8 @@ const FIGHT_DIST = 58;                    // different-species homes this close 
 const FIGHT_CHANCE = 0.2;                 // per eligible pair, per tick
 const DEATH_CHANCE = 0.28;                // a clash that kills the loser (else it just routs)
 const FLEE_DIST = 130;                    // how far a routed creature bolts
-const MIN_PER_SPECIES = 8;                // a kind never falls below this (no extinction)
-const MAX_PER_SPECIES = 48;               // ...nor breeds past this (no single kind hogs the cap — keeps the mix)
+const MIN_PER_SPECIES = 12;               // a kind never falls below this (no extinction)
+const MAX_PER_SPECIES = 72;               // ...nor breeds past this (no single kind hogs the cap — keeps the mix)
 // ---- creatures: goal-seeking drift (Wave G1) -------------------------------
 // Each tick a creature steps its HOME toward what it needs — a plant to feed at, the
 // pool to drink, a stone to rest by — cycling slowly through those drives (seed-
@@ -251,6 +251,7 @@ export class WorldRoom {
     this.heatWasActive = false;    // was active last tick (so the field's final settle-to-zero persists once)
     this.lastCheckpoint = 0;       // wall-clock ms of the last full snapshot (persisted; survives eviction)
     this.season = 0;               // monotonic season phase (floor % 4 = current season)
+    this.bounds = null;            // {x,y} half-extents of the object field — the client clamps its camera to this (no wandering into the void)
     this.state.blockConcurrencyWhile(async () => { await this.#load(); });
   }
 
@@ -594,7 +595,16 @@ export class WorldRoom {
     // #inBox); the box-less full world stays a plain scan (old / test clients).
     const src = box ? this.#gridQueryBox(box) : this.objects.values();
     for (const o of src) { if (box && !this.#inBox(o, box)) continue; objects.push(this.#pub(o)); }
-    return { t: 'world_state', now: Date.now(), pid, season: this.season, pool: POOL, cog: { x: this.cog.x, y: this.cog.y }, objects };
+    return { t: 'world_state', now: Date.now(), pid, season: this.season, pool: POOL, cog: { x: this.cog.x, y: this.cog.y }, bounds: this.bounds || this.#computeBounds(), objects };
+  }
+  // Half-extents of the whole object field (every object, not just the box) — the
+  // client clamps its camera here so it can never wander far into empty space. A
+  // floor keeps a sparse world from over-constraining the camera. Recomputed each
+  // tick (cheap) and on connect; broadcast so the bound tracks the growing world.
+  #computeBounds() {
+    let bx = 0, by = 0;
+    for (const o of this.objects.values()) { const ax = Math.abs(o.x), ay = Math.abs(o.y); if (ax > bx) bx = ax; if (ay > by) by = ay; }
+    return { x: Math.max(900, bx), y: Math.max(900, by) };
   }
   // Interest box from a viewport centre + half-extents, widened by INTEREST_MARGIN.
   #boxFrom(cx, cy, hw, hh) {
@@ -1064,7 +1074,8 @@ export class WorldRoom {
       checkpointWrote = await this.#checkpoint(now);
       checkpointed = true;
     }
-    this.#bcast({ t: 'season', phase: this.season }, null); // let everyone feel the clock turn
+    this.bounds = this.#computeBounds(); // refresh the camera bound (the world grows/shrinks)
+    this.#bcast({ t: 'season', phase: this.season, bounds: this.bounds }, null); // feel the clock turn + keep the camera bound fresh
 
     return { spawned: spawned.length, gone: gone.length, checkpointed, checkpointWrote };
   }
