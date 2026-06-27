@@ -193,6 +193,8 @@ const presences = new Map();   // pid -> { x, y, born, last, gone }
 const lifts = new Map();       // id -> lift animation state
 const flashes = [];            // brief crystal-dissolution flashes { x, y, start }
 const grits = [];              // brief stone-to-grit scatters { x, y, seed, r, start }
+const creatureEvts = [];       // brief birth-shimmer / death-puff cues { x, y, start, birth } — the ecosystem made legible
+const CREATURE_EVT_MS = 760;   // lifetime of a birth/death cue
 let pool = null;               // the world water pool { x, y, r }
 let myPid = null;
 let seasonPhase = 0;           // monotonic season clock from the server (feels, never labelled)
@@ -658,6 +660,33 @@ function drawLeaves() {
   }
   ctx.restore();
 }
+// Birth / death cues (Wave L): a birth shimmers a soft warm-green bloom where new life
+// appears; a passing disperses a faint grey puff. Brief and subtle — the ecosystem made
+// legible without a word, in the same spirit as the crystal flash and stone grit.
+function drawCreatureEvts(now) {
+  for (let i = creatureEvts.length - 1; i >= 0; i--) {
+    const e = creatureEvts[i], age = now - e.start;
+    if (age > CREATURE_EVT_MS) { creatureEvts.splice(i, 1); continue; }
+    const p = age / CREATURE_EVT_MS;                  // 0..1
+    const fade = (1 - p) * Math.min(1, p * 5);        // fade in fast, out slow
+    ctx.save();
+    if (e.birth) {                                    // a spark of new life: an expanding warm-green ring + bloom
+      const r = 6 + p * 30;
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.strokeStyle = PG.rgba('#cfe6a8', 0.5 * fade); ctx.lineWidth = 1.6;
+      ctx.beginPath(); ctx.arc(e.x, e.y, r, 0, Math.PI * 2); ctx.stroke();
+      const g = ctx.createRadialGradient(e.x, e.y, 0, e.x, e.y, r * 0.7);
+      g.addColorStop(0, PG.rgba('#cfe6a8', 0.38 * fade)); g.addColorStop(1, PG.rgba('#cfe6a8', 0));
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(e.x, e.y, r * 0.7, 0, Math.PI * 2); ctx.fill();
+    } else {                                          // a passing: a soft grey puff dispersing
+      const r = 7 + p * 18, a = 0.42 * (1 - p);
+      const g = ctx.createRadialGradient(e.x, e.y, 0, e.x, e.y, r);
+      g.addColorStop(0, PG.rgba('#8a8076', a)); g.addColorStop(0.6, PG.rgba('#5a5048', a * 0.6)); g.addColorStop(1, PG.rgba('#5a5048', 0));
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(e.x, e.y, r, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
+  }
+}
 
 // ---- presence fade envelope -------------------------------------------------
 function presenceIntensity(p, now) {
@@ -1084,6 +1113,8 @@ function onMessage(raw) {
     case 'object_new': { // a shed seed (or other runtime-spawned object)
       const o = m.o;
       objects.set(o.id, { ...o, held: !!o.held, _matShown: o.maturity || 0, _agedShown: o.aged || 0, _tx: o.x, _ty: o.y });
+      // a creature born (mated into being) shimmers softly where it appears — life made legible
+      if (o.family === 'creature') creatureEvts.push({ x: o.x, y: o.y, start: performance.now(), birth: true });
       break;
     }
     case 'world_patch': { // interest streaming: objects paging into view as we pan
@@ -1098,6 +1129,7 @@ function onMessage(raw) {
       if (og && og.family === 'crystal') flashes.push({ x: og.x, y: og.y, start: performance.now() }); // brief flash
       else if (og && (og.family === 'stone' || m.grit)) // worn to grit — a brief scatter of dust
         grits.push({ x: og.x, y: og.y, seed: og.seed, r: objRadius(og), start: performance.now() });
+      else if (og && og.family === 'creature') { const p = creaturePos(og); creatureEvts.push({ x: p.x, y: p.y, start: performance.now(), birth: false }); } // a passing — a soft puff
       objects.delete(m.id); lifts.delete(m.id); flying.delete(m.id);
       if (heldId === m.id) clearHold();
       break;
@@ -1197,6 +1229,7 @@ function frame(now) {
     PG.drawGrit(ctx, g.seed >>> 0, g.x, g.y, g.r * (0.4 + p * 1.5), 0.8 * (1 - p));
   }
   drawLeaves(); // cosmetic drifting litter, above the objects (Wave F)
+  drawCreatureEvts(now); // brief birth/death cues (world space)
 
   aDensity = list.length; // objects on screen — feeds the ambient sound's richness
 
