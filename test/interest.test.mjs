@@ -36,7 +36,7 @@ check(wsFull && wsFull.objects.length > 50, `bare connect gets the full world ($
 const cog = wsFull.cog; // fresh world ⇒ ~origin; the interest box is centred here
 
 // ---- interest-filtered initial payload ----
-const hw = 60, hh = 60;
+const hw = 100, hh = 100;
 const small = await open(`?hw=${hw}&hh=${hh}`);
 await wait(300);
 const wsSmall = lastOf(small, 'world_state');

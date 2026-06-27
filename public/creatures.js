@@ -20,8 +20,8 @@ const TAU = Math.PI * 2;
 export const CREATURE_KINDS = ['crawler', 'flier'];
 // kind → wander reach (world units from home) and pace (time multiplier).
 const KIND = {
-  crawler: { reach: 26, pace: 0.9, bob: 0 },
-  flier:   { reach: 58, pace: 1.25, bob: 4 },
+  crawler: { reach: 34, pace: 1.25, bob: 0 },
+  flier:   { reach: 74, pace: 1.7, bob: 6 },
 };
 
 // PURE & DETERMINISTIC: the wander offset from home at shared time t (seconds).
@@ -46,7 +46,7 @@ export function wanderAt(seed, kind, t) {
 // client makes the effective tap target comfortable.
 export function creatureR(seed, kind) {
   const r = rng((seed ^ 0x9e37) >>> 0);
-  return (kind === 'flier' ? 7 : 9) + r() * 4;
+  return (kind === 'flier' ? 11 : 14) + r() * 6;
 }
 
 // ---- drawing (browser only; caller is in the world transform) ---------------
@@ -55,7 +55,7 @@ export function creatureR(seed, kind) {
 // reads as alive even while its slow drift is barely moving. Form is from `seed`.
 export function drawCreature(ctx, seed, kind, cx, cy, t, ang = 0) {
   const r = rng(seed >>> 0);
-  const size = (kind === 'flier' ? 0.7 : 1) * (3.2 + r() * 1.8); // body half-length, world units
+  const size = (kind === 'flier' ? 0.85 : 1) * (4.6 + r() * 2.6); // body half-length, world units (bigger = findable)
   const bodyHue = mix('#2b2620', r() < 0.5 ? '#3a2f24' : '#26303a', r()); // warm charcoal ↔ cool
   const sheen = lighten(bodyHue, 0.16);
   ctx.save();

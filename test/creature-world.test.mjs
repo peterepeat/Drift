@@ -24,7 +24,7 @@ function open() {
 }
 async function snap() { const ws = await open(); const w = await ws.world; ws.close(); return w; }
 const creatures = (w) => w.objects.filter((o) => o.family === 'creature');
-const MIN = 5, MAX = 14;
+const MIN = 24, MAX = 48;
 
 // 1. fresh world is uninhabited; one tick ramps to the baseline
 const w0 = await snap();

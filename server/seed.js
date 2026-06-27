@@ -16,10 +16,12 @@ const WORLD_SEED = 0x44524946;   // 'DRIF'
 // population still grows into the 10k cap over time; this just spreads the start.
 const N = 900;                   // default population (prod). env.SEED_N overrides it per-deploy
 const SEED_FRAC = 0.64;          // ~64% seeds / ~36% stones
-const GROVES = 14;               // distinct thickets/clearings
-const GROVE_SPREAD = 1800;       // grove centres scatter within ~±this (gaussian σ = half)
-const GROVE_SIGMA = 300;         // local spread of objects within a grove
-const LONER_FRAC = 0.16;         // fraction scattered in the open between groves
+const GROVES = 18;               // thickets spread across a RECTANGLE (not radially) — nothing centred
+const WORLD_W = 2600, WORLD_H = 2000; // grove centres + loners scatter across ±this
+const GROVE_SIGMA = 240;         // local spread of objects within a grove
+const LONER_FRAC = 0.18;         // fraction scattered in the open between groves
+const MIN_SPACE = 56;            // no two objects end up closer than this — relaxation kills the dense clump
+const RELAX_ITERS = 16;          // relaxation passes (one-time, at seed)
 
 // Deterministic, UUID-formatted id (valid 8-4-4-4-12, version/variant bits set).
 // Derived from the seeded master RNG, so re-seeding upserts the same 200 ids
@@ -87,15 +89,51 @@ export const makeCreatureRecord = (id, seed, kind, x, y, now) => {
 // `now` anchors creation time to the moment the world is born. The procedural
 // FORM of each object (id, position, seed) is fully deterministic; the starting
 // lifecycle mix makes the arrival world feel already in progress.
+const uniform = (rand, lo, hi) => lo + rand() * (hi - lo);
+// Push apart any objects closer than minDist (grid-accelerated, in place). A few
+// passes turn an overlapping clump into evenly-spaced groves with no hyper-density.
+// Deterministic — rand is used only to jitter exactly-coincident points apart.
+function relaxSpacing(pts, iters, minDist, rand, clampX, clampY) {
+  const cell = minDist;
+  for (let it = 0; it < iters; it++) {
+    const grid = new Map();
+    for (let i = 0; i < pts.length; i++) {
+      const k = Math.floor(pts[i].x / cell) + ',' + Math.floor(pts[i].y / cell);
+      let a = grid.get(k); if (!a) { a = []; grid.set(k, a); } a.push(i);
+    }
+    const dx = new Float64Array(pts.length), dy = new Float64Array(pts.length);
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[i], cx = Math.floor(p.x / cell), cy = Math.floor(p.y / cell);
+      for (let gx = cx - 1; gx <= cx + 1; gx++) for (let gy = cy - 1; gy <= cy + 1; gy++) {
+        const arr = grid.get(gx + ',' + gy); if (!arr) continue;
+        for (const j of arr) {
+          if (j <= i) continue;
+          const q = pts[j]; let ex = p.x - q.x, ey = p.y - q.y; const d = Math.hypot(ex, ey);
+          if (d > minDist) continue;
+          let push;
+          if (d < 0.001) { const a = rand() * 6.2831853; ex = Math.cos(a); ey = Math.sin(a); push = minDist * 0.5; }
+          else { push = (minDist - d) / d * 0.5; }
+          dx[i] += ex * push; dy[i] += ey * push; dx[j] -= ex * push; dy[j] -= ey * push;
+        }
+      }
+    }
+    for (let i = 0; i < pts.length; i++) {
+      pts[i].x = Math.max(-clampX, Math.min(clampX, pts[i].x + dx[i]));
+      pts[i].y = Math.max(-clampY, Math.min(clampY, pts[i].y + dy[i]));
+    }
+  }
+}
+
 export function generateWorld(now = Date.now(), count = N) {
   const n = Math.max(1, count | 0);              // env-overridable population (small for fast tests)
   const nSeed = Math.round(n * SEED_FRAC);
   const rand = rng(WORLD_SEED);
-  // Grove centres first (fixed draw order). Grove 0 is the "heart" near the origin,
-  // so an arrival at the cog lands somewhere already alive, not in a bare clearing.
-  const groves = [{ x: 0, y: 0 }]; // grove 0 is the dense "heart" at the cog, where arrivals land
+  // Grove centres spread across a RECTANGLE, not radially from a centre (so it isn't
+  // "all piled in the middle of a circle"). Grove 0 sits near the origin so an arrival
+  // at the cog still lands by some life — but it's just a normal grove, no dense heart.
+  const groves = [{ x: +uniform(rand, -160, 160).toFixed(2), y: +uniform(rand, -160, 160).toFixed(2) }];
   for (let g = 1; g < GROVES; g++) {
-    groves.push({ x: +(gaussian(rand) * GROVE_SPREAD * 0.5).toFixed(2), y: +(gaussian(rand) * GROVE_SPREAD * 0.5).toFixed(2) });
+    groves.push({ x: +uniform(rand, -WORLD_W, WORLD_W).toFixed(2), y: +uniform(rand, -WORLD_H, WORLD_H).toFixed(2) });
   }
   const out = [];
   for (let i = 0; i < n; i++) {
@@ -105,17 +143,12 @@ export function generateWorld(now = Date.now(), count = N) {
     const id = detUuid(rand);
     let x, y;
     if (rand() < LONER_FRAC) {                                  // scattered in the open between groves
-      x = gaussian(rand) * GROVE_SPREAD * 0.7;
-      y = gaussian(rand) * GROVE_SPREAD * 0.7;
-    } else {                                                    // gathered into a grove
-      const r1 = rand();                                        // ~30% land in the heart, the rest spread across the others
-      const gi = r1 < 0.30 ? 0 : 1 + Math.floor(((r1 - 0.30) / 0.70) * (GROVES - 1));
-      const grove = groves[gi];
-      const sig = gi === 0 ? GROVE_SIGMA * 0.6 : GROVE_SIGMA;   // the heart is tighter, so the cog stays reliably alive
-      x = grove.x + gaussian(rand) * sig;
-      y = grove.y + gaussian(rand) * sig;
+      x = uniform(rand, -WORLD_W, WORLD_W); y = uniform(rand, -WORLD_H, WORLD_H);
+    } else {                                                    // gathered loosely into a grove
+      const grove = groves[Math.floor(rand() * groves.length)];
+      x = grove.x + gaussian(rand) * GROVE_SIGMA;
+      y = grove.y + gaussian(rand) * GROVE_SIGMA;
     }
-    x = +x.toFixed(2); y = +y.toFixed(2);
     const seed = Math.floor(rand() * 4294967296) >>> 0;        // 32-bit procgen seed
     let maturity = 0, aged = 0;
     if (family === 'seed') {
@@ -126,6 +159,9 @@ export function generateWorld(now = Date.now(), count = N) {
     }
     out.push(makeRecord(id, family, seed, x, y, now, maturity, aged));
   }
+  // Relax so nothing piles up — the dense central clump becomes evenly-spaced groves.
+  relaxSpacing(out, RELAX_ITERS, MIN_SPACE, rand, WORLD_W + 500, WORLD_H + 500);
+  for (const o of out) { o.x = +o.x.toFixed(2); o.y = +o.y.toFixed(2); }
   return out;
 }
 
@@ -135,7 +171,7 @@ export { N as SEED_COUNT };
 // older version is reseeded ONCE on load (see the DO's #load), so a deployed
 // generator change actually reaches the live world without an admin key or a wipe
 // route. 1 = the old single central clump; 2 = groves spread across a wide world.
-export const SEED_VERSION = 2;
+export const SEED_VERSION = 3;
 // Decide what a loading world needs: seed a fresh empty world, reseed a world left
 // by an older generator (one-time, version-gated), or nothing. Pure + unit-tested —
 // it carries the only loop-risk (a wrong "reseed" would wipe on every restart), so

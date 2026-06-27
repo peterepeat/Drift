@@ -78,9 +78,13 @@ check(has(await snap(), an), 'an anomaly never fades, however isolated');
 const start = (await snap()).objects.length;
 await fill(MAX + 120 - start);         // push just over the cap
 check((await snap()).objects.length > MAX, `world filled over the ceiling (> ${MAX})`);
+const over = (await snap()).objects.length;
 await tick(6, 0.0);                      // isolation builds; the ceiling trims the most-isolated
 const after = (await snap()).objects.length;
-check(after < MAX, `a full world trims back under the ceiling (${after} < ${MAX})`);
+// It comes back DOWN from the over-fill and stays bounded by the cap. (In Growing it
+// then churns AT the cap — trim removes the most-forgotten as fresh seeds shed — so
+// the invariant is "<= cap", not "strictly under": a packed world breathes, not grows.)
+check(after <= MAX && after < over, `a full world trims back to the ceiling (${over} -> ${after} <= ${MAX})`);
 check(has(await snap(), an), 'the ceiling spares anomalies while trimming');
 
 // 6. write economy: the full-world snapshot must NOT run every tick (the DO

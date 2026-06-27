@@ -114,9 +114,9 @@ const CRYSTAL_DECAY = 1 / 300;            // decay/tick (~5h to dissolve) — sl
 // broadcast — the always-ticking world spends nothing keeping them moving. They
 // ramp to a baseline quickly so an arriving world feels inhabited, then top up to
 // a cap. Spared from water-drift, isolation-fade and the ceiling trim (they're alive).
-const MIN_CREATURES = 5;
-const MAX_CREATURES = 14;
-const CREATURE_SPAWN_CHANCE = 0.04;       // per tick, between MIN and MAX
+const MIN_CREATURES = 24;                 // enough that you'll spot some when you look — but not a horde
+const MAX_CREATURES = 48;
+const CREATURE_SPAWN_CHANCE = 0.08;       // per tick, between MIN and MAX
 
 // ---- stones: erosion-to-grit & stacking (Family 1) -------------------------
 // Stones don't grow; they erode by handling (each place wears them smoother and
@@ -1183,7 +1183,7 @@ export class WorldRoom {
 
   #shed(parent, now) {
     const ang = Math.random() * Math.PI * 2;
-    const dist = 22 + Math.random() * 70;
+    const dist = 55 + Math.random() * 105; // shed further out so growth doesn't re-clump the world
     const x = parent.x + Math.cos(ang) * dist;
     const y = parent.y + Math.sin(ang) * dist;
     const seed = (Math.random() * 4294967296) >>> 0;
