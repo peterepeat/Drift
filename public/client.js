@@ -375,12 +375,14 @@ let _lastPosFrame = 0;
 function updatePositions(now) {
   const dt = _lastPosFrame ? (now - _lastPosFrame) / 1000 : 0;
   _lastPosFrame = now;
-  const k = dt > 0 ? 1 - Math.pow(0.0002, dt) : 0; // ~reaches target in ~1s
+  const k = dt > 0 ? 1 - Math.pow(0.0002, dt) : 0;  // most objects: settle in ~1s
+  const kc = dt > 0 ? 1 - Math.pow(0.15, dt) : 0;    // creatures: a gentle ~2-3s glide for the migrating home
   for (const o of objects.values()) {
     if (o._tx == null) { o._tx = o.x; o._ty = o.y; continue; }
     if (o.id === heldId) { o._tx = o.x; o._ty = o.y; continue; } // locally carried — follows the finger
-    o.x += (o._tx - o.x) * k;
-    o.y += (o._ty - o.y) * k;
+    const r = o.family === 'creature' ? kc : k;
+    o.x += (o._tx - o.x) * r;
+    o.y += (o._ty - o.y) * r;
   }
 }
 // Holding an anomaly for 10s dissolves it (it fades from your hands — never explained).
@@ -913,7 +915,11 @@ function onMessage(raw) {
       // A small move on a free object is water-drift — ease it (no pop), like growth.
       // Larger jumps (place, scatter, topple, initial) snap. Held objects always snap.
       const dx = m.x - o.x, dy = m.y - o.y;
-      if (!m.held && m.id !== heldId && dx * dx + dy * dy <= POS_EASE_MAX * POS_EASE_MAX) {
+      // A free creature's home migrates each tick (goal-seeking, Wave G1) — ALWAYS ease
+      // it (never snap), so it drifts smoothly. Others ease a small water-drift hop and
+      // snap larger jumps (place, scatter, initial).
+      const easeCreature = o.family === 'creature' && !m.held && m.id !== heldId;
+      if (easeCreature || (!m.held && m.id !== heldId && dx * dx + dy * dy <= POS_EASE_MAX * POS_EASE_MAX)) {
         o._tx = m.x; o._ty = m.y; // leave o.x/o.y to glide toward the target
       } else {
         o.x = m.x; o.y = m.y; o._tx = m.x; o._ty = m.y;

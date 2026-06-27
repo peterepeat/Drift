@@ -73,9 +73,12 @@ check(grown > plant0, `the world filled with plants over time (${plant0} -> ${gr
 //     the slow way would pack the world to the cap) ---
 const ripe = w2.objects.find((o) => o.family === 'seed' && o.maturity >= 0.86);
 await lifecycle(ripe.id, 1, 0.96);
-let dissolved = 0;
-for (let i = 0; i < 5 && !dissolved; i++) dissolved += (await tick(20)).gone; // ~20-100 ticks
-check(dissolved > 0 && !(await snapshot()).objects.find((o) => o.id === ripe.id), `a fully-aged plant dissolves (${dissolved} gone)`);
+// Tick until THIS plant is gone (not just until anything dies) — aging speed is
+// season-dependent, so keep going up to ~160 ticks rather than stopping at the first
+// unrelated death (a stone crumbling / a ceiling trim would otherwise end it early).
+let ripeGone = false;
+for (let i = 0; i < 8 && !ripeGone; i++) { await tick(20); ripeGone = !(await snapshot()).objects.find((o) => o.id === ripe.id); }
+check(ripeGone, 'a fully-aged plant dissolves');
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

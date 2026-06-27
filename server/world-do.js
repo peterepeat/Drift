@@ -117,6 +117,18 @@ const CRYSTAL_DECAY = 1 / 300;            // decay/tick (~5h to dissolve) — sl
 const MIN_CREATURES = 24;                 // enough that you'll spot some when you look — but not a horde
 const MAX_CREATURES = 48;
 const CREATURE_SPAWN_CHANCE = 0.08;       // per tick, between MIN and MAX
+// ---- creatures: goal-seeking drift (Wave G1) -------------------------------
+// Each tick a creature steps its HOME toward what it needs — a plant to feed at, the
+// pool to drink, a stone to rest by — cycling slowly through those drives (seed-
+// desynced so they don't all do the same thing). The step is broadcast and the client
+// EASES the home (like water drift), so under the lively wander it reads as a slow,
+// purposeful drift rather than a teleport. Authority stays server-side; motion stays
+// deterministic + zero per-frame sync. Held creatures are left alone.
+const CREATURE_DRIVES = ['feed', 'drink', 'rest', 'roam'];
+const CREATURE_STEP = 46;                 // world units the home migrates toward a goal per tick
+const CREATURE_SEEK_R = 720;              // how far a creature looks for an attractor
+const CREATURE_ARRIVE = 42;               // stop this near the goal (graze/rest beside it, don't pile on)
+const CREATURE_DRIVE_TICKS = 5;           // a creature holds one drive ~this many ticks before it shifts
 
 // ---- stones: erosion-to-grit & stacking (Family 1) -------------------------
 // Stones don't grow; they erode by handling (each place wears them smoother and
@@ -955,6 +967,22 @@ export class WorldRoom {
       spawned.push(this.#spawnCreature(now));
     }
 
+    // Goal-seeking drift (Wave G1): step each free creature's HOME toward what it
+    // needs this cycle (a plant / the pool / a stone). Broadcast the new home; the
+    // client eases it, so it reads as a slow purposeful drift beneath the wander.
+    // Marked dirty via `changed` below — rides the checkpoint, no per-tick write.
+    for (const o of this.objects.values()) {
+      if (o.family !== 'creature' || o.held !== '') continue;
+      const goal = this.#creatureGoal(o);
+      if (!goal) continue;
+      const dx = goal.x - o.x, dy = goal.y - o.y, d = Math.hypot(dx, dy);
+      if (d <= CREATURE_ARRIVE) continue;            // arrived — graze/rest in place (the wander keeps it alive)
+      const step = Math.min(CREATURE_STEP, d - CREATURE_ARRIVE);
+      o.x += (dx / d) * step; o.y += (dy / d) * step;
+      this.#gridUpdate(o);
+      if (!changed.includes(o)) changed.push(o);     // broadcast the new home (clients ease it smoothly)
+    }
+
     // Broadcast every threshold-crossing for smooth visuals, but DON'T write per
     // crossing: mark it dirty and let the periodic checkpoint persist it (the
     // broadcast/persist decouple — write rate tracks the checkpoint cadence, not the
@@ -1258,6 +1286,31 @@ export class WorldRoom {
     }
     const seed = (Math.random() * 4294967296) >>> 0;
     return makeCreatureRecord(crypto.randomUUID(), seed, k, x, y, now);
+  }
+
+  // What a creature is drawn toward THIS tick, or null to just roam. Its drive cycles
+  // slowly (feed → drink → rest → roam), seed-desynced so the world isn't in lockstep;
+  // the target is the nearest matching thing within reach (grid-local, cheap).
+  #creatureDrive(c) {
+    const ticks = this.season / SEASON_PER_TICK;     // monotonic tick count (season advances per tick)
+    const phase = Math.floor(ticks / CREATURE_DRIVE_TICKS + (c.seed % 1000) / 250);
+    return CREATURE_DRIVES[((phase % 4) + 4) % 4];
+  }
+  #creatureGoal(c) {
+    const drive = this.#creatureDrive(c);
+    if (drive === 'roam') return null;                // a stretch of free wandering, no pull
+    if (drive === 'drink') {                          // head to the nearest point on the pool's rim
+      const dx = c.x - POOL.x, dy = c.y - POOL.y, d = Math.hypot(dx, dy) || 1;
+      if (d > CREATURE_SEEK_R + POOL.r) return null;  // too far from water to bother this cycle
+      return { x: POOL.x + (dx / d) * POOL.r, y: POOL.y + (dy / d) * POOL.r };
+    }
+    const wantPlant = drive === 'feed';               // feed → a growing plant; rest → a stone
+    let best = null, bestD = CREATURE_SEEK_R;
+    for (const o of this.#gridNear(c.x, c.y, CREATURE_SEEK_R, (o) => wantPlant ? (o.family === 'seed' && o.maturity >= SPROUT) : o.family === 'stone')) {
+      const d = Math.hypot(o.x - c.x, o.y - c.y);
+      if (d < bestD) { bestD = d; best = o; }
+    }
+    return best ? { x: best.x, y: best.y } : null;
   }
 
   async alarm() {

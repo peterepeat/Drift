@@ -61,17 +61,36 @@ check(placed && placed.x === 305 && placed.y === 225, "a placed creature's home 
 check(placed && placed.wanderT0 > t0Before, 'placing a creature re-anchors its wander (wanderT0 advances)');
 ctl.close();
 
-// 5. a creature does not drift on the water (home is fixed until placed)
-const dr = await spawn(null, 0, 0); // pool centre, where free objects would drift most
+// 5. a creature does not WATER-drift, and with nothing in reach it stays put (its
+// only motion is the client-side wander + server goal-seeking, never the flow).
+const dr = await spawn(null, 8000, 8000); // far outside the seeded world (no plant/stone/pool in reach)
 await tickG(40);
 const d = creatures(await snap()).find((o) => o.id === dr.creature.id);
-check(d && d.x === 0 && d.y === 0, 'a creature does not drift (it moves itself, client-side)');
+check(d && d.x === 8000 && d.y === 8000, 'a creature with nothing in reach stays put (no water-drift; it moves itself)');
 
 // 6. a creature never fades, even long-untouched (a stone would crumble by ~1440 ticks)
 const pc = await spawn(null, 800, 800);
 await isolate(pc.creature.id, 3000);
 await tickG(5);
 check(!!creatures(await snap()).find((o) => o.id === pc.creature.id), 'a creature never fades, however long it is left');
+
+// 7. goal-seeking drift (Wave G1): a creature isolated far out, with a single mature
+// plant ~300u away, drifts its home TOWARD the plant over a drive cycle (the 'feed'
+// ticks pull it in; nothing else is in range). The seeded world is within ±2600, so
+// out here only the placed plant is an attractor.
+const lifecycle = (id, mat) => fetch(`${base}/admin/lifecycle?id=${id}&maturity=${mat}`, { method: 'POST', headers: key }).then((r) => r.json());
+const place = (id, x, y) => fetch(`${base}/admin/place?id=${id}&x=${x}&y=${y}`, { method: 'POST', headers: key }).then((r) => r.json());
+const FARP = 5000;
+const gc = await spawn('crawler', FARP, FARP);
+const plant = (await snap()).objects.find((o) => o.family === 'seed');
+await lifecycle(plant.id, 0.6);            // make it a mature plant (a feed target)
+await place(plant.id, FARP + 300, FARP);   // 300u east of the creature
+const g0 = creatures(await snap()).find((o) => o.id === gc.creature.id);
+const dBefore = Math.hypot(FARP + 300 - g0.x, FARP - g0.y);
+await tickG(26);                           // > one full drive cycle (4 drives × 5 ticks) so 'feed' ticks occur
+const g1 = creatures(await snap()).find((o) => o.id === gc.creature.id);
+const dAfter = Math.hypot(FARP + 300 - g1.x, FARP - g1.y);
+check(dAfter < dBefore - 100, `a creature drifts toward a nearby plant to feed (${dBefore.toFixed(0)}u -> ${dAfter.toFixed(0)}u)`);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
