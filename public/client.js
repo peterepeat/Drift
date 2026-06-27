@@ -37,6 +37,7 @@ const SHARED_RADIUS = 620;                   // world units within which two pre
 const SHARED_BOOST = 3.2;                     // strength of the extra between-them bloom (intensifies the shared patch)
 const SPROUT_C = 0.14;                        // maturity below this renders as a seed (mirrors server)
 const GLOW_PARALLAX = 0.04;                   // ambient glows drift this fraction of the camera (Wave H depth)
+const DEPTH_TOP = 0.2;                         // objects at the TOP of the screen draw this much smaller (Wave K recession — subtle)
 const ANOM_DISSOLVE_MS = 10000, ANOM_FADE_MS = 3000; // hold an anomaly 10s and it fades from your hands
 const ATTEND_MS = 450;                        // long-press dwell before an object is "attended" (PRD §5.2)
 const STACK_STEP_C = 12, STACK_TALL_C = 4;   // stone-stack rise/level + tall-stack-tap-to-scatter (mirror server)
@@ -336,8 +337,13 @@ function drawObjectWorld(o) {
   let cx, cy, ang = 0;
   if (o.family === 'creature') { const p = creaturePos(o); cx = p.x; cy = p.y; ang = p.ang; } // live wander + heading
   else { cx = o.x + (o._ox || 0); cy = o.y + (o._oy || 0); } // + local cursor-displacement (Wave 6)
-  paintGroundShadow(o, cx, cy, objRadius(o));
+  const ds = o._depthScale || 1; // size-by-depth (Wave K) — set in the cull pass
+  paintGroundShadow(o, cx, cy, objRadius(o) * ds);
+  if (ds === 1) { paintObject(o, cx, cy, ang); return; }
+  ctx.save();
+  ctx.translate(cx, cy); ctx.scale(ds, ds); ctx.translate(-cx, -cy); // scale about the object's base point
   paintObject(o, cx, cy, ang);
+  ctx.restore();
 }
 // The "reveal of age" (PRD §5.2): how far along its life an attended object is, so
 // the attend-bloom is larger and warmer the older/more-worn the object — its history
@@ -372,6 +378,11 @@ function groundY(o) { return o.y + (o.stack || 0) * STACK_STEP_C; }
 // per-seed amount spreads them through the canopy height, so each reads as weaving
 // behind some trees and in front of others rather than all sitting on one plane.
 function flierLift(o) { return 56 + PG.rng((o.seed ^ 0x5f5e10) >>> 0)() * 120; }
+// Size-by-depth (Wave K): an object's draw scale by its SCREEN height — full size at
+// the bottom (nearest), receding to DEPTH_TOP smaller at the top (furthest back). A
+// breath of pseudo-depth; subtle so the pan-time "breathing" stays imperceptible.
+// Stored per object each frame (in the cull pass) so the draw AND the hit-test agree.
+function depthScaleAt(screenY) { return 1 - (1 - clamp(screenY / vh, 0, 1)) * DEPTH_TOP; }
 // Height of the stack a stone belongs to (1 = a lone stone on the ground).
 function stackHeight(o) {
   const baseId = o.stackBase || o.id;
@@ -664,7 +675,7 @@ let attendId = null, attendT = 0;
 let lpTimer = null, lpFired = false;   // long-press arming (touch)
 function clearLongPress() { if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; } }
 // Topmost free object under world point w (shared by tap-to-pick and attend).
-function hitRadius(o) { return Math.max(objRadius(o) * HIT_GROW + HIT_PAD, HIT_MIN / camera.z); }
+function hitRadius(o) { return Math.max(objRadius(o) * (o._depthScale || 1) * HIT_GROW + HIT_PAD, HIT_MIN / camera.z); } // depth-scaled (Wave K), but never below the accessible min
 function hitTest(w) {
   let pick = null, best = -Infinity;
   for (const o of objects.values()) {
@@ -1164,6 +1175,7 @@ function frame(now) {
     o._sortY = (o.family === 'creature' && o.id !== heldId && !o.held)
       ? p.y + (o.kind === 'flier' ? flierLift(o) : 0)
       : groundY(o);
+    o._depthScale = depthScaleAt(s.y); // size-by-depth (Wave K) — used by draw + hit-test
     list.push(o);
   }
   // painter's depth by ground line, then bottom-up within a stack so the top stone occludes
