@@ -24,6 +24,14 @@ a.forEach((r) => occ.add(Math.round(r.x / CELL) + ',' + Math.round(r.y / CELL)))
 check(occ.size > 90, `objects spread across the world, not clustered (${occ.size} occupied 300u cells)`);
 const maxR = Math.max(...a.map((r) => Math.hypot(r.x, r.y)));
 check(maxR > 1500 && maxR < 6000, `spread is wide but bounded (furthest ${maxR.toFixed(0)} wu)`);
+// relaxation: no two objects pile up on top of each other (kills the dense clump)
+const CS = 80, grid = new Map();
+a.forEach((r, i) => { const k = Math.round(r.x / CS) + ',' + Math.round(r.y / CS); (grid.get(k) || grid.set(k, []).get(k)).push(i); });
+let minD = Infinity;
+for (let i = 0; i < a.length; i++) { const cx = Math.round(a[i].x / CS), cy = Math.round(a[i].y / CS);
+  for (let gx = cx - 1; gx <= cx + 1; gx++) for (let gy = cy - 1; gy <= cy + 1; gy++) { const arr = grid.get(gx + ',' + gy); if (!arr) continue;
+    for (const j of arr) { if (j <= i) continue; const d = Math.hypot(a[i].x - a[j].x, a[i].y - a[j].y); if (d < minD) minD = d; } } }
+check(minD > 40, `no two objects pile up — min spacing ${minD.toFixed(1)}u (relaxation worked)`);
 
 // the cog/origin still has life (a "heart" grove) so arrivals don't land in a void,
 // and the interest box there is a strict subset — both relied on by interest.test

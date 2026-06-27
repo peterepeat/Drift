@@ -42,7 +42,7 @@ const NUDGE_MIN_SPEED = 45;                   // cursor must move faster than th
 // Collision (Wave E): a held / thrown object bumps nearby movable things aside (a
 // render-only push on the same _ox/_oy spring — local & cosmetic, no network).
 const COLLIDE_R = 26;                         // bump reach beyond the carried object's own radius
-const COLLIDE_STR = 950;                      // how hard it shoves neighbours out of the way
+const COLLIDE_STR = 620;                      // how hard it shoves neighbours out of the way (gentle — they part, not fly)
 
 // Spec easing curves (Visual Bible §06).
 const EASE_RISE = cubicBezier(0.22, 1, 0.36, 1);     // pickup / place lift
@@ -348,11 +348,12 @@ function updateFlying(now) {
   const sendNow = (now - _flyCarryAt) >= CARRY_SEND_MS;
   for (const [id, f] of flying) {
     const o = objects.get(id);
-    if (!o) { flying.delete(id); continue; }
+    if (!o || !o.held) { flying.delete(id); continue; } // gone, or the server reclaimed it → stop gliding
     const s = flingStep({ x: o.x, y: o.y }, f, dt, THROW_FRICTION, THROW_STOP);
     o.x = s.x; o.y = s.y; o._tx = s.x; o._ty = s.y; f.vx = s.vx; f.vy = s.vy;
     if (s.stopped) {
       o.held = false;
+      setLift(id, 0, SETTLE_MS, EASE_SETTLE);        // settle down where it came to rest
       send({ t: 'place', id, token, x: o.x, y: o.y, ts: Date.now() });
       Audio.event('land', { seed: o.seed, family: o.family, x: o.x });
       flying.delete(id);
@@ -361,6 +362,15 @@ function updateFlying(now) {
     }
   }
   if (sendNow) _flyCarryAt = now;
+}
+// Place every in-flight object NOW (used when the tab hides — rAF stops, so they'd
+// otherwise sit server-held until the 45s reaper). Releases our hold cleanly.
+function settleFlying() {
+  for (const id of flying.keys()) {
+    const o = objects.get(id);
+    if (o) { o.held = false; o._tx = o.x; o._ty = o.y; setLift(id, 0, SETTLE_MS, EASE_SETTLE); send({ t: 'place', id, token, x: o.x, y: o.y, ts: Date.now() }); }
+  }
+  flying.clear();
 }
 
 // How easily a thing is stirred by a passing cursor (Wave 6): seeds & leaves fly,
@@ -543,8 +553,7 @@ function startFling() {
   let vx = flingVel.x, vy = flingVel.y;
   const sp = Math.hypot(vx, vy);
   if (sp > THROW_MAX) { const k = THROW_MAX / sp; vx *= k; vy *= k; }
-  flying.set(id, { vx, vy });
-  setLift(id, 0, SETTLE_MS, EASE_SETTLE);           // ground it — a thrown thing slides, not floats
+  flying.set(id, { vx, vy });                       // stays lifted (from the drag) for the whole arc — settles on land
   clearHold();                                      // release the pointer NOW (the object flies on its own)
 }
 function placeHold(kind) {                         // settle the held object where it is
@@ -736,7 +745,10 @@ if (localStorage.getItem('drift_sound') === '1') {
   };
   window.addEventListener('pointerdown', armStart);
 }
-document.addEventListener('visibilitychange', () => { document.hidden ? Audio.onHidden() : Audio.onVisible(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { settleFlying(); Audio.onHidden(); } // rAF pauses when hidden — don't leave thrown objects held
+  else Audio.onVisible();
+});
 
 // Half-extents of the current viewport in world units — what the server needs to
 // know which objects we can see (interest management). dpr is already folded out.
@@ -829,18 +841,19 @@ function onMessage(raw) {
       if (og && og.family === 'crystal') flashes.push({ x: og.x, y: og.y, start: performance.now() }); // brief flash
       else if (og && (og.family === 'stone' || m.grit)) // worn to grit — a brief scatter of dust
         grits.push({ x: og.x, y: og.y, seed: og.seed, r: objRadius(og), start: performance.now() });
-      objects.delete(m.id); lifts.delete(m.id);
+      objects.delete(m.id); lifts.delete(m.id); flying.delete(m.id);
       if (heldId === m.id) clearHold();
       break;
     }
     case 'pickup_ack': {
-      if (!m.ok && heldId === m.id) { // lost the race — snap back
+      if (!m.ok) { // lost the race — stop owning it (whether still in hand or already thrown)
+        flying.delete(m.id);                  // a rejected throw stops gliding; the real holder's state wins
         const o = objects.get(m.id);
-        // held=false so the server's corrective object_state (held:true, from the
-        // real holder) re-lifts it; leaving it true would suppress that re-lift.
-        if (o && preGrab) { o.x = preGrab.x; o.y = preGrab.y; o._tx = preGrab.x; o._ty = preGrab.y; o.held = false; }
+        // held=false so the server's corrective object_state (held:true, from the real
+        // holder) re-lifts it; leaving it true would suppress that re-lift.
+        if (o) { if (heldId === m.id && preGrab) { o.x = preGrab.x; o.y = preGrab.y; o._tx = preGrab.x; o._ty = preGrab.y; } o.held = false; }
         setLift(m.id, 0, SETTLE_MS, EASE_SETTLE);
-        clearHold();
+        if (heldId === m.id) clearHold();
       }
       break;
     }

@@ -127,13 +127,19 @@ function relaxSpacing(pts, iters, minDist, rand, clampX, clampY) {
 export function generateWorld(now = Date.now(), count = N) {
   const n = Math.max(1, count | 0);              // env-overridable population (small for fast tests)
   const nSeed = Math.round(n * SEED_FRAC);
+  // Scale the scatter area with the population so DENSITY stays ~constant: at the prod
+  // default (900) scale is 1 — positions UNCHANGED — while a large SEED_N gets a
+  // proportionally bigger world, keeping MIN_SPACE satisfiable and relaxSpacing ~O(N)
+  // (not O(N^2)). A small test world is just a denser-packed miniature.
+  const scale = Math.sqrt(n / N);
+  const W = WORLD_W * scale, H = WORLD_H * scale, sigma = GROVE_SIGMA * scale;
   const rand = rng(WORLD_SEED);
-  // Grove centres spread across a RECTANGLE, not radially from a centre (so it isn't
+  // Grove centres spread across the RECTANGLE, not radially from a centre (so it isn't
   // "all piled in the middle of a circle"). Grove 0 sits near the origin so an arrival
   // at the cog still lands by some life — but it's just a normal grove, no dense heart.
   const groves = [{ x: +uniform(rand, -160, 160).toFixed(2), y: +uniform(rand, -160, 160).toFixed(2) }];
   for (let g = 1; g < GROVES; g++) {
-    groves.push({ x: +uniform(rand, -WORLD_W, WORLD_W).toFixed(2), y: +uniform(rand, -WORLD_H, WORLD_H).toFixed(2) });
+    groves.push({ x: +uniform(rand, -W, W).toFixed(2), y: +uniform(rand, -H, H).toFixed(2) });
   }
   const out = [];
   for (let i = 0; i < n; i++) {
@@ -143,11 +149,11 @@ export function generateWorld(now = Date.now(), count = N) {
     const id = detUuid(rand);
     let x, y;
     if (rand() < LONER_FRAC) {                                  // scattered in the open between groves
-      x = uniform(rand, -WORLD_W, WORLD_W); y = uniform(rand, -WORLD_H, WORLD_H);
+      x = uniform(rand, -W, W); y = uniform(rand, -H, H);
     } else {                                                    // gathered loosely into a grove
       const grove = groves[Math.floor(rand() * groves.length)];
-      x = grove.x + gaussian(rand) * GROVE_SIGMA;
-      y = grove.y + gaussian(rand) * GROVE_SIGMA;
+      x = grove.x + gaussian(rand) * sigma;
+      y = grove.y + gaussian(rand) * sigma;
     }
     const seed = Math.floor(rand() * 4294967296) >>> 0;        // 32-bit procgen seed
     let maturity = 0, aged = 0;
@@ -160,7 +166,10 @@ export function generateWorld(now = Date.now(), count = N) {
     out.push(makeRecord(id, family, seed, x, y, now, maturity, aged));
   }
   // Relax so nothing piles up — the dense central clump becomes evenly-spaced groves.
-  relaxSpacing(out, RELAX_ITERS, MIN_SPACE, rand, WORLD_W + 500, WORLD_H + 500);
+  // Only for sane populations (prod is 900): the relaxation is the one super-linear
+  // step, so a huge SEED_N skips it (the scaled grove spread already distributes it)
+  // rather than stalling DO construction. n<=3000 keeps prod + tests fully relaxed.
+  if (n <= 3000) relaxSpacing(out, RELAX_ITERS, MIN_SPACE, rand, W + 500, H + 500);
   for (const o of out) { o.x = +o.x.toFixed(2); o.y = +o.y.toFixed(2); }
   return out;
 }
