@@ -13,8 +13,9 @@ import { wanderAt, drawCreature, creatureR } from './creatures.js';
 // ---- tuning constants -------------------------------------------------------
 const Z0 = 1.0, ZMIN = 0.2, ZMAX = 4.0;     // zoom = CSS px per world unit
 const SLOP = 8;                              // px of movement that turns a tap into a pan
-const HIT_MIN = 30;                          // min tap radius in CSS px (accessibility)
-const HIT_PAD = 6, HIT_GROW = 1.35;          // grab area exceeds the drawn form, so the tiniest things (leaves, seeds, crystals) are easy to lift
+const HIT_MIN = 26;                          // min tap radius in CSS px (accessibility)
+const HIT_PAD = 3, HIT_GROW = 1.18;          // grab area modestly exceeds the drawn form — easy to grab, but not so greedy it steals pans
+const BIG_TREE_MAT = 0.8;                     // plants this mature have ROOTED — immovable landmarks you can drag across to pan
 const LIFT_MS = 300, SETTLE_MS = 260;        // pickup / place timings (spec)
 const CARRY_SEND_MS = 50;                    // throttle for streaming a carried object
 const THROW_MIN = 180;                       // release speed (world units/s) below which a drag just places — no fling
@@ -141,6 +142,10 @@ let heldSince = 0;             // when the local hold began (drives anomaly diss
 // Throw momentum: the carried object's recent velocity (world units/s), sampled as
 // it moves, so releasing a moving drag flings it on instead of freezing it (Wave 3).
 let flingVel = { x: 0, y: 0 }, lastCarryPos = null, lastCarryT = 0;
+// Thrown objects glide FREE of the pointer (id -> {vx,vy}): a throw releases the
+// pointer immediately so you can pan / grab again while the object flies on. It
+// stays server-held by our token until it lands (so carry streams), then places.
+let flying = new Map();
 
 // ---- lift animation ---------------------------------------------------------
 function setLift(id, target, dur, ease) {
@@ -188,6 +193,12 @@ function creaturePos(o) {
 function posOf(o) {
   if (o.family === 'creature' && !o.held && o.id !== heldId) return creaturePos(o);
   return { x: o.x + (o._ox || 0), y: o.y + (o._oy || 0) };
+}
+// The biggest trees have ROOTED — they're immovable landmarks (never grabbed; you
+// drag straight across them to pan). Everything else can be picked up.
+function isMovable(o) {
+  if (o.family === 'seed') return shownMat(o) < BIG_TREE_MAT;
+  return true;
 }
 function stoneGeom(o) {
   const er = Math.min(0.95, o.handling * 0.04); // handling erodes the stone (PRD §3.2)
@@ -310,19 +321,30 @@ function updateDissolve(now) {
   }
 }
 
-// Advance a thrown object: friction decays its velocity, it glides, and once slow
-// enough it settles into a place. Streams carry so others see the glide (it stays
-// owned until it rests). dt is clamped so a backgrounded tab doesn't teleport it.
-let _lastFlingT = 0;
-function updateFling(now) {
-  if (holdMode !== 'fling' || !carry) { _lastFlingT = now; return; }
+// Advance every thrown object: friction decays its velocity, it glides, and once
+// slow enough it settles into a place. Streams carry so others see the glide (it
+// stays owned until it rests). dt is clamped so a backgrounded tab doesn't teleport.
+let _lastFlingT = 0, _flyCarryAt = 0;
+function updateFlying(now) {
+  if (!flying.size) { _lastFlingT = now; return; }
   const dt = _lastFlingT ? Math.min(0.05, (now - _lastFlingT) / 1000) : 0; _lastFlingT = now;
   if (dt <= 0) return;
-  const s = flingStep(carry, flingVel, dt, THROW_FRICTION, THROW_STOP);
-  carry.x = s.x; carry.y = s.y; flingVel.x = s.vx; flingVel.y = s.vy;
-  const o = objects.get(heldId); if (o) { o.x = carry.x; o.y = carry.y; }
-  maybeSendCarry();
-  if (s.stopped) placeHold('land');
+  const sendNow = (now - _flyCarryAt) >= CARRY_SEND_MS;
+  for (const [id, f] of flying) {
+    const o = objects.get(id);
+    if (!o) { flying.delete(id); continue; }
+    const s = flingStep({ x: o.x, y: o.y }, f, dt, THROW_FRICTION, THROW_STOP);
+    o.x = s.x; o.y = s.y; o._tx = s.x; o._ty = s.y; f.vx = s.vx; f.vy = s.vy;
+    if (s.stopped) {
+      o.held = false;
+      send({ t: 'place', id, token, x: o.x, y: o.y, ts: Date.now() });
+      Audio.event('land', { seed: o.seed, family: o.family, x: o.x });
+      flying.delete(id);
+    } else if (sendNow) {
+      send({ t: 'carry', id, token, x: o.x, y: o.y, ts: Date.now() });
+    }
+  }
+  if (sendNow) _flyCarryAt = now;
 }
 
 // How easily a thing is stirred by a passing cursor (Wave 6): seeds & leaves fly,
@@ -426,7 +448,7 @@ function trackMouseHover(cx, cy) {
   mouseWorld = w; lastHoverW = w; lastHoverT = t;
 }
 let grab = null;                 // pending press on an object: { id, ox, oy } (object-centre − pointer, world units)
-let holdMode = null;             // null | 'drag' (carried by a pressed pointer) | 'follow' (tap-picked, tracks the cursor)
+let holdMode = null;             // null | 'drag' (an object carried by a pressed pointer)
 let holdOff = { x: 0, y: 0 };    // world-unit offset object-centre − pointer, so a grab doesn't snap to centre
 
 function beginHold(o, mode, off) {
@@ -463,13 +485,17 @@ function trackVel() {
   }
   lastCarryPos = { x: carry.x, y: carry.y }; lastCarryT = t;
 }
-// A drag released while moving keeps gliding (a throw) instead of freezing — the
-// hold persists, streaming carry, until friction settles it into a place.
+// A drag released while moving is THROWN: the object detaches from the pointer
+// immediately (so you can pan or grab again at once) and glides free under friction
+// until it settles into a place. It stays server-held by our token mid-flight.
 function startFling() {
-  const sp = Math.hypot(flingVel.x, flingVel.y);
-  if (sp > THROW_MAX) { const k = THROW_MAX / sp; flingVel.x *= k; flingVel.y *= k; }
-  holdMode = 'fling';
-  setLift(heldId, 0, SETTLE_MS, EASE_SETTLE);      // ground it — a thrown thing slides, not floats
+  const id = heldId;
+  let vx = flingVel.x, vy = flingVel.y;
+  const sp = Math.hypot(vx, vy);
+  if (sp > THROW_MAX) { const k = THROW_MAX / sp; vx *= k; vy *= k; }
+  flying.set(id, { vx, vy });
+  setLift(id, 0, SETTLE_MS, EASE_SETTLE);           // ground it — a thrown thing slides, not floats
+  clearHold();                                      // release the pointer NOW (the object flies on its own)
 }
 function placeHold(kind) {                         // settle the held object where it is
   if (!heldId) return;
@@ -486,41 +512,27 @@ canvas.addEventListener('pointerdown', (e) => {
   canvas.setPointerCapture(e.pointerId);
   pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, maxMove: 0 });
   attendId = null; clearLongPress(); lpFired = false;   // any press interrupts a hover/long-press
-  if (pointers.size >= 2) {                              // second finger → pinch; abandon a pending grab
+  if (pointers.size >= 2) {                              // second finger → pinch-zoom + two-finger pan
     multiTouched = true; grab = null;
-    if (holdMode === 'drag' || holdMode === 'fling') placeHold(); // dropping into a pinch sets a dragged/thrown thing down
+    if (holdMode === 'drag') placeHold();                // a second finger sets a dragged thing down
     const [a, b] = [...pointers.values()];
-    pinch = { d0: Math.hypot(a.x - b.x, a.y - b.y), z0: camera.z };
+    pinch = { d0: Math.hypot(a.x - b.x, a.y - b.y), z0: camera.z, mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2 };
     return;
   }
   const w = screenToWorld(e.clientX, e.clientY);
-  if (heldId) {                                          // pressing while holding: a tap places, a drag re-carries
-    flingVel.x = 0; flingVel.y = 0;                       // catching a thing stops its momentum
-    if (holdMode === 'fling') holdMode = 'follow';        // caught mid-flight → it waits to be re-dragged or set down
-    const o = objects.get(heldId);
-    const base = carry || (o ? { x: o.x, y: o.y } : w);  // a held thing is drawn at carry, not its stored pos
-    grab = { id: heldId, ox: base.x - w.x, oy: base.y - w.y };
-    return;
-  }
   const hit = hitTest(w);
-  if (hit) {
-    const c = posOf(hit);                                // a creature is drawn at its wander, not its home
-    grab = { id: hit.id, ox: c.x - w.x, oy: c.y - w.y };
-    // touch/pen: dwell still on it → attend (§5.2), don't grab. The mouse uses hover-attend.
-    if (e.pointerType !== 'mouse') lpTimer = setTimeout(() => { attendId = hit.id; lpFired = true; lpTimer = null; grab = null; }, ATTEND_MS);
-  }
-  // else: empty background → a pan candidate (handled in pointermove once it moves)
+  // A movable object becomes a grab candidate — it's picked up once the press MOVES
+  // (a still tap does nothing). A rooted tree or empty ground leaves grab null → pan.
+  if (hit && isMovable(hit)) { const c = posOf(hit); grab = { id: hit.id, ox: c.x - w.x, oy: c.y - w.y }; }
+  // touch/pen: a still long-press attends whatever's under the finger (§5.2), movable or not.
+  if (hit && e.pointerType !== 'mouse') lpTimer = setTimeout(() => { attendId = hit.id; lpFired = true; lpTimer = null; grab = null; }, ATTEND_MS);
 });
 
 canvas.addEventListener('pointermove', (e) => {
   if (e.pointerType === 'mouse') { lastMouse.x = e.clientX; lastMouse.y = e.clientY; }
   const p = pointers.get(e.pointerId);
   if (!p) {                                       // no pressed pointer for this id
-    if (e.pointerType === 'mouse') {
-      if (heldId && holdMode === 'follow') carryTo(e.clientX, e.clientY); // a follow-held object tracks the cursor
-      else { updateHover(e.clientX, e.clientY); trackMouseHover(e.clientX, e.clientY); } // attend + stir light things
-
-    }
+    if (e.pointerType === 'mouse') { updateHover(e.clientX, e.clientY); trackMouseHover(e.clientX, e.clientY); } // attend + stir light things
     return;
   }
   const dx = e.clientX - p.x, dy = e.clientY - p.y;
@@ -535,7 +547,9 @@ canvas.addEventListener('pointermove', (e) => {
     const before = screenToWorld(mx, my);
     camera.z = clamp(pinch.z0 * (d / pinch.d0), ZMIN, ZMAX);
     const after = screenToWorld(mx, my);
-    camera.x += before.x - after.x; camera.y += before.y - after.y;
+    camera.x += before.x - after.x; camera.y += before.y - after.y;     // zoom, anchored at the centroid
+    camera.x -= (mx - pinch.mx) / camera.z; camera.y -= (my - pinch.my) / camera.z; // + two-finger pan (always works, even over objects)
+    pinch.mx = mx; pinch.my = my;
     arrive = null;
     return;
   }
@@ -543,16 +557,11 @@ canvas.addEventListener('pointermove', (e) => {
 
   if (holdMode === 'drag') {
     carryTo(e.clientX, e.clientY);                       // actively carrying
-  } else if (grab && p.maxMove > SLOP) {                 // a press that has now moved → carry it
+  } else if (grab && p.maxMove > SLOP) {                 // a press on a movable object that moved → pick it up + carry
     const o = objects.get(grab.id);
     if (!o) { grab = null; }
-    else {
-      holdOff = { x: grab.ox, y: grab.oy };
-      if (heldId === o.id) holdMode = 'drag';            // a follow-held object grabbed again → drag it
-      else beginHold(o, 'drag', holdOff);                // fresh grab → pick up + carry
-      carryTo(e.clientX, e.clientY);
-    }
-  } else if (!grab && !heldId && p.maxMove > SLOP) {     // empty background → pan
+    else { beginHold(o, 'drag', { x: grab.ox, y: grab.oy }); carryTo(e.clientX, e.clientY); }
+  } else if (!grab && p.maxMove > SLOP) {                // empty ground or a rooted tree → pan
     camera.x -= dx / camera.z; camera.y -= dy / camera.z; arrive = null;
   }
 });
@@ -567,24 +576,18 @@ function endPointer(e) {
   const moved = p ? p.maxMove >= SLOP : false;
 
   if (holdMode === 'drag') {
-    // released an active carry: if it was still moving, throw it; else place it.
+    // released an active carry: if it was still moving, throw it (detaches); else place it.
     const speed = Math.hypot(flingVel.x, flingVel.y);
     if (speed > THROW_MIN && (performance.now() - lastCarryT) < 90) startFling();
     else placeHold();
-  } else if (grab && !moved && !wasLong && !multiTouched) {
+  } else if (grab && !moved && !wasLong && !multiTouched) { // a still tap on an object
     const o = objects.get(grab.id);
-    if (heldId === grab.id) {                             // tap while follow-holding → place at the tap
-      carry = screenToWorld(e.clientX, e.clientY);
-      placeHold();
-    } else if (o && o.family === 'stone' && stackHeight(o) >= STACK_TALL_C) {
+    if (o && o.family === 'stone' && stackHeight(o) >= STACK_TALL_C) {
       send({ t: 'scatter', id: o.id, token, ts: Date.now() }); // tall stack → topple
-      grab = null;
-    } else if (o) {
-      beginHold(o, 'follow', { x: grab.ox, y: grab.oy });      // tap pickup → follows the cursor
-      grab = null;
-    } else grab = null;
-  } else if (holdMode !== 'follow') {
-    grab = null;                                          // background tap / aborted gesture (keep a follow-hold)
+    }
+    grab = null;                                          // otherwise a plain tap does nothing (no sticky pickup)
+  } else {
+    grab = null;
   }
   if (e.pointerType !== 'mouse') attendId = null; // touch attend ends on release (a mouse keeps hovering)
   if (pointers.size === 0) multiTouched = false;
@@ -596,7 +599,7 @@ canvas.addEventListener('pointercancel', (e) => {
   if (pointers.size === 0) multiTouched = false;
   clearLongPress(); lpFired = false; attendId = null;
   if (holdMode === 'drag') placeHold();           // don't leave a dragged object stuck held
-  else grab = null;                               // a 'follow' hold survives a cancel (no pressed pointer)
+  else grab = null;
   try { canvas.releasePointerCapture(e.pointerId); } catch {}
 });
 
@@ -712,6 +715,8 @@ function send(o) { if (ws && wsReady) { try { ws.send(JSON.stringify(o)); } catc
 function onDisconnect() {
   // Our hold is lost; the server reclaims it and drops the object server-side.
   if (heldId) { const o = objects.get(heldId); if (o) o.held = false; setLift(heldId, 0, SETTLE_MS, EASE_SETTLE); }
+  for (const id of flying.keys()) { const o = objects.get(id); if (o) o.held = false; } // thrown objects are reclaimed too
+  flying.clear();
   clearHold();
 }
 
@@ -820,7 +825,7 @@ function frame(now) {
   updateLifts(now);
   updateGrowth(now);
   updatePositions(now);
-  updateFling(now);
+  updateFlying(now);
   updateNudge(now);
   updateDissolve(now);
   updateArrive(now);
