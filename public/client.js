@@ -350,6 +350,15 @@ function updateFlying(now) {
     const o = objects.get(id);
     if (!o || !o.held) { flying.delete(id); continue; } // gone, or the server reclaimed it → stop gliding
     const s = flingStep({ x: o.x, y: o.y }, f, dt, THROW_FRICTION, THROW_STOP);
+    // If a position ever goes non-finite, settle at the known-finite launch point
+    // rather than stream null (→ a phantom at world 0,0 that never lands).
+    if (!Number.isFinite(s.x) || !Number.isFinite(s.y)) {
+      o.x = f.x0; o.y = f.y0; o._tx = f.x0; o._ty = f.y0; o.held = false;
+      setLift(id, 0, SETTLE_MS, EASE_SETTLE);
+      send({ t: 'place', id, token, x: f.x0, y: f.y0, ts: Date.now() });
+      flying.delete(id);
+      continue;
+    }
     o.x = s.x; o.y = s.y; o._tx = s.x; o._ty = s.y; f.vx = s.vx; f.vy = s.vy;
     if (s.stopped) {
       o.held = false;
@@ -550,10 +559,17 @@ function trackVel() {
 // until it settles into a place. It stays server-held by our token mid-flight.
 function startFling() {
   const id = heldId;
+  const o = objects.get(id);
   let vx = flingVel.x, vy = flingVel.y;
+  // A non-finite velocity (the THROW_MAX clamp divides by speed — Infinity/Infinity →
+  // NaN) must never reach the glide: it would fly forever, streaming null → (0,0).
+  if (!o || !Number.isFinite(vx) || !Number.isFinite(vy)) { placeHold(); return; }
   const sp = Math.hypot(vx, vy);
   if (sp > THROW_MAX) { const k = THROW_MAX / sp; vx *= k; vy *= k; }
-  flying.set(id, { vx, vy });                       // stays lifted (from the drag) for the whole arc — settles on land
+  // Remember a KNOWN-FINITE launch point so a corrupted glide can always settle home.
+  const x0 = Number.isFinite(o.x) ? o.x : (carry ? carry.x : 0);
+  const y0 = Number.isFinite(o.y) ? o.y : (carry ? carry.y : 0);
+  flying.set(id, { vx, vy, x0, y0 });               // stays lifted (from the drag) for the whole arc — settles on land
   clearHold();                                      // release the pointer NOW (the object flies on its own)
 }
 function placeHold(kind) {                         // settle the held object where it is
@@ -575,7 +591,7 @@ canvas.addEventListener('pointerdown', (e) => {
     multiTouched = true; grab = null;
     if (holdMode === 'drag') placeHold();                // a second finger sets a dragged thing down
     const [a, b] = [...pointers.values()];
-    pinch = { d0: Math.hypot(a.x - b.x, a.y - b.y), z0: camera.z, mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2 };
+    pinch = { d0: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)), z0: camera.z, mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2 };
     return;
   }
   const w = screenToWorld(e.clientX, e.clientY);
@@ -664,14 +680,22 @@ canvas.addEventListener('pointercancel', (e) => {
 
 canvas.addEventListener('wheel', (e) => {
   e.preventDefault();
-  const before = screenToWorld(e.clientX, e.clientY);
-  // A trackpad pinch arrives as a ctrlKey wheel (Chrome/Edge/Firefox) with tiny
-  // deltas — give it a much larger step so a pinch actually zooms; a real scroll
-  // wheel keeps the gentle factor.
-  const factor = e.ctrlKey ? 0.01 : 0.0015;
-  camera.z = clamp(camera.z * Math.exp(-e.deltaY * factor), ZMIN, ZMAX);
-  const after = screenToWorld(e.clientX, e.clientY);
-  camera.x += before.x - after.x; camera.y += before.y - after.y; arrive = null;
+  // A trackpad PINCH arrives as a ctrlKey wheel (Chrome/Edge/Firefox) — that zooms,
+  // anchored at the cursor. A two-finger SWIPE (no ctrlKey) PANS the landscape — the
+  // same gesture moves the world on desktop as on mobile (the spec: "two finger to
+  // move across the landscape on both"). Ctrl+wheel still zooms for mouse users.
+  if (e.ctrlKey) {
+    const before = screenToWorld(e.clientX, e.clientY);
+    camera.z = clamp(camera.z * Math.exp(-e.deltaY * 0.01), ZMIN, ZMAX);
+    const after = screenToWorld(e.clientX, e.clientY);
+    camera.x += before.x - after.x; camera.y += before.y - after.y;
+  } else {
+    // deltaX/deltaY are in CSS px (or lines, mode 1) — fold zoom out so the world
+    // tracks the fingers 1:1; a line-mode wheel gets a per-line nudge.
+    const k = e.deltaMode === 1 ? 16 : 1;
+    camera.x += (e.deltaX * k) / camera.z; camera.y += (e.deltaY * k) / camera.z;
+  }
+  arrive = null;
 }, { passive: false });
 
 // Safari (desktop) reports a trackpad pinch as non-standard gesture* events, NOT a
@@ -983,7 +1007,11 @@ function frame(now) {
 }
 
 // ---- helpers ----------------------------------------------------------------
-function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+// NaN-safe: a NaN slips through Math.max/min unchanged, which once let a degenerate
+// pinch (coincident touch points → 0/0) poison camera.z and, through it, every
+// throw/carry position. Collapsing NaN to `lo` keeps the camera (and everything
+// derived from it) finite no matter what upstream produced.
+function clamp(v, lo, hi) { return v !== v ? lo : v < lo ? lo : v > hi ? hi : v; }
 function cubicBezier(x1, y1, x2, y2) {
   const cx = 3 * x1, bx = 3 * (x2 - x1) - cx, ax = 1 - cx - bx;
   const cy = 3 * y1, by = 3 * (y2 - y1) - cy, ay = 1 - cy - by;

@@ -682,6 +682,7 @@ export class WorldRoom {
     } else if (m.t === 'carry') {
       const o = this.objects.get(m.id);
       if (!o || o.held !== m.token) return;
+      if (!Number.isFinite(m.x) || !Number.isFinite(m.y)) return; // never store a corrupt position (a NaN serialises to null → 0,0)
       o.x = m.x; o.y = m.y;                    // in-memory only; persisted on place / reclaim
       this.#gridUpdate(o);                      // keep a carried object findable at its current spot
       this.dirty.add(o.id);                     // carried position is unpersisted — let a checkpoint catch a long carry
@@ -691,7 +692,8 @@ export class WorldRoom {
       const o = this.objects.get(m.id);
       if (!o) return;
       if (o.held !== m.token) { this.#send(ws, this.#stateMsg(o, now)); return; } // not the holder
-      o.x = m.x; o.y = m.y; o.held = ''; o.heldConn = ''; o.held_at = 0;
+      if (Number.isFinite(m.x) && Number.isFinite(m.y)) { o.x = m.x; o.y = m.y; } // corrupt coords → release in place, don't teleport to 0,0
+      o.held = ''; o.heldConn = ''; o.held_at = 0;
       o.handling += 1; o.last_touched = now; // a placed object has just been tended
       // Disturbing a pre-sprout seed resets its growth — it must be left be to take.
       if (o.family === 'seed' && o.maturity < SPROUT) { o.maturity = 0; o.heat = 0; }
