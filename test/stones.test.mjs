@@ -3,10 +3,12 @@
 //   - a stack grown past STACK_MAX topples on the next tick (scatters)
 //   - tapping a tall stack (a `scatter` message) topples it on demand
 //   - a stone handled GRIT_HANDLING times wears to grit and dissolves
+import { rng } from '../public/drift-procgen.js';
 const PORT = process.env.PORT || 8787;
 const base = `http://127.0.0.1:${PORT}`;
 const WS = `ws://127.0.0.1:${PORT}/ws`;
 const TOK = 'stone-tok';
+const stoneR = (seed) => 12 + rng(seed >>> 0)() * 34; // MUST mirror the server's stoneRadius
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 let pass = 0, fail = 0;
 const check = (c, label) => { console.log((c ? '  PASS ' : '  FAIL ') + label); c ? pass++ : fail++; };
@@ -42,6 +44,19 @@ await move(B, FAR, FAR);          // drop B onto A
 let b = byId(await snap(), B);
 check(b.stack === 1 && b.stackBase === A, `a stone dropped onto another stacks (level ${b.stack}, base ${b.stackBase === A})`);
 check(Math.abs(b.x - FAR) < 12 && b.y < FAR, 'the stacked stone snaps over its base and rises');
+
+// 1b. a stone dropped OVERLAPPING another (but off-centre, so it won't stack) settles
+// CLEAR — adjacent and touching — instead of passing straight through it.
+const P = pool[13], Q = pool[14], SITE = 3000;
+const w1b = await snap();
+const rP = stoneR(byId(w1b, P).seed), rQ = stoneR(byId(w1b, Q).seed);
+await move(P, SITE, SITE);                               // isolate the base stone
+await move(Q, SITE + (rP + rQ - 10), SITE);             // drop Q overlapping P by ~10 (centre outside P's footprint)
+const w1c = await snap();
+const pp = byId(w1c, P), qq = byId(w1c, Q);
+const gap = Math.hypot(qq.x - pp.x, qq.y - pp.y);
+check(qq.stack === 0, 'an off-centre overlapping drop does not stack');
+check(gap >= rP + rQ - 1.5, `it settles clear of the other stone, not through it (gap ${gap.toFixed(1)} >= ${(rP + rQ).toFixed(1)})`);
 
 // 2. a stack grown past the max topples on the next tick (scatters)
 for (let i = 2; i <= 6; i++) await move(pool[i], FAR, FAR); // base + 6 = height 7 (> STACK_MAX)

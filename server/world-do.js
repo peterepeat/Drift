@@ -1038,7 +1038,7 @@ export class WorldRoom {
       const d = Math.hypot(s.x - o.x, s.y - o.y);
       if (d < stoneRadius(s.seed) && d < bestD) { bestD = d; target = s; }
     }
-    if (!target) { o.stack = 0; o.stackBase = ''; return; }
+    if (!target) { o.stack = 0; o.stackBase = ''; this.#settleStoneClear(o); return; }
     const baseId = target.stackBase || target.id;
     const base = this.objects.get(baseId) || target;
     let topLevel = 0; // highest level currently in this stack (base is 0)
@@ -1049,6 +1049,30 @@ export class WorldRoom {
     o.stackBase = baseId;
     o.x = base.x + (Math.random() * 2 - 1) * 4; // slight cairn wobble, not a ruler-straight column
     o.y = base.y - o.stack * STACK_STEP;
+  }
+
+  // A stone dropped OVERLAPPING others — but not centred enough to stack — must not
+  // pass THROUGH them. Ease it out to just-touching, biased toward the FRONT (down/+y)
+  // so it settles against the near side rather than hiding behind. Each pass resolves
+  // the deepest overlap; a few passes clear a small cluster. Fully deterministic (no
+  // randomness) so every client agrees on where it came to rest.
+  #settleStoneClear(o) {
+    const ro = stoneRadius(o.seed);
+    for (let iter = 0; iter < 10; iter++) {
+      let worst = null, worstOver = 1e-3;     // ignore sub-unit grazes
+      for (const s of this.#gridNear(o.x, o.y, ro + MAX_STONE_RADIUS, (s) => s.family === 'stone' && s.id !== o.id && s.held === '' && (s.stack || 0) === 0)) {
+        const min = ro + stoneRadius(s.seed);
+        const dx = o.x - s.x, dy = o.y - s.y, d = Math.hypot(dx, dy);
+        const over = min - d;
+        if (over > worstOver) { worstOver = over; worst = { dx, dy, d, min }; }
+      }
+      if (!worst) break;                       // nothing left overlapping
+      let { dx, dy, d, min } = worst;
+      if (d < 0.001) { dx = 0; dy = 1; d = 0.001; } // exactly coincident → straight to the front
+      let ux = dx / d, uy = dy / d + 0.45;     // bias the escape toward +y (the front)
+      const ul = Math.hypot(ux, uy) || 1;
+      o.x += (ux / ul) * (min - d); o.y += (uy / ul) * (min - d);
+    }
   }
 
   // Lifting stone `o` out of its stack: everything resting above it scatters.
