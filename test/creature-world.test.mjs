@@ -44,8 +44,11 @@ const sp = await spawn('crawler', 120, -40);
 const c = creatures(await snap()).find((o) => o.id === sp.creature.id);
 check(c && c.family === 'creature' && c.kind === 'crawler', 'a creature exposes family=creature and its kind');
 check(c.x === 120 && c.y === -40, 'a creature spawns with a home at the given point');
+check(typeof c.wanderT0 === 'number' && c.wanderT0 > 0, 'a creature carries a wander anchor (wanderT0) for smooth placement');
 
-// 4. pickable + placeable: its home moves to where it is set down
+// 4. pickable + placeable: its home moves to where it is set down, and the wander
+// RE-ANCHORS (wanderT0 advances) so it continues from the drop point, not a snap.
+const t0Before = c.wanderT0;
 const ctl = await open(); await ctl.world;
 ctl.send(JSON.stringify({ t: 'pickup', id: c.id, token: 'cre-tok', ts: Date.now() }));
 await wait(150);
@@ -55,6 +58,7 @@ ctl.send(JSON.stringify({ t: 'place', id: c.id, token: 'cre-tok', x: 305, y: 225
 await wait(150);
 const placed = creatures(await snap()).find((o) => o.id === c.id);
 check(placed && placed.x === 305 && placed.y === 225, "a placed creature's home moves to where it was set down");
+check(placed && placed.wanderT0 > t0Before, 'placing a creature re-anchors its wander (wanderT0 advances)');
 ctl.close();
 
 // 5. a creature does not drift on the water (home is fixed until placed)

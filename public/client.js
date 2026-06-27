@@ -185,12 +185,16 @@ function objRadius(o) {
   const mat = shownMat(o);
   return mat < SPROUT_C ? 10 * seedScale(o.seed) : 10 + mat * 26; // plants present a larger tap target
 }
-// A creature's LIVE position: home (its stored x/y) + the deterministic wander, with
-// a heading from the wander's near-future direction. Held creatures sit in the hand.
+// A creature's LIVE position: home (its stored x/y) + the deterministic wander
+// ANCHORED at wanderT0, so the offset is exactly zero at t0 and the creature sits ON
+// its home the instant it's placed — then drifts out on a new route (no snap). Heading
+// is the wander's near-future direction (the anchor cancels in the delta). Same
+// (seed, kind, home, wanderT0, clock) → same point on every client.
 function creaturePos(o) {
   const t = syncedT(), seed = o.seed >>> 0, kind = o.kind || 'crawler';
-  const w = wanderAt(seed, kind, t), w2 = wanderAt(seed, kind, t + 0.2);
-  return { x: o.x + w.x, y: o.y + w.y, ang: Math.atan2(w2.y - w.y, w2.x - w.x) };
+  const t0 = (o.wanderT0 || 0) / 1000;
+  const w = wanderAt(seed, kind, t), a = wanderAt(seed, kind, t0), w2 = wanderAt(seed, kind, t + 0.2);
+  return { x: o.x + (w.x - a.x), y: o.y + (w.y - a.y), ang: Math.atan2(w2.y - w.y, w2.x - w.x) };
 }
 // Where an object is drawn / tested THIS frame: a free creature wanders; everything
 // else sits at its true position plus any local cursor-displacement offset.
@@ -271,6 +275,11 @@ function paintAttend(o, t) {
 }
 // A stack's ground line (the base sits here; each level is stored STACK_STEP up).
 function groundY(o) { return o.y + (o.stack || 0) * STACK_STEP_C; }
+// Fliers are airborne, so their DEPTH (paint order) is lifted above ground clutter —
+// they always pass OVER rocks instead of being hidden behind one they overfly. A
+// per-seed amount spreads them through the canopy height, so each reads as weaving
+// behind some trees and in front of others rather than all sitting on one plane.
+function flierLift(o) { return 56 + PG.rng((o.seed ^ 0x5f5e10) >>> 0)() * 120; }
 // Height of the stack a stone belongs to (1 = a lone stone on the ground).
 function stackHeight(o) {
   const baseId = o.stackBase || o.id;
@@ -294,7 +303,11 @@ function drawHeldScreen(o, sx, sy, lift) {
   ctx.save();
   ctx.translate(sx, sy - rise);
   ctx.scale(z * sc, z * sc);
-  paintObject(o, 0, 0);
+  // A held creature keeps facing its live wander heading (not a fixed "up"), so
+  // picking it up and setting it down don't snap its rotation — the in-hand heading
+  // is continuous with the wander it resumes (heading is position-independent).
+  const ang = o.family === 'creature' ? creaturePos(o).ang : 0;
+  paintObject(o, 0, 0, ang);
   ctx.restore();
 }
 // Ease each object's rendered maturity/aged toward the server's value.
@@ -353,7 +366,7 @@ function updateFlying(now) {
     // If a position ever goes non-finite, settle at the known-finite launch point
     // rather than stream null (→ a phantom at world 0,0 that never lands).
     if (!Number.isFinite(s.x) || !Number.isFinite(s.y)) {
-      o.x = f.x0; o.y = f.y0; o._tx = f.x0; o._ty = f.y0; o.held = false;
+      o.x = f.x0; o.y = f.y0; o._tx = f.x0; o._ty = f.y0; o.held = false; reanchorCreature(o);
       setLift(id, 0, SETTLE_MS, EASE_SETTLE);
       send({ t: 'place', id, token, x: f.x0, y: f.y0, ts: Date.now() });
       flying.delete(id);
@@ -361,7 +374,7 @@ function updateFlying(now) {
     }
     o.x = s.x; o.y = s.y; o._tx = s.x; o._ty = s.y; f.vx = s.vx; f.vy = s.vy;
     if (s.stopped) {
-      o.held = false;
+      o.held = false; reanchorCreature(o);
       setLift(id, 0, SETTLE_MS, EASE_SETTLE);        // settle down where it came to rest
       send({ t: 'place', id, token, x: o.x, y: o.y, ts: Date.now() });
       Audio.event('land', { seed: o.seed, family: o.family, x: o.x });
@@ -377,7 +390,7 @@ function updateFlying(now) {
 function settleFlying() {
   for (const id of flying.keys()) {
     const o = objects.get(id);
-    if (o) { o.held = false; o._tx = o.x; o._ty = o.y; setLift(id, 0, SETTLE_MS, EASE_SETTLE); send({ t: 'place', id, token, x: o.x, y: o.y, ts: Date.now() }); }
+    if (o) { o.held = false; reanchorCreature(o); o._tx = o.x; o._ty = o.y; setLift(id, 0, SETTLE_MS, EASE_SETTLE); send({ t: 'place', id, token, x: o.x, y: o.y, ts: Date.now() }); }
   }
   flying.clear();
 }
@@ -572,10 +585,15 @@ function startFling() {
   flying.set(id, { vx, vy, x0, y0 });               // stays lifted (from the drag) for the whole arc — settles on land
   clearHold();                                      // release the pointer NOW (the object flies on its own)
 }
+// Re-anchor a just-placed creature's wander to NOW (server-aligned) so it continues
+// from the drop point immediately — without waiting for the server's echo, which would
+// otherwise leave it jumped-out for one round-trip. The server's authoritative t0
+// follows and matches within the clock skew (an imperceptible settle).
+function reanchorCreature(o) { if (o && o.family === 'creature') o.wanderT0 = Date.now() + clockSkew; }
 function placeHold(kind) {                         // settle the held object where it is
   if (!heldId) return;
   const o = objects.get(heldId);
-  if (o) { o.x = carry.x; o.y = carry.y; o._tx = carry.x; o._ty = carry.y; o.held = false; }
+  if (o) { o.x = carry.x; o.y = carry.y; o._tx = carry.x; o._ty = carry.y; o.held = false; reanchorCreature(o); }
   send({ t: 'place', id: heldId, token, x: carry.x, y: carry.y, ts: Date.now() });
   setLift(heldId, 0, SETTLE_MS, EASE_SETTLE);
   if (o) Audio.event(kind || 'place', { seed: o.seed, family: o.family, x: o.x }); // generative settle/land tone
@@ -838,6 +856,7 @@ function onMessage(raw) {
       if (m.aged != null) o.aged = m.aged;
       if (m.stack != null) o.stack = m.stack;
       if (m.stackBase != null) o.stackBase = m.stackBase;
+      if (m.wanderT0 != null) o.wanderT0 = m.wanderT0; // a placed creature re-anchored its wander
       if (m.id !== heldId) {
         if (o.held && !wasHeld) setLift(o.id, 1, LIFT_MS, EASE_RISE);
         else if (!o.held && wasHeld) setLift(o.id, 0, SETTLE_MS, EASE_SETTLE);
@@ -939,10 +958,15 @@ function frame(now) {
     const p = posOf(o);
     const s = worldToScreen(p.x, p.y);
     if (!inViewport(s.x, s.y, vw, vh, CULL_MARGIN)) continue;
+    // Depth = ground line; a free creature sorts by its LIVE wander y (where it's
+    // actually drawn, not its home), and a flier rides above ground clutter.
+    o._sortY = (o.family === 'creature' && o.id !== heldId && !o.held)
+      ? p.y + (o.kind === 'flier' ? flierLift(o) : 0)
+      : groundY(o);
     list.push(o);
   }
   // painter's depth by ground line, then bottom-up within a stack so the top stone occludes
-  list.sort((a, b) => (groundY(a) - groundY(b)) || ((a.stack || 0) - (b.stack || 0)) || (a.id < b.id ? -1 : 1));
+  list.sort((a, b) => (a._sortY - b._sortY) || ((a.stack || 0) - (b.stack || 0)) || (a.id < b.id ? -1 : 1));
   // attend (§5.2): ease the reveal in/out and bloom it behind the attended object
   attendT += ((attendId ? 1 : 0) - attendT) * 0.14;
   if (attendT > 0.01 && attendId) { const ao = objects.get(attendId); if (ao && !isLifted(ao.id)) paintAttend(ao, attendT); }

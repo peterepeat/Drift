@@ -274,6 +274,9 @@ export class WorldRoom {
     // grit on the first tick after this deploy.
     if (typeof o.last_touched !== 'number') { o.last_touched = Date.now(); changed = true; }
     if ('isolation' in o) { delete o.isolation; changed = true; } // replaced by the derived last_touched clock
+    // Creatures from before the anchored wander start their anchor at created_at, so
+    // they begin on their home rather than snapping out by a stale wander offset.
+    if (o.family === 'creature' && typeof o.wanderT0 !== 'number') { o.wanderT0 = o.created_at || Date.now(); changed = true; }
     return changed;
   }
 
@@ -543,15 +546,18 @@ export class WorldRoom {
       maturity: o.maturity, aged: o.aged, created_at: o.created_at,
       stack: o.stack || 0, stackBase: o.stackBase || '',
     };
-    if (o.kind) p.kind = o.kind; // anomalies carry their form
+    if (o.kind) p.kind = o.kind; // anomalies + creatures carry their form/kind
+    if (o.family === 'creature') p.wanderT0 = o.wanderT0; // the shared wander anchor
     return p;
   }
   #stateMsg(o, now) {
-    return {
+    const m = {
       t: 'object_state', id: o.id, x: o.x, y: o.y, handling: o.handling,
       held: o.held !== '', maturity: o.maturity, aged: o.aged,
       stack: o.stack || 0, stackBase: o.stackBase || '', ts: now,
     };
+    if (o.family === 'creature') m.wanderT0 = o.wanderT0; // re-anchor on the wire so a placed creature continues smoothly for everyone
+    return m;
   }
   #worldState(pid, box) {
     const objects = [];
@@ -695,6 +701,7 @@ export class WorldRoom {
       if (Number.isFinite(m.x) && Number.isFinite(m.y)) { o.x = m.x; o.y = m.y; } // corrupt coords → release in place, don't teleport to 0,0
       o.held = ''; o.heldConn = ''; o.held_at = 0;
       o.handling += 1; o.last_touched = now; // a placed object has just been tended
+      if (o.family === 'creature') o.wanderT0 = now; // re-anchor: it wanders on a NEW route from where it was set down
       // Disturbing a pre-sprout seed resets its growth — it must be left be to take.
       if (o.family === 'seed' && o.maturity < SPROUT) { o.maturity = 0; o.heat = 0; }
       if (o.family === 'stone') {

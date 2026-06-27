@@ -83,6 +83,11 @@ export const CREATURE_KINDS = ['crawler', 'flier'];
 export const makeCreatureRecord = (id, seed, kind, x, y, now) => {
   const r = makeRecord(id, 'creature', seed, x, y, now);
   r.kind = kind;
+  // wanderT0 ANCHORS the deterministic wander: live pos = home + (wander(t) −
+  // wander(t0)), which is exactly home at t=t0. Set at spawn (starts on its home)
+  // and reset to the moment of release on place, so a re-placed creature continues
+  // from where you set it down instead of snapping by its current wander offset.
+  r.wanderT0 = now;
   return r;
 };
 
