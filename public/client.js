@@ -39,6 +39,10 @@ const NUDGE_SPRING = 95;                      // spring pulling a displaced thin
 const NUDGE_DAMP = 0.02;                      // velocity retained per second (heavy damping → quick settle)
 const NUDGE_MAX = 150;                        // clamp the displacement so nothing flies off absurdly
 const NUDGE_MIN_SPEED = 45;                   // cursor must move faster than this (wu/s) to stir anything
+// Collision (Wave E): a held / thrown object bumps nearby movable things aside (a
+// render-only push on the same _ox/_oy spring — local & cosmetic, no network).
+const COLLIDE_R = 26;                         // bump reach beyond the carried object's own radius
+const COLLIDE_STR = 950;                      // how hard it shoves neighbours out of the way
 
 // Spec easing curves (Visual Bible §06).
 const EASE_RISE = cubicBezier(0.22, 1, 0.36, 1);     // pickup / place lift
@@ -367,6 +371,14 @@ function lightnessOf(o) {
   if (o.family === 'crystal') return 0.45;
   return Math.max(0, 1 - shownMat(o) * 1.3); // ~1 at seed → 0 by ~maturity 0.77
 }
+// How much an object YIELDS to being bumped by a carried/thrown object — lighter
+// things give a lot, stones bump but resist, held/rooted/luminous things don't move.
+function collisionGive(o) {
+  if (o.held || o.id === heldId || flying.has(o.id) || o.family === 'anomaly' || o.family === 'creature' || !isMovable(o)) return 0;
+  if (o.family === 'stone') return 0.4;
+  if (o.family === 'crystal') return 0.7;
+  return Math.max(0.5, 1 - shownMat(o) * 0.5);
+}
 // Local, cosmetic displacement: a moving cursor brushes light things aside (a render
 // offset _ox/_oy on a damped spring), and they settle back to rest. Never the real
 // position — no network, no storage. Idle objects are skipped, so a still cursor is
@@ -384,7 +396,9 @@ function updateNudge(now) {
     // few things near the cursor + the few in motion, not the whole population.
     const near = active && Math.abs(o.x - mouseWorld.x) < NUDGE_RADIUS && Math.abs(o.y - mouseWorld.y) < NUDGE_RADIUS;
     if (resting && !near) continue;
-    if (lightnessOf(o) <= 0) { if (!resting) { o._ox = o._oy = o._ovx = o._ovy = 0; } continue; }
+    // light things are stirred by the cursor; heavier things still spring back from a
+    // collision bump (collisionGive) — only truly fixed things (held/anomaly) are zeroed.
+    if (lightnessOf(o) <= 0 && collisionGive(o) <= 0) { if (!resting) { o._ox = o._oy = o._ovx = o._ovy = 0; } continue; }
     o._ox = o._ox || 0; o._oy = o._oy || 0; o._ovx = o._ovx || 0; o._ovy = o._ovy || 0;
     if (near && o.id !== heldId) {
       const n = nudge(mouseWorld.x, mouseWorld.y, o.x + o._ox, o.y + o._oy, NUDGE_RADIUS, speed, NUDGE_STR, lightnessOf(o));
@@ -397,6 +411,30 @@ function updateNudge(now) {
     if (off > NUDGE_MAX) { const k = NUDGE_MAX / off; o._ox *= k; o._oy *= k; }
     if (Math.abs(o._ox) < 0.02 && Math.abs(o._oy) < 0.02 && Math.abs(o._ovx) < 0.5 && Math.abs(o._ovy) < 0.5)
       { o._ox = o._oy = o._ovx = o._ovy = 0; }        // settle exactly to rest (no lingering jitter)
+  }
+}
+// Collision: a carried / thrown object shoves nearby movable things out of its way
+// (adds to the same _ox/_oy spring updateNudge settles). Runs only while something is
+// in hand or in flight; the displacement is cosmetic (real positions never change).
+let _lastColT = 0;
+function updateCollision(now) {
+  const dt = _lastColT ? Math.min(0.05, (now - _lastColT) / 1000) : 0; _lastColT = now;
+  if (dt <= 0) return;
+  const bumpers = [];
+  if (heldId && carry) { const ho = objects.get(heldId); if (ho) bumpers.push({ x: carry.x, y: carry.y, r: objRadius(ho) }); }
+  for (const id of flying.keys()) { const o = objects.get(id); if (o) bumpers.push({ x: o.x, y: o.y, r: objRadius(o) }); }
+  if (!bumpers.length) return;
+  for (const b of bumpers) {
+    const R = b.r + COLLIDE_R;
+    for (const o of objects.values()) {
+      if (Math.abs(o.x - b.x) > R || Math.abs(o.y - b.y) > R) continue;
+      const give = collisionGive(o); if (give <= 0) continue;
+      const ex = (o.x + (o._ox || 0)) - b.x, ey = (o.y + (o._oy || 0)) - b.y, d = Math.hypot(ex, ey);
+      if (d >= R) continue;
+      const ux = d > 0.001 ? ex / d : 0, uy = d > 0.001 ? ey / d : 1;
+      const f = 1 - d / R, push = COLLIDE_STR * f * f * give;
+      o._ovx = (o._ovx || 0) + ux * push * dt; o._ovy = (o._ovy || 0) + uy * push * dt;
+    }
   }
 }
 
@@ -838,6 +876,7 @@ function frame(now) {
   updateGrowth(now);
   updatePositions(now);
   updateFlying(now);
+  updateCollision(now);
   updateNudge(now);
   updateDissolve(now);
   updateArrive(now);
