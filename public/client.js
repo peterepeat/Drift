@@ -43,6 +43,13 @@ const NUDGE_MIN_SPEED = 45;                   // cursor must move faster than th
 // render-only push on the same _ox/_oy spring — local & cosmetic, no network).
 const COLLIDE_R = 26;                         // bump reach beyond the carried object's own radius
 const COLLIDE_STR = 620;                      // how hard it shoves neighbours out of the way (gentle — they part, not fly)
+// Rooted trees (Wave C): the biggest plants are immovable landmarks. They show ROOTS
+// gripping the earth (so it reads WHY they won't come) and SWAY in the drag direction,
+// then spring back, when you try to drag across them — a render-only canopy lean.
+const SWAY_K = 150;                           // spring stiffness pulling a swayed tree upright
+const SWAY_DAMP = 0.05;                        // velocity retained/s (light → a small bounce on the way back)
+const SWAY_MAX = 0.17;                         // max lean in radians (~10°) — a sway, never a topple
+const SWAY_IMPULSE = 0.0011;                   // how much a px of drag feeds the lean
 
 // Spec easing curves (Visual Bible §06).
 const EASE_RISE = cubicBezier(0.22, 1, 0.36, 1);     // pickup / place lift
@@ -221,8 +228,13 @@ function paintObject(o, cx, cy, ang = 0) {
   if (o.family === 'crystal') { PG.drawCrystal(ctx, o.seed >>> 0, cx, cy, crystalR(o), animT); return; }
   if (o.family === 'creature') { drawCreature(ctx, o.seed >>> 0, o.kind || 'crawler', cx, cy, animT, ang); return; }
   const mat = shownMat(o), aged = shownAged(o);
-  if (mat < SPROUT_C) PG.drawSeed(ctx, o.seed >>> 0, cx, cy, seedScale(o.seed) * (1 + mat * 1.4));
-  else PG.drawPlant(ctx, o.seed >>> 0, cx, cy, mat, aged);
+  if (mat < SPROUT_C) { PG.drawSeed(ctx, o.seed >>> 0, cx, cy, seedScale(o.seed) * (1 + mat * 1.4)); return; }
+  if (mat >= BIG_TREE_MAT) {                          // a rooted tree: grip the earth, and sway from a drag
+    drawRoots(ctx, o.seed >>> 0, cx, cy, mat);
+    const bend = o._bend || 0;
+    if (bend) { ctx.save(); ctx.translate(cx, cy); ctx.rotate(bend); PG.drawPlant(ctx, o.seed >>> 0, 0, 0, mat, aged); ctx.restore(); return; }
+  }
+  PG.drawPlant(ctx, o.seed >>> 0, cx, cy, mat, aged);
 }
 // A soft contact shadow grounds an object on the plane (a little perspective — it
 // sits ON the ground instead of floating like clip-art). Flattened ellipse, offset
@@ -238,6 +250,33 @@ function paintGroundShadow(o, cx, cy, rad) {
   ctx.save();
   ctx.fillStyle = PG.rgba('#000000', a);
   ctx.beginPath(); ctx.ellipse(cx + rad * 0.14, baseY + (flier ? rad * 0.5 : 0), rx, rx * 0.32, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+// Roots for the biggest plants (those rooted immovable, maturity ≥ BIG_TREE_MAT):
+// short tapering tendrils splaying from the base across the ground plane (vertically
+// compressed, like the contact shadow), so it READS why the tree won't be lifted.
+// Deterministic from seed; drawn beneath the trunk so the canopy overlaps them.
+function drawRoots(ctx, seed, cx, cy, mat) {
+  const r = PG.rng((seed ^ 0x9b7c3) >>> 0);
+  const n = 4 + Math.floor(r() * 3);                 // 4..6 surface roots
+  const reach = 12 + mat * 28;                        // grows with the tree
+  ctx.save();
+  ctx.lineCap = 'round';
+  const col = PG.mix(PG.PALETTE.growthDeep, '#1c1206', 0.7); // deep green → dark earth
+  for (let i = 0; i < n; i++) {
+    const a = (i + 0.5) / n * Math.PI * 2 + (r() - 0.5) * 0.5;
+    const len = reach * (0.6 + r() * 0.7);
+    const ex = cx + Math.cos(a) * len;
+    const ey = cy + Math.sin(a) * len * 0.42 + len * 0.16; // ground-plane compression + a touch toward the viewer
+    const mx = cx + (ex - cx) * 0.45 + (r() * 2 - 1) * len * 0.16;
+    const my = cy + (ey - cy) * 0.45 + (r() * 2 - 1) * len * 0.08;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - 1);
+    ctx.quadraticCurveTo(mx, my, ex, ey);
+    ctx.lineWidth = Math.max(0.7, (2.6 - i * 0.18) * (0.55 + mat * 0.45));
+    ctx.strokeStyle = PG.rgba(col, 0.55);
+    ctx.stroke();
+  }
   ctx.restore();
 }
 function drawObjectWorld(o) {
@@ -469,6 +508,25 @@ function updateCollision(now) {
     }
   }
 }
+// Rooted-tree sway (Wave C): a tree being drag-panned across leans in the drag
+// direction (impulses fed in from pointermove) and springs back upright when released,
+// with a small bounce. Purely a render-only canopy lean (o._bend) — no network, no
+// real movement; the tree never actually goes anywhere. Only swaying trees are
+// touched (tracked in `swaying`), so a still world costs nothing.
+const swaying = new Set();
+let swayId = null;        // the rooted tree currently held under a drag-pan
+let _lastSwayT = 0;
+function updateSway(now) {
+  const dt = _lastSwayT ? Math.min(0.05, (now - _lastSwayT) / 1000) : 0; _lastSwayT = now;
+  if (dt <= 0 || !swaying.size) return;
+  for (const id of swaying) {
+    const o = objects.get(id);
+    if (!o) { swaying.delete(id); continue; }
+    const s = spring(o._bend || 0, o._bendV || 0, dt, SWAY_K, SWAY_DAMP);
+    o._bend = clamp(s.pos, -SWAY_MAX, SWAY_MAX); o._bendV = s.vel;
+    if (id !== swayId && Math.abs(o._bend) < 1e-4 && Math.abs(o._bendV) < 1e-3) { o._bend = 0; o._bendV = 0; swaying.delete(id); }
+  }
+}
 
 // ---- presence fade envelope -------------------------------------------------
 function presenceIntensity(p, now) {
@@ -615,8 +673,10 @@ canvas.addEventListener('pointerdown', (e) => {
   const w = screenToWorld(e.clientX, e.clientY);
   const hit = hitTest(w);
   // A movable object becomes a grab candidate — it's picked up once the press MOVES
-  // (a still tap does nothing). A rooted tree or empty ground leaves grab null → pan.
+  // (a still tap does nothing). A rooted tree or empty ground leaves grab null → pan;
+  // a press on a rooted tree also arms its SWAY, so a drag across it leans the canopy.
   if (hit && isMovable(hit)) { const c = posOf(hit); grab = { id: hit.id, ox: c.x - w.x, oy: c.y - w.y }; }
+  else if (hit) { swayId = hit.id; swaying.add(hit.id); }
   // touch/pen: a still long-press attends whatever's under the finger (§5.2), movable or not.
   if (hit && e.pointerType !== 'mouse') lpTimer = setTimeout(() => { attendId = hit.id; lpFired = true; lpTimer = null; grab = null; }, ATTEND_MS);
 });
@@ -655,6 +715,7 @@ canvas.addEventListener('pointermove', (e) => {
     if (!o) { grab = null; }
     else { beginHold(o, 'drag', { x: grab.ox, y: grab.oy }); carryTo(e.clientX, e.clientY); }
   } else if (!grab && p.maxMove > SLOP) {                // empty ground or a rooted tree → pan
+    if (swayId) { const o = objects.get(swayId); if (o) { o._bendV = (o._bendV || 0) + dx * SWAY_IMPULSE; swaying.add(swayId); } } // lean the pressed tree with the drag
     camera.x -= dx / camera.z; camera.y -= dy / camera.z; arrive = null;
   }
 });
@@ -684,13 +745,14 @@ function endPointer(e) {
   }
   if (e.pointerType !== 'mouse') attendId = null; // touch attend ends on release (a mouse keeps hovering)
   if (pointers.size === 0) multiTouched = false;
+  swayId = null;                                  // release the swayed tree — it springs back upright
 }
 canvas.addEventListener('pointerup', endPointer);
 canvas.addEventListener('pointercancel', (e) => {
   pointers.delete(e.pointerId);
   if (pointers.size < 2) pinch = null;
   if (pointers.size === 0) multiTouched = false;
-  clearLongPress(); lpFired = false; attendId = null;
+  clearLongPress(); lpFired = false; attendId = null; swayId = null;
   if (holdMode === 'drag') placeHold();           // don't leave a dragged object stuck held
   else grab = null;
   try { canvas.releasePointerCapture(e.pointerId); } catch {}
@@ -934,6 +996,7 @@ function frame(now) {
   updateFlying(now);
   updateCollision(now);
   updateNudge(now);
+  updateSway(now);
   updateDissolve(now);
   updateArrive(now);
 
