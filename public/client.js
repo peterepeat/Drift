@@ -216,16 +216,28 @@ function paintObject(o, cx, cy, ang = 0) {
   if (mat < SPROUT_C) PG.drawSeed(ctx, o.seed >>> 0, cx, cy, seedScale(o.seed) * (1 + mat * 1.4));
   else PG.drawPlant(ctx, o.seed >>> 0, cx, cy, mat, aged);
 }
+// A soft contact shadow grounds an object on the plane (a little perspective — it
+// sits ON the ground instead of floating like clip-art). Flattened ellipse, offset
+// for a high upper-left light; plants root at their base, compact things sit below
+// centre. Anomalies (luminous, floating) and fliers (airborne) cast none/less.
+function paintGroundShadow(o, cx, cy, rad) {
+  if (o.family === 'anomaly') return;
+  const rooted = o.family === 'seed' && shownMat(o) >= SPROUT_C;   // a plant roots at cy; everything else sits below centre
+  const flier = o.family === 'creature' && (o.kind === 'flier');
+  const baseY = rooted ? cy + rad * 0.12 : cy + rad * 0.42;
+  const rx = rad * (o.family === 'creature' ? 0.7 : 0.82) * (flier ? 0.7 : 1);
+  const a = (0.12 + Math.min(0.13, rad / 380)) * (flier ? 0.45 : 1); // bigger casts darker; a flier's is faint
+  ctx.save();
+  ctx.fillStyle = PG.rgba('#000000', a);
+  ctx.beginPath(); ctx.ellipse(cx + rad * 0.14, baseY + (flier ? rad * 0.5 : 0), rx, rx * 0.32, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
 function drawObjectWorld(o) {
-  if (o.family === 'stone' && (o.stack || 0) > 0) { // seat each stacked stone with a soft contact shadow
-    const rad = objRadius(o);
-    ctx.save();
-    ctx.fillStyle = PG.rgba('#000000', 0.22);
-    ctx.beginPath(); ctx.ellipse(o.x, o.y + rad * 0.5, rad * 0.8, rad * 0.32, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.restore();
-  }
-  if (o.family === 'creature') { const p = creaturePos(o); paintObject(o, p.x, p.y, p.ang); return; } // live wander + heading
-  paintObject(o, o.x + (o._ox || 0), o.y + (o._oy || 0)); // + local cursor-displacement (Wave 6)
+  let cx, cy, ang = 0;
+  if (o.family === 'creature') { const p = creaturePos(o); cx = p.x; cy = p.y; ang = p.ang; } // live wander + heading
+  else { cx = o.x + (o._ox || 0); cy = o.y + (o._oy || 0); } // + local cursor-displacement (Wave 6)
+  paintGroundShadow(o, cx, cy, objRadius(o));
+  paintObject(o, cx, cy, ang);
 }
 // The "reveal of age" (PRD §5.2): how far along its life an attended object is, so
 // the attend-bloom is larger and warmer the older/more-worn the object — its history
