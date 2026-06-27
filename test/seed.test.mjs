@@ -1,5 +1,5 @@
 // World generator + reseed-migration decision (pure — no worker, no DOM).
-import { generateWorld, SEED_COUNT, SEED_VERSION, reseedAction } from '../server/seed.js';
+import { generateWorld, SEED_COUNT, SEED_VERSION, reseedAction, spacingRadius } from '../server/seed.js';
 let pass = 0, fail = 0;
 const check = (c, label) => { console.log((c ? '  PASS ' : '  FAIL ') + label); c ? pass++ : fail++; };
 
@@ -32,6 +32,19 @@ for (let i = 0; i < a.length; i++) { const cx = Math.round(a[i].x / CS), cy = Ma
   for (let gx = cx - 1; gx <= cx + 1; gx++) for (let gy = cy - 1; gy <= cy + 1; gy++) { const arr = grid.get(gx + ',' + gy); if (!arr) continue;
     for (const j of arr) { if (j <= i) continue; const d = Math.hypot(a[i].x - a[j].x, a[i].y - a[j].y); if (d < minD) minD = d; } } }
 check(minD > 40, `no two objects pile up — min spacing ${minD.toFixed(1)}u (relaxation worked)`);
+
+// size-aware spacing: no two FOOTPRINTS overlap — the fix for crowded big trees/
+// boulders. (Overlapping big pairs are < ~160u apart, so the CS=80 grid catches them.)
+let minFootGap = Infinity, bigPairs = 0;
+for (let i = 0; i < a.length; i++) { const cx = Math.round(a[i].x / CS), cy = Math.round(a[i].y / CS);
+  for (let gx = cx - 1; gx <= cx + 1; gx++) for (let gy = cy - 1; gy <= cy + 1; gy++) { const arr = grid.get(gx + ',' + gy); if (!arr) continue;
+    for (const j of arr) { if (j <= i) continue;
+      const d = Math.hypot(a[i].x - a[j].x, a[i].y - a[j].y);
+      const fg = d - (spacingRadius(a[i]) + spacingRadius(a[j]));
+      if (fg < minFootGap) minFootGap = fg;
+      if (spacingRadius(a[i]) > 40 && spacingRadius(a[j]) > 40 && fg < -6) bigPairs++; } } } // big objects whose footprints actually OVERLAP
+check(minFootGap > -8, `footprints essentially clear — min footprint gap ${minFootGap.toFixed(1)}u (size-aware spacing)`);
+check(bigPairs === 0, `no two BIG objects overlap (${bigPairs} overlapping big pairs)`);
 
 // the cog/origin still has life (a "heart" grove) so arrivals don't land in a void,
 // and the interest box there is a strict subset — both relied on by interest.test

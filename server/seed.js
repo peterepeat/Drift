@@ -9,19 +9,20 @@ export { rng, makeNoise }; // re-exported so the DO shares the client's EXACT pr
 // (rng -> identical stone footprints; makeNoise -> identical water flow field)
 
 const WORLD_SEED = 0x44524946;   // 'DRIF'
-// The world now seeds wider and fuller (was 200 in one central σ=400 clump, which
-// read as "everything piled at the centre, emptiness around"). Objects gather into
+// The world seeds wider, fuller, and SIZE-AWARE (was a denser 900 with uniform
+// spacing, where big trees and boulders crowded each other). Objects gather into
 // GROVES scattered across a wide area with open clearings between, plus a few loners
 // in the open — so arrival feels spacious and inhabited, not a clump in a void. The
-// population still grows into the 10k cap over time; this just spreads the start.
-const N = 900;                   // default population (prod). env.SEED_N overrides it per-deploy
+// relaxation now spaces by each object's FOOTPRINT, so the biggest plants and stones
+// get real room while seeds still pack close. Grows toward the 10k cap over time.
+const N = 2000;                  // fuller arrival population (was 900). env.SEED_N overrides it per-deploy
 const SEED_FRAC = 0.64;          // ~64% seeds / ~36% stones
-const GROVES = 18;               // thickets spread across a RECTANGLE (not radially) — nothing centred
-const WORLD_W = 2600, WORLD_H = 2000; // grove centres + loners scatter across ±this
-const GROVE_SIGMA = 240;         // local spread of objects within a grove
+const GROVES = 24;               // thickets spread across a RECTANGLE (not radially) — nothing centred
+const WORLD_W = 3700, WORLD_H = 2800; // grove centres + loners scatter across ±this (wider — spacious arrival)
+const GROVE_SIGMA = 420;         // looser groves — objects have room to spread so size-aware spacing converges
 const LONER_FRAC = 0.18;         // fraction scattered in the open between groves
-const MIN_SPACE = 56;            // no two objects end up closer than this — relaxation kills the dense clump
-const RELAX_ITERS = 16;          // relaxation passes (one-time, at seed)
+const SPACE_GAP = 34;            // breathing space BETWEEN footprints — big objects get more absolute room
+const RELAX_ITERS = 30;          // relaxation passes (one-time, at seed) — enough to fully separate big footprints
 
 // Deterministic, UUID-formatted id (valid 8-4-4-4-12, version/variant bits set).
 // Derived from the seeded master RNG, so re-seeding upserts the same 200 ids
@@ -95,11 +96,21 @@ export const makeCreatureRecord = (id, seed, kind, x, y, now) => {
 // FORM of each object (id, position, seed) is fully deterministic; the starting
 // lifecycle mix makes the arrival world feel already in progress.
 const uniform = (rand, lo, hi) => lo + rand() * (hi - lo);
-// Push apart any objects closer than minDist (grid-accelerated, in place). A few
-// passes turn an overlapping clump into evenly-spaced groves with no hyper-density.
-// Deterministic — rand is used only to jitter exactly-coincident points apart.
-function relaxSpacing(pts, iters, minDist, rand, clampX, clampY) {
-  const cell = minDist;
+// Footprint of an object for spacing (world units): a stone's own radius, or a plant
+// scaled by its seeded maturity — so a mature tree reserves far more room than a seed.
+// Mirrors the client/server radii closely enough to keep seeded forms from overlapping.
+export function spacingRadius(o) {
+  if (o.family === 'stone') return 12 + rng(o.seed >>> 0)() * 34;   // == stoneRadius
+  return 12 + (o.maturity || 0) * 54;                                // seed → mature tree
+}
+// Push apart any objects whose footprints (radius_i + radius_j + gap) overlap — grid-
+// accelerated, in place. SIZE-AWARE: big trees/boulders claim more space than seeds,
+// killing the "big objects feel too dense" crowding. A few passes turn an overlapping
+// clump into evenly-spaced groves. Deterministic — rand only jitters coincident points.
+function relaxSpacing(pts, iters, gap, radiusFn, rand, clampX, clampY) {
+  const radii = pts.map(radiusFn);
+  let maxR = 0; for (const r of radii) if (r > maxR) maxR = r;
+  const cell = 2 * maxR + gap;                       // ≥ any pair's interaction range, so ±1 cell catches all overlaps
   for (let it = 0; it < iters; it++) {
     const grid = new Map();
     for (let i = 0; i < pts.length; i++) {
@@ -113,6 +124,7 @@ function relaxSpacing(pts, iters, minDist, rand, clampX, clampY) {
         const arr = grid.get(gx + ',' + gy); if (!arr) continue;
         for (const j of arr) {
           if (j <= i) continue;
+          const minDist = radii[i] + radii[j] + gap;
           const q = pts[j]; let ex = p.x - q.x, ey = p.y - q.y; const d = Math.hypot(ex, ey);
           if (d > minDist) continue;
           let push;
@@ -170,11 +182,12 @@ export function generateWorld(now = Date.now(), count = N) {
     }
     out.push(makeRecord(id, family, seed, x, y, now, maturity, aged));
   }
-  // Relax so nothing piles up — the dense central clump becomes evenly-spaced groves.
-  // Only for sane populations (prod is 900): the relaxation is the one super-linear
-  // step, so a huge SEED_N skips it (the scaled grove spread already distributes it)
-  // rather than stalling DO construction. n<=3000 keeps prod + tests fully relaxed.
-  if (n <= 3000) relaxSpacing(out, RELAX_ITERS, MIN_SPACE, rand, W + 500, H + 500);
+  // Relax so footprints don't overlap — the dense clump becomes evenly-spaced groves
+  // with the big trees/boulders given real room. Only for sane populations (prod is
+  // 2400): the relaxation is the one super-linear step, so a huge SEED_N skips it (the
+  // scaled grove spread already distributes it) rather than stalling DO construction.
+  // n<=3000 keeps prod + tests fully relaxed.
+  if (n <= 3000) relaxSpacing(out, RELAX_ITERS, SPACE_GAP, spacingRadius, rand, W + 600, H + 600);
   for (const o of out) { o.x = +o.x.toFixed(2); o.y = +o.y.toFixed(2); }
   return out;
 }
@@ -184,8 +197,9 @@ export { N as SEED_COUNT };
 // Bump when generateWorld changes meaningfully: a stored world stamped with an
 // older version is reseeded ONCE on load (see the DO's #load), so a deployed
 // generator change actually reaches the live world without an admin key or a wipe
-// route. 1 = the old single central clump; 2 = groves spread across a wide world.
-export const SEED_VERSION = 3;
+// route. 1 = the old single central clump; 2/3 = groves spread across a wide world;
+// 4 = wider, fuller (2400), and SIZE-AWARE spacing so big trees/boulders get room.
+export const SEED_VERSION = 4;
 // Decide what a loading world needs: seed a fresh empty world, reseed a world left
 // by an older generator (one-time, version-gated), or nothing. Pure + unit-tested —
 // it carries the only loop-risk (a wrong "reseed" would wipe on every restart), so
