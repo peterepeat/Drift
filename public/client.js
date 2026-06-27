@@ -4,7 +4,7 @@
 // no visual data is ever stored or transmitted.
 // =============================================================================
 import * as PG from './drift-procgen.js';
-import { paintGround, paintGlows, paintNoise, paintPresence, paintCarryTether, paintSeasonGrade, seasonGround, seasonSat, paintWaterWorld, paintFlow } from './render.js';
+import { paintGround, paintGlows, paintNoise, paintPresence, paintCarryTether, paintSky, paintSeasonGrade, seasonGround, seasonSat, paintWaterWorld, paintFlow } from './render.js';
 import { inViewport, CULL_MARGIN } from './cull.js';
 import { Audio } from './audio.js';
 import { flingStep, ema, nudge, spring } from './physics.js';
@@ -30,6 +30,7 @@ const P_IN = 1500, P_OUT = 2500, P_IDLE = 2000; // bloom fade-in / fade-out / id
 const SHARED_RADIUS = 620;                   // world units within which two presences share warmth
 const SHARED_BOOST = 3.2;                     // strength of the extra between-them bloom (intensifies the shared patch)
 const SPROUT_C = 0.14;                        // maturity below this renders as a seed (mirrors server)
+const GLOW_PARALLAX = 0.04;                   // ambient glows drift this fraction of the camera (Wave H depth)
 const ANOM_DISSOLVE_MS = 10000, ANOM_FADE_MS = 3000; // hold an anomaly 10s and it fades from your hands
 const ATTEND_MS = 450;                        // long-press dwell before an object is "attended" (PRD §5.2)
 const STACK_STEP_C = 12, STACK_TALL_C = 4;   // stone-stack rise/level + tall-stack-tap-to-scatter (mirror server)
@@ -1092,7 +1093,7 @@ function frame(now) {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, vw, vh);
   paintGround(ctx, vw, vh, seasonGround(seasonPhase));
-  paintGlows(ctx, vw, vh, bgSeed);
+  paintGlows(ctx, vw, vh, bgSeed, -camera.x * camera.z * GLOW_PARALLAX, -camera.y * camera.z * GLOW_PARALLAX); // parallax drift
   paintNoise(ctx, vw, vh, bgSeed + 1);
 
   // objects (world space) — single matrix folds dpr + zoom + pan
@@ -1175,6 +1176,8 @@ function frame(now) {
     aWater = poolOnScreen() ? 0.5 + 0.5 * Math.sin(animT * 0.4) : 0; // matches the visible sheen's shimmer
     Audio.setState(audioState());
   }
+  paintSky(ctx, vw, vh, seasonPhase); // atmospheric horizon — hazes the up-screen world (depth), beneath held objects
+
   for (const o of objects.values()) {
     if (!isLifted(o.id)) continue;
     const s = (o.id === heldId && carry) ? worldToScreen(carry.x, carry.y) : worldToScreen(o.x, o.y);

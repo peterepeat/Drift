@@ -43,10 +43,13 @@ export function paintGround(ctx, w, h, sk) {
   ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
 }
 
-export function paintGlows(ctx, w, h, seed) {
+// The ambient amber glows. (ox, oy) parallax-shift them a little with the camera
+// (Wave H) so they drift slowly behind the 1:1-panning world — distant light, more
+// pronounced depth — instead of being pinned dead to the screen.
+export function paintGlows(ctx, w, h, seed, ox = 0, oy = 0) {
   const r = PG.rng(seed), n = 2 + (r() < 0.5 ? 1 : 0);
   for (let i = 0; i < n; i++) {
-    const x = w * (0.32 + r() * 0.36), y = h * (0.28 + r() * 0.44), rad = Math.min(w, h) * (0.42 + r() * 0.3);
+    const x = w * (0.32 + r() * 0.36) + ox, y = h * (0.28 + r() * 0.44) + oy, rad = Math.min(w, h) * (0.42 + r() * 0.3);
     const g = ctx.createRadialGradient(x, y, 0, x, y, rad);
     g.addColorStop(0, PG.rgba(PALETTE.glowCore, PALETTE.glowAlpha));
     g.addColorStop(1, PG.rgba(PALETTE.glowCore, 0));
@@ -90,6 +93,24 @@ export function paintCarryTether(ctx, px, py, ox, oy, intensity) {
   halo.addColorStop(1, PG.rgba(PALETTE.presenceCore, 0));
   ctx.fillStyle = halo; ctx.beginPath(); ctx.arc(ox, oy, 28, 0, Math.PI * 2); ctx.fill();
   ctx.restore();
+}
+
+// Atmospheric horizon (Wave H): a faint band of season-tinted "sky" at the TOP of the
+// screen — a breath of up-there — which also hazes the up-screen (further-back) world
+// into it, so the flat plane reads as gently receding. The tint is the season's own
+// accent lifted off the ground colour, crossfaded exactly like the grade. Drawn over
+// the world but beneath held objects + the grade, so what's in your hands stays crisp.
+export function paintSky(ctx, w, h, phase) {
+  const i = Math.floor(phase) % 4, frac = phase - Math.floor(phase);
+  let f = frac < 0.7 ? 0 : (frac - 0.7) / 0.3; f = f * f * (3 - 2 * f); // smoothstep crossfade
+  const a = SEASONS[SEASON_KEYS[i]] || SEASONS.growing, b = SEASONS[SEASON_KEYS[(i + 1) % 4]] || SEASONS.growing;
+  const col = PG.mix(PG.mix(PALETTE.ground, a.accent, 0.32), PG.mix(PALETTE.ground, b.accent, 0.32), f);
+  const skyH = h * 0.42;
+  const g = ctx.createLinearGradient(0, 0, 0, skyH);
+  g.addColorStop(0, PG.rgba(PG.lighten(col, 0.07), 0.9));    // a brighter horizon rim at the very top
+  g.addColorStop(0.45, PG.rgba(col, 0.40));
+  g.addColorStop(1, PG.rgba(col, 0));
+  ctx.save(); ctx.fillStyle = g; ctx.fillRect(0, 0, w, skyH); ctx.restore();
 }
 
 export const paintGrade = PG.paintGrade;
