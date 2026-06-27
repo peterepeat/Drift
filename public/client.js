@@ -48,6 +48,15 @@ const NUDGE_MIN_SPEED = 45;                   // cursor must move faster than th
 // render-only push on the same _ox/_oy spring — local & cosmetic, no network).
 const COLLIDE_R = 26;                         // bump reach beyond the carried object's own radius
 const COLLIDE_STR = 620;                      // how hard it shoves neighbours out of the way (gentle — they part, not fly)
+// Cosmetic leaf litter (Wave F): a sparse field of small leaves drifting on the breeze,
+// brushed aside by the cursor and stirred when you pan — purely LOCAL & cosmetic (no
+// network, no storage, like the nudge), so moving through the world feels alive.
+const LEAF_N = 46;                            // leaves populating the viewport
+const LEAF_MARGIN = 1.15;                      // keep them within this many viewport half-extents (respawn beyond)
+const LEAF_DRIFT = 9;                          // initial drift speed (world units/s)
+const LEAF_BREEZE = 13;                        // gentle wandering-breeze drift amplitude (world units/s)
+const LEAF_PAN = 0.35;                          // fraction of pan velocity the leaves are blown by (bounded — no streaking)
+const LEAF_CURSOR = 4;                         // how strongly the moving cursor scatters them
 // Rooted trees (Wave C): the biggest plants are immovable landmarks. They show ROOTS
 // gripping the earth (so it reads WHY they won't come) and SWAY in the drag direction,
 // then spring back, when you try to drag across them — a render-only canopy lean.
@@ -534,6 +543,71 @@ function updateSway(now) {
     if (id !== swayId && Math.abs(o._bend) < 1e-4 && Math.abs(o._bendV) < 1e-3) { o._bend = 0; o._bendV = 0; swaying.delete(id); }
   }
 }
+// ---- cosmetic leaf litter (Wave F) ------------------------------------------
+// A sparse field of drifting leaves that follows the camera (respawning at the far
+// edge as you pan), wanders on a breeze, scatters from a fast cursor, and is STIRRED
+// when you pan — so movement feels alive. Purely local & cosmetic: never networked,
+// never the true world, so it can't desync and costs only these few dozen leaves.
+const leaves = [];
+function initLeaves() {
+  const r = PG.rng(0x1eaf5);
+  for (let i = 0; i < LEAF_N; i++) leaves.push({ x: 0, y: 0, vx: 0, vy: 0, rot: r() * Math.PI * 2, rotV: (r() * 2 - 1) * 0.5, seed: (r() * 4294967296) >>> 0, scale: 0.6 + r() * 0.8, placed: false });
+}
+let _lastLeafT = 0, _leafCamX = null, _leafCamY = null;
+function updateLeaves(now) {
+  const dt = _lastLeafT ? Math.min(0.05, (now - _lastLeafT) / 1000) : 0; _lastLeafT = now;
+  if (dt <= 0) return;
+  if (!leaves.length) initLeaves();
+  let pvx = 0, pvy = 0;                                    // camera pan velocity (world units/s)
+  if (_leafCamX != null) { pvx = (camera.x - _leafCamX) / dt; pvy = (camera.y - _leafCamY) / dt; }
+  _leafCamX = camera.x; _leafCamY = camera.y;
+  const hw = (vw / 2) / camera.z * LEAF_MARGIN, hh = (vh / 2) / camera.z * LEAF_MARGIN;
+  const minX = camera.x - hw, maxX = camera.x + hw, minY = camera.y - hh, maxY = camera.y + hh;
+  const cursorSpeed = (now - lastHoverT) < 60 ? Math.hypot(mouseVelW.x, mouseVelW.y) : 0;
+  const relax = 1 - Math.pow(0.02, dt); // velocity relaxes toward its ambient drift in ~0.5s
+  for (const lf of leaves) {
+    if (!lf.placed) {                                       // first fill: spread across the whole view
+      lf.x = minX + Math.random() * (maxX - minX); lf.y = minY + Math.random() * (maxY - minY);
+      lf.vx = (Math.random() * 2 - 1) * LEAF_DRIFT; lf.vy = (Math.random() * 2 - 1) * LEAF_DRIFT;
+      lf.placed = true;
+    } else if (lf.x < minX || lf.x > maxX || lf.y < minY || lf.y > maxY) { // drifted out → re-enter from an EDGE (streams in, no mid-view pop)
+      const e = Math.floor(Math.random() * 4);
+      if (e === 0) { lf.x = minX; lf.y = minY + Math.random() * (maxY - minY); }
+      else if (e === 1) { lf.x = maxX; lf.y = minY + Math.random() * (maxY - minY); }
+      else if (e === 2) { lf.y = minY; lf.x = minX + Math.random() * (maxX - minX); }
+      else { lf.y = maxY; lf.x = minX + Math.random() * (maxX - minX); }
+      lf.vx = (Math.random() * 2 - 1) * LEAF_DRIFT; lf.vy = (Math.random() * 2 - 1) * LEAF_DRIFT;
+    }
+    // velocity relaxes toward an AMBIENT drift = breeze minus a fraction of the pan,
+    // so panning gently blows the leaves but can never accumulate into a streak.
+    const ambVx = Math.sin(now * 0.0003 + lf.seed) * LEAF_BREEZE - pvx * LEAF_PAN;
+    const ambVy = Math.cos(now * 0.00027 + lf.seed * 1.3) * LEAF_BREEZE * 0.6 - pvy * LEAF_PAN;
+    lf.vx += (ambVx - lf.vx) * relax; lf.vy += (ambVy - lf.vy) * relax;
+    if (cursorSpeed > NUDGE_MIN_SPEED && Math.abs(lf.x - mouseWorld.x) < NUDGE_RADIUS && Math.abs(lf.y - mouseWorld.y) < NUDGE_RADIUS) {
+      const n = nudge(mouseWorld.x, mouseWorld.y, lf.x, lf.y, NUDGE_RADIUS, cursorSpeed, LEAF_CURSOR, 1);
+      lf.vx += n.vx * dt; lf.vy += n.vy * dt;                               // a cursor swipe scatters them
+    }
+    lf.x += lf.vx * dt; lf.y += lf.vy * dt;
+    lf.rot += lf.rotV * dt + lf.vx * 0.0008;                               // tumble, swayed by motion
+  }
+}
+// Drawn in the world transform (faint, small), so the litter sits in the world and
+// parallaxes with it. Season-tinted to match the growth palette.
+function drawLeaves() {
+  if (!leaves.length) return;
+  const base = PG.mix(PG.PALETTE.growthLight, PG.PALETTE.growthDeep, 0.35);
+  const col = PG.applySat(base, seasonSat(seasonPhase));
+  ctx.save();
+  for (const lf of leaves) {
+    if (!lf.placed) continue;
+    const s = 3.0 * lf.scale;
+    ctx.save(); ctx.translate(lf.x, lf.y); ctx.rotate(lf.rot);
+    ctx.fillStyle = PG.rgba(col, 0.32);
+    ctx.beginPath(); ctx.moveTo(0, -s * 1.6); ctx.bezierCurveTo(s, -s * 0.3, s, s, 0, s * 1.6); ctx.bezierCurveTo(-s, s, -s, -s * 0.3, 0, -s * 1.6); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+  ctx.restore();
+}
 
 // ---- presence fade envelope -------------------------------------------------
 function presenceIntensity(p, now) {
@@ -1009,6 +1083,7 @@ function frame(now) {
   updateCollision(now);
   updateNudge(now);
   updateSway(now);
+  updateLeaves(now);
   updateDissolve(now);
   updateArrive(now);
 
@@ -1053,6 +1128,7 @@ function frame(now) {
     const p = age / GRIT_MS;
     PG.drawGrit(ctx, g.seed >>> 0, g.x, g.y, g.r * (0.4 + p * 1.5), 0.8 * (1 - p));
   }
+  drawLeaves(); // cosmetic drifting litter, above the objects (Wave F)
 
   aDensity = list.length; // objects on screen — feeds the ambient sound's richness
 
