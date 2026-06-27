@@ -114,9 +114,24 @@ const CRYSTAL_DECAY = 1 / 300;            // decay/tick (~5h to dissolve) — sl
 // broadcast — the always-ticking world spends nothing keeping them moving. They
 // ramp to a baseline quickly so an arriving world feels inhabited, then top up to
 // a cap. Spared from water-drift, isolation-fade and the ceiling trim (they're alive).
-const MIN_CREATURES = 24;                 // enough that you'll spot some when you look — but not a horde
-const MAX_CREATURES = 48;
+const MIN_CREATURES = 36;                 // more of them now the world is social — but still not a swarm
+const MAX_CREATURES = 80;
 const CREATURE_SPAWN_CHANCE = 0.08;       // per tick, between MIN and MAX
+// ---- creatures: social life & population homeostasis (Wave G2) -------------
+// Creatures that share a patch interact: same species may MATE (an offspring with a
+// blended seed), different species may CLASH (the smaller routs — fleeing far, rarely
+// dying). The population stays self-balancing: births are capped at MAX_CREATURES and
+// a death never drops a kind below MIN_PER_SPECIES, while the per-species floor in the
+// spawn ramp refills any kind that thins — so nothing explodes or goes extinct.
+const SOCIAL_R = 80;                      // grid radius for "near enough to interact" (>= MATE/FIGHT dist)
+const MATE_DIST = 64;                     // same-species homes this close may breed
+const MATE_CHANCE = 0.05;                 // per eligible pair, per tick (gentle — a dense cluster has many pairs)
+const FIGHT_DIST = 58;                    // different-species homes this close may clash
+const FIGHT_CHANCE = 0.2;                 // per eligible pair, per tick
+const DEATH_CHANCE = 0.28;                // a clash that kills the loser (else it just routs)
+const FLEE_DIST = 130;                    // how far a routed creature bolts
+const MIN_PER_SPECIES = 8;                // a kind never falls below this (no extinction)
+const MAX_PER_SPECIES = 48;               // ...nor breeds past this (no single kind hogs the cap — keeps the mix)
 // ---- creatures: goal-seeking drift (Wave G1) -------------------------------
 // Each tick a creature steps its HOME toward what it needs — a plant to feed at, the
 // pool to drink, a stone to rest by — cycling slowly through those drives (seed-
@@ -957,14 +972,26 @@ export class WorldRoom {
     // the guaranteed ramp can't keep refilling exactly what the trim just freed (a
     // full world would otherwise oscillate at the cap instead of breathing).
     const creRoom = this.maxObjects - CEIL_TRIM;
+    const kindCount = {}; for (const k of CREATURE_KINDS) kindCount[k] = 0;
     let creatureCount = 0;
-    for (const o of this.objects.values()) if (o.family === 'creature') creatureCount++;
+    for (const o of this.objects.values()) if (o.family === 'creature') { creatureCount++; kindCount[o.kind] = (kindCount[o.kind] || 0) + 1; }
     let creAdded = 0;
+    // Per-species floor FIRST: refill any kind that has thinned below its floor, so a
+    // run of losses (or lopsided breeding) can never drive a species extinct.
+    for (const k of CREATURE_KINDS) {
+      while ((kindCount[k] || 0) < MIN_PER_SPECIES && creatureCount + creAdded < MAX_CREATURES && this.objects.size + spawned.length < creRoom) {
+        spawned.push(this.#spawnCreature(now, null, k)); kindCount[k]++; creAdded++;
+      }
+    }
+    // Then ramp toward the baseline and (chance-gated) top up toward the cap — each
+    // refill is the MINORITY kind, so the world trends toward a balanced mix instead
+    // of letting random spawns pile onto whichever species is already ahead.
+    const minorityKind = () => CREATURE_KINDS.reduce((a, b) => (kindCount[a] || 0) <= (kindCount[b] || 0) ? a : b);
     while (creatureCount + creAdded < MIN_CREATURES && this.objects.size + spawned.length < creRoom) {
-      spawned.push(this.#spawnCreature(now)); creAdded++;
+      const k = minorityKind(); spawned.push(this.#spawnCreature(now, null, k)); kindCount[k]++; creAdded++;
     }
     if (creatureCount + creAdded < MAX_CREATURES && this.objects.size + spawned.length < creRoom && Math.random() < CREATURE_SPAWN_CHANCE) {
-      spawned.push(this.#spawnCreature(now));
+      const k = minorityKind(); spawned.push(this.#spawnCreature(now, null, k)); kindCount[k]++;
     }
 
     // Goal-seeking drift (Wave G1): step each free creature's HOME toward what it
@@ -982,6 +1009,10 @@ export class WorldRoom {
       this.#gridUpdate(o);
       if (!changed.includes(o)) changed.push(o);     // broadcast the new home (clients ease it smoothly)
     }
+
+    // Social life (Wave G2): creatures sharing a patch mate (→ spawned) or clash
+    // (→ gone, or a routed flee → changed). Self-balancing (cap + per-species floor).
+    this.#socialCreatures(now, spawned, gone, changed);
 
     // Broadcast every threshold-crossing for smooth visuals, but DON'T write per
     // crossing: mark it dirty and let the periodic checkpoint persist it (the
@@ -1311,6 +1342,66 @@ export class WorldRoom {
       if (d < bestD) { bestD = d; best = o; }
     }
     return best ? { x: best.x, y: best.y } : null;
+  }
+
+  // A creature's "strength" = its drawn size (mirrors public/creatures.js creatureR):
+  // in a clash the smaller one is the loser. Server-only (it decides + broadcasts the
+  // outcome), so it needn't be client-reproducible — but matching size keeps the
+  // visibly-bigger creature the winner.
+  #strength(c) { return (c.kind === 'flier' ? 11 : 14) + rng((c.seed ^ 0x9e37) >>> 0)() * 6; }
+
+  // An offspring of two same-species creatures: home near their midpoint, kind
+  // inherited, seed BLENDED (low bits from one parent, high from the other) plus a
+  // small mutation — so it reads as related to both, never identical.
+  #breed(a, b, now) {
+    const mx = (a.x + b.x) / 2 + (Math.random() * 2 - 1) * 22;
+    const my = (a.y + b.y) / 2 + (Math.random() * 2 - 1) * 22;
+    const mask = 0xffff;
+    const seed = ((((a.seed & mask) | (b.seed & ~mask)) >>> 0) ^ Math.floor(Math.random() * 0x10000)) >>> 0;
+    return makeCreatureRecord(crypto.randomUUID(), seed, a.kind, mx, my, now);
+  }
+
+  // One pass of creature social life. Pairs are found via the grid (cheap at creature
+  // scale); home-distance is the "same patch" proxy (their wanders overlap). Mating
+  // pushes to `spawned`, a kill to `gone`, a rout (home jumps away) to `changed`.
+  // Bounded: births stop at MAX_CREATURES; a kill never drops a kind below its floor
+  // or the total below the baseline — so the population churns, never collapses.
+  #socialCreatures(now, spawned, gone, changed) {
+    const creatures = [], kindCount = {};
+    for (const o of this.objects.values()) {
+      if (o.family !== 'creature' || o.held !== '') continue;
+      creatures.push(o); kindCount[o.kind] = (kindCount[o.kind] || 0) + 1;
+    }
+    let total = creatures.length;
+    const dead = new Set();
+    for (const a of creatures) {
+      if (dead.has(a.id)) continue;
+      let aFled = false;
+      for (const b of this.#gridNear(a.x, a.y, SOCIAL_R, (o) => o.family === 'creature' && o.held === '' && o.id > a.id && !dead.has(o.id))) {
+        const d = Math.hypot(a.x - b.x, a.y - b.y);
+        if (a.kind === b.kind) {
+          if (d <= MATE_DIST && total + spawned.length < MAX_CREATURES &&
+              (kindCount[a.kind] || 0) < MAX_PER_SPECIES &&   // a kind can't breed past its ceiling — neither species hogs the cap
+              this.objects.size + spawned.length < this.maxObjects && Math.random() < MATE_CHANCE) {
+            spawned.push(this.#breed(a, b, now)); kindCount[a.kind] = (kindCount[a.kind] || 0) + 1;
+          }
+        } else if (d <= FIGHT_DIST && Math.random() < FIGHT_CHANCE) {
+          const loser = this.#strength(a) <= this.#strength(b) ? a : b;
+          const winner = loser === a ? b : a;
+          if (Math.random() < DEATH_CHANCE && (kindCount[loser.kind] || 0) > MIN_PER_SPECIES && total > MIN_CREATURES) {
+            dead.add(loser.id); gone.push(loser); kindCount[loser.kind]--; total--;
+            if (loser === a) { aFled = true; break; }
+          } else {
+            const fx = loser.x - winner.x, fy = loser.y - winner.y, fd = Math.hypot(fx, fy) || 1;
+            loser.x += (fx / fd) * FLEE_DIST; loser.y += (fy / fd) * FLEE_DIST;
+            this.#gridUpdate(loser);
+            if (!changed.includes(loser) && !gone.includes(loser)) changed.push(loser);
+            if (loser === a) { aFled = true; break; }   // a bolted — stop pairing it this tick
+          }
+        }
+      }
+      if (aFled) continue;
+    }
   }
 
   async alarm() {
