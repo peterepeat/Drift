@@ -1137,6 +1137,7 @@ function onMessage(raw) {
     case 'object_gone': {
       const og = objects.get(m.id);
       if (m.splash) ripples.push({ x: m.x, y: m.y, start: performance.now() }); // a bug dropped in a pond → fish food
+      else if (m.burst) ripples.push({ x: m.x, y: m.y, start: performance.now(), burst: true }); // an anomaly burst a tree into saplings
       else if (og && og.family === 'crystal') flashes.push({ x: og.x, y: og.y, start: performance.now() }); // brief flash
       else if (og && (og.family === 'stone' || m.grit)) // worn to grit — a brief scatter of dust
         grits.push({ x: og.x, y: og.y, seed: og.seed, r: objRadius(og), start: performance.now() });
@@ -1318,9 +1319,10 @@ function frame(now) {
     if (age > 650) { ripples.splice(i, 1); continue; }
     const p = age / 650, s = worldToScreen(rp.x, rp.y), z = camera.z;
     ctx.save(); ctx.globalCompositeOperation = 'lighter';
+    const hue = rp.burst ? '#bfe6a4' : '#bfe2f2'; // burst = a green shimmer; splash = water-blue
     for (let k = 0; k < 2; k++) { // two staggered rings spreading outward
       const pk = p - k * 0.2; if (pk <= 0) continue;
-      ctx.strokeStyle = PG.rgba('#bfe2f2', 0.5 * (1 - pk)); ctx.lineWidth = 1.6;
+      ctx.strokeStyle = PG.rgba(hue, 0.5 * (1 - pk)); ctx.lineWidth = 1.6;
       ctx.beginPath(); ctx.arc(s.x, s.y, (5 + pk * 34) * z, 0, Math.PI * 2); ctx.stroke();
     }
     ctx.restore();

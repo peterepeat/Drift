@@ -60,5 +60,37 @@ ctl.close();
 // 6. world_state carries anomaly kind
 check(anomalies(await snap()).every((a) => 'kind' in a), 'world_state exposes anomaly kind for rendering');
 
+// ---- anomaly POWERS (Wave R) ----------------------------------------------
+const life = (id, m, a) => fetch(`${base}/admin/lifecycle?id=${id}&maturity=${m}&aged=${a}`, { method: 'POST', headers: { 'x-admin-key': 'local-dev-key' } }).then((r) => r.json());
+const spawnK = (x, y, kind) => fetch(`${base}/admin/anomaly?x=${x}&y=${y}&kind=${kind}`, { method: 'POST', headers: { 'x-admin-key': 'local-dev-key' } }).then((r) => r.json());
+async function drop(id, x, y) { // pick an object up and set it down at (x,y)
+  const ws = await open(); await ws.world; const tok = 'pw-' + id.slice(0, 6);
+  ws.send(JSON.stringify({ t: 'pickup', id, token: tok, ts: Date.now() })); await wait(150);
+  ws.send(JSON.stringify({ t: 'place', id, token: tok, x, y, ts: Date.now() })); await wait(240);
+  ws.close();
+}
+
+// 7. RIPEN: a 'point' anomaly dropped on a young seed matures it into a tree
+const seedR = (await snap()).objects.find((o) => o.family === 'seed' && !o.held);
+await life(seedR.id, 0.1, 0);                                   // make it young & fresh
+const anR = await spawnK(Math.round(seedR.x) + 3000, Math.round(seedR.y), 'point'); // spawn far, then carry it over
+await drop(anR.anomaly.id, seedR.x, seedR.y);
+const afterR = (await snap()).objects.find((o) => o.id === seedR.id);
+check(afterR && afterR.maturity >= 0.99, `a 'point' anomaly ripens a young seed into a mature tree (maturity ${afterR?.maturity?.toFixed(2)})`);
+
+// 8. BURST: a 'prism' anomaly dropped on a mature tree shatters it into saplings
+const seedB = (await snap()).objects.find((o) => o.family === 'seed' && !o.held && o.id !== seedR.id);
+await life(seedB.id, 1, 0);                                     // make it a mature tree
+const seedsBefore = (await snap()).objects.filter((o) => o.family === 'seed').length;
+const anB = await spawnK(Math.round(seedB.x) + 3000, Math.round(seedB.y), 'prism');
+await drop(anB.anomaly.id, seedB.x, seedB.y);
+const wEnd = await snap();
+const seedsAfter = wEnd.objects.filter((o) => o.family === 'seed').length;
+check(!wEnd.objects.find((o) => o.id === seedB.id), 'a \'prism\' anomaly bursts a mature tree (the tree is gone)');
+check(seedsAfter > seedsBefore, `the burst scattered saplings (seeds ${seedsBefore} -> ${seedsAfter})`);
+
+// 9. the anomaly is NOT consumed by using its power (reusable wonder)
+check(!!anomalies(await snap()).find((a) => a.id === anR.anomaly.id), 'an anomaly persists after working its power (reusable)');
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

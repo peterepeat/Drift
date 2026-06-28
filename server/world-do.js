@@ -108,6 +108,14 @@ const ANOMALY_SEASONS = { growing: true, rising: true }; // "new creation possib
 const ANOMALY_RADIUS = 200;               // world units an anomaly influences
 const ANOMALY_GROW_BOOST = 0.02;          // extra maturity/tick for seeds near an anomaly
 const ANOMALY_AGE_SLOW = 0.4;             // aging multiplier near an anomaly (slows decay)
+// ---- anomaly POWERS (Wave R): drop an anomaly on a plant, or a plant on an anomaly,
+// and the anomaly works a power on the plant — NON-uniform by kind. The anomaly is NOT
+// consumed (it persists, a reusable wonder). Life-giving kinds RIPEN a seed/leaf into a
+// mature tree; geometric kinds BURST a grown tree into a scatter of saplings.
+const ANOM_TOUCH_R = 76;                   // a drop within this of the other object triggers the power
+const ANOM_BURST_MIN = 3, ANOM_BURST_MAX = 5; // saplings a burst scatters
+// kind → power. point/breath (light/breath = life) ripen; prism/rotor (geometry/spin) burst.
+const ANOMALY_POWER = { point: 'ripen', breath: 'ripen', prism: 'burst', rotor: 'burst' };
 
 // ---- water, ponds & crystals (Family 3) ------------------------------------
 // Water gathers in pools. The CENTRAL pool sits at the world's low centre (where
@@ -809,6 +817,25 @@ export class WorldRoom {
       }
       // Disturbing a pre-sprout seed resets its growth — it must be left be to take.
       if (o.family === 'seed' && o.maturity < SPROUT) { o.maturity = 0; o.heat = 0; }
+      // Anomaly powers (Wave R): drop an anomaly ONTO a plant, or a plant ONTO an
+      // anomaly, and the anomaly's power works on the plant (by kind). The anomaly
+      // itself is never consumed — it persists, a reusable wonder.
+      if (o.family === 'anomaly') {
+        const target = this.#plantNear(o.x, o.y, o);
+        if (target) {
+          const power = ANOMALY_POWER[o.kind] || 'ripen';
+          if (power === 'burst') { if ((target.maturity || 0) >= SPROUT) await this.#burstPlant(target, now); }
+          else if ((target.maturity || 0) < 1 || (target.aged || 0) > 0) await this.#ripenPlant(target, now);
+        }
+        // the anomaly settles at its spot — falls through to the persist/broadcast below
+      } else if (o.family === 'seed') {
+        const an = this.#anomalyNear(o.x, o.y);
+        if (an) {
+          const power = ANOMALY_POWER[an.kind] || 'ripen';
+          if (power === 'burst') { if ((o.maturity || 0) >= SPROUT) { await this.#burstPlant(o, now); return; } } // o is consumed
+          else { o.maturity = 1; o.aged = 0; o.heat = 0; } // ripen in place — falls through to persist o
+        }
+      }
       if (o.family === 'stone') {
         // Worn to grit by too much handling — a brief scatter, then gone (§4.3).
         if (o.handling >= GRIT_HANDLING) {
@@ -1236,6 +1263,52 @@ export class WorldRoom {
       out.push(child);
     }
     return out;
+  }
+
+  // ---- anomaly powers (Wave R) -----------------------------------------------
+  // The nearest free PLANT (seed family) within ANOM_TOUCH_R of (x,y), excluding `self`.
+  #plantNear(x, y, self) {
+    let target = null, best = Infinity;
+    for (const o of this.#gridNear(x, y, ANOM_TOUCH_R, (o) => o.family === 'seed' && o.held === '')) {
+      if (o === self) continue;
+      const d = Math.hypot(o.x - x, o.y - y);
+      if (d <= ANOM_TOUCH_R && d < best) { best = d; target = o; }
+    }
+    return target;
+  }
+  // The nearest free ANOMALY within ANOM_TOUCH_R of (x,y).
+  #anomalyNear(x, y) {
+    let an = null, best = Infinity;
+    for (const a of this.#gridNear(x, y, ANOM_TOUCH_R, (a) => a.family === 'anomaly' && a.held === '')) {
+      const d = Math.hypot(a.x - x, a.y - y);
+      if (d <= ANOM_TOUCH_R && d < best) { best = d; an = a; }
+    }
+    return an;
+  }
+  // RIPEN: a seed/leaf leaps to a fresh, fully-mature tree. Returns true if it changed.
+  async #ripenPlant(target, now) {
+    if ((target.maturity || 0) >= 1 && (target.aged || 0) <= 0) return false; // already a fresh mature tree
+    target.maturity = 1; target.aged = 0; target.heat = 0; target.last_touched = now;
+    await this.#persist(target);
+    this.#bcast(this.#stateMsg(target, now), null);
+    return true;
+  }
+  // BURST: a grown tree shatters into a scatter of fresh saplings (kept out of water).
+  async #burstPlant(target, now) {
+    this.#gridRemove(target);
+    this.objects.delete(target.id); this.bcastMark.delete(target.id); this.driftMark.delete(target.id); this.dirty.delete(target.id);
+    await this.state.storage.delete('obj:' + target.id); this.objWrites++;
+    this.#bcast({ t: 'object_gone', id: target.id, burst: true, x: target.x, y: target.y }, null);
+    const n = ANOM_BURST_MIN + Math.floor(Math.random() * (ANOM_BURST_MAX - ANOM_BURST_MIN + 1));
+    for (let i = 0; i < n; i++) {
+      const a = (i / n) * Math.PI * 2 + Math.random() * 0.7, d = 28 + Math.random() * 48;
+      let x = target.x + Math.cos(a) * d, y = target.y + Math.sin(a) * d;
+      const pond = poolContaining(x, y); if (pond) { const b = bankPoint(pond, x, y); x = b.x; y = b.y; } // saplings never land in water
+      const s = makeSeedRecord(crypto.randomUUID(), (Math.random() * 4294967296) >>> 0, x, y, now);
+      s.maturity = 0.06 + Math.random() * 0.06; // a hair past a seed — clearly young sprouts, not dormant seeds
+      this.objects.set(s.id, s); this.#gridAdd(s); await this.#persist(s);
+      this.#bcast({ t: 'object_new', o: this.#pub(s) }, null);
+    }
   }
 
   // A stone dropped OVERLAPPING others — but not centred enough to fuse — must not
