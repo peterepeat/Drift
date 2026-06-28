@@ -4,7 +4,7 @@
 // no visual data is ever stored or transmitted.
 // =============================================================================
 import * as PG from './drift-procgen.js';
-import { paintGround, paintGlows, paintNoise, paintPresence, paintCarryTether, paintSky, paintSeasonGrade, seasonGround, seasonSat, paintWaterWorld, paintFlow } from './render.js';
+import { paintGround, paintGlows, paintNoise, paintGroundPatches, paintPresence, paintCarryTether, paintSky, paintSeasonGrade, seasonGround, seasonSat, paintWaterWorld, paintFlow } from './render.js';
 import { inViewport, CULL_MARGIN } from './cull.js';
 import { Audio } from './audio.js';
 import { flingStep, ema, nudge, spring } from './physics.js';
@@ -1201,6 +1201,8 @@ function frame(now) {
   // objects (world space) — single matrix folds dpr + zoom + pan
   ctx.setTransform(dpr * camera.z, 0, 0, dpr * camera.z,
     dpr * (vw / 2 - camera.x * camera.z), dpr * (vh / 2 - camera.y * camera.z));
+  { const hw = (vw / 2) / camera.z, hh = (vh / 2) / camera.z; // world-anchored terrain tint, beneath water + objects
+    paintGroundPatches(ctx, { minX: camera.x - hw, maxX: camera.x + hw, minY: camera.y - hh, maxY: camera.y + hh }); }
   paintWaterWorld(ctx, pool, animT); // wet sheen beneath the objects
   if (poolOnScreen()) paintFlow(ctx, pool, animT); // faint flow streaks — only when the pool is in view
   const list = [];

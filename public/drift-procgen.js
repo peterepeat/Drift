@@ -71,8 +71,9 @@ export const PALETTE = {
   glowCore:     '#c8922a', // the world's own light — warm amber
   glowAlpha:    0.08,       // ambient glow opacity
   stone:        ['#8a7e72', '#a89c90', '#c2b8ad', '#d4cfc9'], // fresh-dark -> worn-light
-  growthDeep:   '#4a5e3a', // mature core
-  growthLight:  '#8dab6f', // young / tip
+  growthYoung:  '#bcc77e', // sapling — soft yellow-green (fresh, just sprouted)
+  growthLight:  '#8dab6f', // mid-growth / branch tips
+  growthDeep:   '#3f5733', // mature core — deep forest green
   waterCore:    '#a8b8c4', // pale cool grey-blue
   waterAlpha:   0.40,
   presenceCore: '#e8c87a', // presence warmth bloom
@@ -208,7 +209,12 @@ export function drawPlant(ctx, seed, cx, cy, maturity, aged = 0) {
   const maxDepth = Math.round(2 + maturity * 5);          // 2..7 generations
   const baseLen = 9 + maturity * 46;                      // grows taller with maturity
   const sat = (0.35 + maturity * 0.65) * (1 - aged * 0.7); // young = pale, mature = rich, aged = fades
-  const core = mix(PALETTE.growthDeep, PALETTE.growthLight, maturity);
+  // Maturity reads as COLOUR (Wave O): a sapling is soft yellow-green, mid-growth a
+  // leaf green, a mature plant a deep forest green — a clear, calm read of age. The
+  // rising `sat` deepens it further (pale sapling → rich mature); `aged` fades it.
+  const core = maturity < 0.5
+    ? mix(PALETTE.growthYoung, PALETTE.growthLight, maturity / 0.5)
+    : mix(PALETTE.growthLight, PALETTE.growthDeep, (maturity - 0.5) / 0.5);
   ctx.save(); ctx.translate(cx, cy); ctx.lineCap = 'round';
   (function branch(g, x, y, ang, len, depth, thick) {
     if (depth > maxDepth || len < 1.5) return;

@@ -62,6 +62,39 @@ export function paintNoise(ctx, w, h, seed) {
   ctx.drawImage(noiseCanvas(w, h, seed), 0, 0, w, h); ctx.restore();
 }
 
+// ---- ground terrain variation (world-anchored; Wave O) ---------------------
+// The land isn't a uniform brown: a slow low-frequency field tints broad regions
+// warmer (sandy) or cooler (mossy green) over the dark base. WORLD-anchored (drawn
+// in the world transform, so the terrain stays put as you pan — a property of the
+// LAND, not the screen) and beneath water + objects. Deliberately SUBTLE so it
+// reads as place, never pattern, and never competes with what's in your hands.
+const GP_CELL = 230;          // world units between patch centres
+const GP_RADIUS = 260;        // soft blob radius (> cell, so neighbours overlap → blend)
+const GP_SAND = '#b59a63';    // warm sandy tint (dusty, not bright)
+const GP_MOSS = '#5f8040';    // cool mossy-green tint
+let _gpNoise = null;
+export function paintGroundPatches(ctx, box) {
+  if (!_gpNoise) _gpNoise = PG.makeNoise(0x5a17d); // its own field, distinct from the value-noise overlay
+  const cx0 = Math.floor(box.minX / GP_CELL), cx1 = Math.floor(box.maxX / GP_CELL);
+  const cy0 = Math.floor(box.minY / GP_CELL), cy1 = Math.floor(box.maxY / GP_CELL);
+  ctx.save();
+  // Normal compositing (not additive): the tint COLOURS the ground toward sand /
+  // moss, so a region reads as different earth — not a glow over the same earth.
+  for (let cx = cx0; cx <= cx1; cx++) for (let cy = cy0; cy <= cy1; cy++) {
+    const v = PG.fbm(_gpNoise, cx * 0.45, cy * 0.45, 3); // terrain value [-1,1] at this cell
+    const mag = Math.abs(v);
+    if (mag < 0.08) continue;                            // neutral ground — leave it
+    const a = Math.min(0.34, (mag - 0.08) * 0.52);       // perceptible regions, still calm; capped
+    if (a <= 0.003) continue;
+    const wx = cx * GP_CELL, wy = cy * GP_CELL;
+    const g = ctx.createRadialGradient(wx, wy, 0, wx, wy, GP_RADIUS);
+    g.addColorStop(0, PG.rgba(v > 0 ? GP_SAND : GP_MOSS, a));
+    g.addColorStop(1, PG.rgba(v > 0 ? GP_SAND : GP_MOSS, 0));
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(wx, wy, GP_RADIUS, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.restore();
+}
+
 // Presence warmth — committed spec (PRD §4.4 / Visual Bible §04):
 // #e8c87a, 6% core opacity, radius ~0.5-0.6x viewport width, blend 'lighter'.
 // `intensity` is the 0..1 fade envelope; we build to the spec value (no 2.5x

@@ -19,9 +19,12 @@ import { rng, mix, rgba, lighten, darken } from './drift-procgen.js';
 const TAU = Math.PI * 2;
 export const CREATURE_KINDS = ['crawler', 'flier'];
 // kind → wander reach (world units from home) and pace (time multiplier).
+// `pace` scales the wander's temporal frequency = traversal SPEED; reach is
+// renormalised independently, so a higher pace covers the same path 50% faster
+// (Wave O: +50% — the world feels livelier) without wandering any further.
 const KIND = {
-  crawler: { reach: 34, pace: 1.25, bob: 0 },
-  flier:   { reach: 74, pace: 1.7, bob: 6 },
+  crawler: { reach: 34, pace: 1.875, bob: 0 },
+  flier:   { reach: 74, pace: 2.55, bob: 6 },
 };
 
 // PURE & DETERMINISTIC: the wander offset from home at shared time t (seconds).
