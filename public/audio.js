@@ -15,7 +15,7 @@ export const TONIC_BASE_HZ = 110;                 // A2 — low and warm
 export const SEASON_SEMITONES = [0, -3, -5, 2];   // growing / turning / resting / rising offsets
 export const DENSITY_FULL = 40;                   // object count that saturates richness
 const FIFTH_DETUNE_CENTS = 6;                     // slight beating on the fifth
-const MASTER_GAIN = 0.18, FADE_S = 4;             // quiet bed; tide-like enable/disable
+const MASTER_GAIN = 0.10, FADE_S = 4;             // quiet bed (subordinate to the interaction pings); tide-like enable/disable
 const LFO_RATE_HZ = 0.05;                         // glacial breathing
 const SWELL_DEPTH = 0.06;                         // max fractional master-gain swell from warmth
 const BRIGHT_HZ = [220, 2000];                    // bandpass sweep range
@@ -52,7 +52,7 @@ export function worldToAudioParams({ seasonPhase = 0, density = 0, warmth = 0, w
 // from the object's seed + a per-event nonce. Pitched on a just-pentatonic above
 // the SAME season tonic the ambient bed uses, so events always sit in the drone.
 // Gated by the one sound opt-in (the corner glyph), like the bed.
-const PING_LEVEL = 0.16;                          // peak gain of a ping (quiet, sits under the bed's presence)
+const PING_LEVEL = 0.24;                          // peak gain of a ping — now clearly ABOVE the quiet bed (interaction is the foreground)
 const PENT = [1, 9 / 8, 5 / 4, 3 / 2, 5 / 3, 2, 9 / 4, 8 / 3]; // just-intonation pentatonic-ish ratios
 // family flavour: octave multiplier, oscillator timbre, base length (s)
 const PING_FAMILY = {
@@ -154,7 +154,42 @@ function apply(glide) {
   padGain.gain.setTargetAtTime(0.25 * p.padLevel, t, tc);
   swellDepth.gain.setTargetAtTime(p.swell, t, tc); // breathes the upstream node ±swell around 1
 }
-function startTimer() { if (!timer) timer = setInterval(() => { if (enabled && ctx && ctx.state === 'running') apply(true); }, UPDATE_MS); }
+
+// ---- ambient shimmer: the bed quietly SINGS over time, not just hums ----------
+// Occasionally a soft sustained note from the season's pentatonic swells and fades —
+// pitched on the SAME tonic as the drone/pings, its degree a slow random walk so
+// consecutive notes feel melodic. The world drives it: a denser, warmer (more
+// inhabited) world sings more often. Very quiet — texture, never melody-in-your-face.
+const SHIMMER_LEVEL = 0.05;
+let shimmerDeg = 2;
+function shimmer() {
+  if (!enabled || !ctx || ctx.state !== 'running' || !fx) return;
+  const t = ctx.currentTime, tonic = worldToAudioParams(lastState).tonicHz;
+  shimmerDeg = Math.max(0, Math.min(PENT.length - 1, shimmerDeg + (Math.random() < 0.5 ? -1 : 1) * (Math.random() < 0.65 ? 1 : 2))); // neighbouring steps
+  const freq = tonic * PENT[shimmerDeg] * (Math.random() < 0.4 ? 2 : 1); // sometimes an octave up
+  const dur = 2.6 + Math.random() * 2.8;
+  const env = ctx.createGain();
+  env.gain.setValueAtTime(0.0001, t);
+  env.gain.exponentialRampToValueAtTime(SHIMMER_LEVEL, t + dur * 0.42); // slow swell in
+  env.gain.exponentialRampToValueAtTime(0.0001, t + dur);              // slow fade out
+  const osc = ctx.createOscillator(); osc.type = 'sine'; osc.frequency.value = freq;
+  const osc2 = ctx.createOscillator(); osc2.type = 'sine'; osc2.frequency.value = freq * 1.5; // a soft fifth above
+  const g2 = ctx.createGain(); g2.gain.value = 0.3;
+  osc.connect(env); osc2.connect(g2); g2.connect(env);
+  let out = env;
+  if (ctx.createStereoPanner) { const pan = ctx.createStereoPanner(); pan.pan.value = Math.random() * 1.4 - 0.7; env.connect(pan); out = pan; }
+  out.connect(fx);
+  osc.start(t); osc2.start(t); osc.stop(t + dur + 0.1); osc2.stop(t + dur + 0.1);
+  osc.onended = () => { try { env.disconnect(); g2.disconnect(); } catch (e) {} };
+}
+// Per-tick chance to sing: a base rate, more in a dense world (padLevel) and a warm,
+// inhabited one (swell rides warmth). ~once per 8-22s; never two at once-ish.
+function maybeShimmer() {
+  const p = worldToAudioParams(lastState);
+  const chance = 0.012 + 0.03 * p.padLevel + 0.7 * (p.swell || 0); // swell ∈ [0, SWELL_DEPTH=0.06]
+  if (Math.random() < chance) { try { shimmer(); } catch (e) {} }
+}
+function startTimer() { if (!timer) timer = setInterval(() => { if (enabled && ctx && ctx.state === 'running') { apply(true); maybeShimmer(); } }, UPDATE_MS); }
 function stopTimer() { if (timer) { clearInterval(timer); timer = null; } }
 
 export const Audio = {

@@ -15,14 +15,15 @@ const WORLD_SEED = 0x44524946;   // 'DRIF'
 // in the open — so arrival feels spacious and inhabited, not a clump in a void. The
 // relaxation now spaces by each object's FOOTPRINT, so the biggest plants and stones
 // get real room while seeds still pack close. Grows toward the 10k cap over time.
-const N = 2000;                  // fuller arrival population (was 900). env.SEED_N overrides it per-deploy
-const SEED_FRAC = 0.64;          // ~64% seeds / ~36% stones
-const GROVES = 24;               // thickets spread across a RECTANGLE (not radially) — nothing centred
-const WORLD_W = 3700, WORLD_H = 2800; // grove centres + loners scatter across ±this (wider — spacious arrival)
-const GROVE_SIGMA = 420;         // looser groves — objects have room to spread so size-aware spacing converges
-const LONER_FRAC = 0.18;         // fraction scattered in the open between groves
-const SPACE_GAP = 34;            // breathing space BETWEEN footprints — big objects get more absolute room
-const RELAX_ITERS = 30;          // relaxation passes (one-time, at seed) — enough to fully separate big footprints
+const N = 1700;                  // arrival population — eased down so clusters breathe (was 2000); grows over time
+const SEED_FRAC = 0.62;          // ~62% seeds / ~38% stones
+const GROVES = 22;               // thickets spread across a RECTANGLE (not radially) — nothing centred
+const WORLD_W = 3700, WORLD_H = 2800; // grove centres + loners scatter across ±this (wide — spacious arrival)
+const GROVE_SIGMA = 540;         // LOOSER groves (was 420) — objects spread within a grove, so clusters aren't dense
+const HEART_SIGMA = 240;         // grove 0 (the origin "heart") stays tighter, so an arrival always lands by life
+const LONER_FRAC = 0.22;         // more scattered in the open between groves — less clumping
+const SPACE_GAP = 50;            // MORE breathing space BETWEEN footprints (was 34) — directly thins the clusters
+const RELAX_ITERS = 32;          // relaxation passes (one-time, at seed) — enough to separate at the wider gap
 
 // Deterministic, UUID-formatted id (valid 8-4-4-4-12, version/variant bits set).
 // Derived from the seeded master RNG, so re-seeding upserts the same 200 ids
@@ -152,11 +153,13 @@ export function generateWorld(now = Date.now(), count = N) {
   const W = WORLD_W * scale, H = WORLD_H * scale, sigma = GROVE_SIGMA * scale;
   const rand = rng(WORLD_SEED);
   // Grove centres spread across the RECTANGLE, not radially from a centre (so it isn't
-  // "all piled in the middle of a circle"). Grove 0 sits near the origin so an arrival
-  // at the cog still lands by some life — but it's just a normal grove, no dense heart.
-  const groves = [{ x: +uniform(rand, -160, 160).toFixed(2), y: +uniform(rand, -160, 160).toFixed(2) }];
+  // "all piled in the middle of a circle"). Grove 0 sits AT the origin with a tighter
+  // spread (the "heart") so an arrival at the cog always lands by life; the rest are
+  // loose so their clusters breathe.
+  const heartSig = HEART_SIGMA * scale;
+  const groves = [{ x: +uniform(rand, -60, 60).toFixed(2), y: +uniform(rand, -60, 60).toFixed(2), sig: heartSig }];
   for (let g = 1; g < GROVES; g++) {
-    groves.push({ x: +uniform(rand, -W, W).toFixed(2), y: +uniform(rand, -H, H).toFixed(2) });
+    groves.push({ x: +uniform(rand, -W, W).toFixed(2), y: +uniform(rand, -H, H).toFixed(2), sig: sigma });
   }
   const out = [];
   for (let i = 0; i < n; i++) {
@@ -169,8 +172,8 @@ export function generateWorld(now = Date.now(), count = N) {
       x = uniform(rand, -W, W); y = uniform(rand, -H, H);
     } else {                                                    // gathered loosely into a grove
       const grove = groves[Math.floor(rand() * groves.length)];
-      x = grove.x + gaussian(rand) * sigma;
-      y = grove.y + gaussian(rand) * sigma;
+      x = grove.x + gaussian(rand) * grove.sig;             // heart grove is tighter; the rest are loose
+      y = grove.y + gaussian(rand) * grove.sig;
     }
     const seed = Math.floor(rand() * 4294967296) >>> 0;        // 32-bit procgen seed
     let maturity = 0, aged = 0;
@@ -198,8 +201,9 @@ export { N as SEED_COUNT };
 // older version is reseeded ONCE on load (see the DO's #load), so a deployed
 // generator change actually reaches the live world without an admin key or a wipe
 // route. 1 = the old single central clump; 2/3 = groves spread across a wide world;
-// 4 = wider, fuller (2400), and SIZE-AWARE spacing so big trees/boulders get room.
-export const SEED_VERSION = 4;
+// 4 = wider, fuller, SIZE-AWARE spacing; 5 = looser groves + wider gaps + fewer
+// objects so clusters breathe (the "still too dense" fix).
+export const SEED_VERSION = 5;
 // Decide what a loading world needs: seed a fresh empty world, reseed a world left
 // by an older generator (one-time, version-gated), or nothing. Pure + unit-tested —
 // it carries the only loop-risk (a wrong "reseed" would wipe on every restart), so

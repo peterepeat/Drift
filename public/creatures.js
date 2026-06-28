@@ -46,7 +46,7 @@ export function wanderAt(seed, kind, t) {
 // client makes the effective tap target comfortable.
 export function creatureR(seed, kind) {
   const r = rng((seed ^ 0x9e37) >>> 0);
-  return (kind === 'flier' ? 11 : 14) + r() * 6;
+  return (kind === 'flier' ? 20 : 26) + r() * 10; // ~2× (more visible / easier to grab); grab padding adds the rest
 }
 
 // ---- drawing (browser only; caller is in the world transform) ---------------
@@ -55,7 +55,7 @@ export function creatureR(seed, kind) {
 // reads as alive even while its slow drift is barely moving. Form is from `seed`.
 export function drawCreature(ctx, seed, kind, cx, cy, t, ang = 0) {
   const r = rng(seed >>> 0);
-  const size = (kind === 'flier' ? 0.85 : 1) * (4.6 + r() * 2.6); // body half-length, world units (bigger = findable)
+  const size = (kind === 'flier' ? 0.85 : 1) * (9.2 + r() * 5.2); // body half-length, world units — ~2× so creatures read clearly
   const bodyHue = mix('#2b2620', r() < 0.5 ? '#3a2f24' : '#26303a', r()); // warm charcoal ↔ cool
   const sheen = lighten(bodyHue, 0.16);
   ctx.save();

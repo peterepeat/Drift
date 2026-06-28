@@ -65,18 +65,19 @@ pager.send(JSON.stringify({ t: 'presence_move', x: 5000, y: 5000, hw: 200, hh: 2
 await wait(250);
 check(patchIds(pager).has(mover.id), 'panning to the destination pages the carried object in (grid box query)');
 
-// 4. stacking via the WS path uses the grid-backed #tryStack and stays consistent
+// 4. fusing via the WS path uses the grid-backed #tryFuse and stays consistent
 async function wsMove(id, x, y) {
   ctl.send(JSON.stringify({ t: 'pickup', id, token: TOK, ts: Date.now() })); await wait(60);
   ctl.send(JSON.stringify({ t: 'place', id, token: TOK, x, y, ts: Date.now() })); await wait(60);
 }
 const freeStones = (await snap()).objects.filter((o) => o.family === 'stone' && !o.held).map((o) => o.id);
 await wsMove(freeStones[0], 7000, 7000);
-await wsMove(freeStones[1], 7000, 7000);              // drop onto the first -> grid #tryStack finds it
-const st = (await snap()).objects.find((o) => o.id === freeStones[1]);
-check(st && st.stack === 1 && st.stackBase === freeStones[0], `a stone stacks via the grid-backed #tryStack (level ${st?.stack})`);
+await wsMove(freeStones[1], 7000, 7000);              // drop onto the first -> grid #tryFuse finds it
+const w4 = await snap();
+const target = w4.objects.find((o) => o.id === freeStones[0]);
+check(!w4.objects.find((o) => o.id === freeStones[1]) && target && target.r != null, 'a stone fuses via the grid-backed #tryFuse (dropped consumed, target grew)');
 g = await grid();
-check(g.consistent, 'grid consistent after WS stacking');
+check(g.consistent, 'grid consistent after WS fusing');
 
 ctl.close(); pager.close();
 console.log(`\n${pass} passed, ${fail} failed`);

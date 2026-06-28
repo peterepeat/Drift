@@ -147,17 +147,22 @@ const CREATURE_DRIVE_TICKS = 5;           // a creature holds one drive ~this ma
 
 // ---- stones: erosion-to-grit & stacking (Family 1) -------------------------
 // Stones don't grow; they erode by handling (each place wears them smoother and
-// smaller, client-side from `handling`) and eventually dissolve into grit. They
-// also STACK: drop one within another's footprint and it balances on top; a
-// stack that grows tall becomes unstable and topples, scattering its stones.
+// smaller, client-side from `handling`) and eventually dissolve into grit. They also
+// FUSE: drop one onto another and they combine into a single larger stone (area-
+// adding); and BREAK: a double-click splits one into smaller stones, until the pieces
+// are too small and crumble to grit. A fused/split stone carries a stored radius `r`
+// (absent ⇒ the seed-derived base size); the SHAPE is still regenerated from the seed.
 const GRIT_HANDLING = 26;                 // handled this many times, a stone is worn to grit and gone
-const STACK_STEP = 12;                    // world units a stone rises per level in a stack
-const STACK_TALL = 4;                     // a stack this tall is unstable (and scatter-on-tap)
-const STACK_MAX = 6;                      // taller than this always topples on the next tick
-const TOPPLE_CHANCE = 0.12;               // per-tick topple chance, scaled by how far past STACK_TALL
-// Stone footprint in world units — MUST match the client's stoneSize(seed).
-function stoneRadius(seed) { return 12 + rng(seed >>> 0)() * 34; }
-const MAX_STONE_RADIUS = 12 + 34;         // ceiling of stoneRadius(); the grid query radius for #tryStack
+const STACK_STEP = 12;                    // (legacy, unused) world units a stone once rose per stack level
+const STACK_TALL = 4;                     // (legacy, unused)
+const STACK_MAX = 6;                      // (legacy, unused)
+const TOPPLE_CHANCE = 0.12;               // (legacy, unused)
+const MAX_STONE_R = 88;                   // a fused stone caps here (world units)
+const MIN_STONE_R = 9;                    // break a stone below this and it crumbles to grit instead
+// Stone footprint in world units — base size from seed; `o.r` overrides once fused/split.
+function stoneRadius(seed) { return 12 + rng(seed >>> 0)() * 34; }      // MUST match the client's seed-derived base
+function stoneRadiusOf(o) { return o.r != null ? o.r : stoneRadius(o.seed); }
+const MAX_STONE_RADIUS = MAX_STONE_R;     // grid-query radius (a fused stone can be this big)
 
 // ---- water: flow, drift & stone-channelling (Family 3, Phase 3) -------------
 // A slow persistent flow moves across the world. Its direction at a point is a
@@ -576,6 +581,7 @@ export class WorldRoom {
     };
     if (o.kind) p.kind = o.kind; // anomalies + creatures carry their form/kind
     if (o.family === 'creature') p.wanderT0 = o.wanderT0; // the shared wander anchor
+    if (o.family === 'stone' && o.r != null) p.r = o.r; // a fused/split stone's stored radius (shape still from seed)
     if (o.held !== '') p.heldBy = o.heldConn; // the holder's EPHEMERAL pid (same id presence carries) — links a carried thing to its carrier; never the token
     return p;
   }
@@ -587,6 +593,7 @@ export class WorldRoom {
       heldBy: o.held !== '' ? o.heldConn : '', // who's carrying it ('' = nobody) — for the felt-presence tether
     };
     if (o.family === 'creature') m.wanderT0 = o.wanderT0; // re-anchor on the wire so a placed creature continues smoothly for everyone
+    if (o.family === 'stone' && o.r != null) m.r = o.r;   // a fused stone broadcasts its grown radius
     return m;
   }
   #worldState(pid, box) {
@@ -752,12 +759,38 @@ export class WorldRoom {
           this.#bcast({ t: 'object_gone', id: o.id, grit: true }, null);
           return;
         }
-        this.#tryStack(o); // drop within another stone's footprint -> balance on top
+        // Dropped onto another stone → FUSE: the target grows, this stone is consumed.
+        const fused = this.#tryFuse(o, now);
+        if (fused) {
+          this.#gridRemove(o);
+          this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id); this.dirty.delete(o.id);
+          await this.state.storage.delete('obj:' + o.id); this.objWrites++;
+          this.#bcast({ t: 'object_gone', id: o.id, fused: fused.id }, null);
+          await this.#persist(fused);
+          this.#bcast(this.#stateMsg(fused, now), null);
+          this.#updateCog(fused.x, fused.y);
+          return;
+        }
       }
-      this.#gridUpdate(o); // index the final position (after any stack snap)
+      this.#gridUpdate(o); // index the final position (after any settle-clear)
       await this.#persist(o);
       this.#bcast(this.#stateMsg(o, now), null);
       this.#updateCog(o.x, o.y);
+
+    } else if (m.t === 'break') {
+      // Double-click a stone → split it into smaller stones (or grit if already tiny).
+      // No ownership needed (anyone can break a free stone), but not while it's held.
+      const o = this.objects.get(m.id);
+      if (!o || o.family !== 'stone' || o.held !== '') return;
+      const pieces = this.#breakStone(o, now);
+      this.#gridRemove(o);
+      this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id); this.dirty.delete(o.id);
+      await this.state.storage.delete('obj:' + o.id); this.objWrites++;
+      this.#bcast({ t: 'object_gone', id: o.id, grit: true }, null); // a dust puff as it breaks
+      for (const c of pieces) {
+        this.objects.set(c.id, c); this.#gridAdd(c); await this.#persist(c);
+        this.#bcast({ t: 'object_new', o: this.#pub(c) }, null);
+      }
 
     } else if (m.t === 'dissolve') {
       // Only the current holder can dissolve an anomaly (the deliberate 10s hold).
@@ -1097,30 +1130,42 @@ export class WorldRoom {
     return wrote;
   }
 
-  // ---- stone stacking --------------------------------------------------------
-  // Place-time: if the stone landed within another free stone's footprint, it
-  // balances on top of that stone's stack. Snaps to the base position, rising
-  // STACK_STEP per level (so the stored y carries the visual height).
-  #tryStack(o) {
+  // ---- stone fusing ----------------------------------------------------------
+  // Place-time: if the stone landed within another free stone's footprint, the two
+  // FUSE into a single larger stone (radii area-added, capped). Returns the grown
+  // target (the caller consumes the dropped stone), or null if it didn't land on one
+  // (in which case it's settled clear so it doesn't overlap a neighbour).
+  #tryFuse(o, now) {
+    const ro = stoneRadiusOf(o);
     let target = null, bestD = Infinity;
-    // Any stone whose footprint covers o is within MAX_STONE_RADIUS of it, so the
-    // grid neighbourhood is a safe superset; the exact d<stoneRadius(s) re-filters.
-    for (const s of this.#gridNear(o.x, o.y, MAX_STONE_RADIUS, (s) => s.family === 'stone')) {
+    for (const s of this.#gridNear(o.x, o.y, ro + MAX_STONE_R, (s) => s.family === 'stone')) {
       if (s.id === o.id || s.held !== '') continue;
       const d = Math.hypot(s.x - o.x, s.y - o.y);
-      if (d < stoneRadius(s.seed) && d < bestD) { bestD = d; target = s; }
+      if (d < stoneRadiusOf(s) && d < bestD) { bestD = d; target = s; } // dropped onto its footprint → fuse
     }
-    if (!target) { o.stack = 0; o.stackBase = ''; this.#settleStoneClear(o); return; }
-    const baseId = target.stackBase || target.id;
-    const base = this.objects.get(baseId) || target;
-    let topLevel = 0; // highest level currently in this stack (base is 0)
-    for (const s of this.objects.values()) {
-      if (s.id !== o.id && (s.stackBase || '') === baseId) topLevel = Math.max(topLevel, s.stack);
+    if (!target) { this.#settleStoneClear(o); return null; }
+    target.r = Math.min(MAX_STONE_R, Math.hypot(ro, stoneRadiusOf(target))); // area-combine
+    target.last_touched = now;
+    this.#gridUpdate(target);
+    return target;
+  }
+  // Break a stone into smaller pieces (double-click). Splits its radius area-
+  // conservingly into 2-3 children with fresh seeds, scattered; a stone already near
+  // the floor crumbles to grit instead. Returns the spawned children (for broadcast).
+  #breakStone(o, now) {
+    const r = stoneRadiusOf(o);
+    if (r <= MIN_STONE_R * 1.35) return []; // too small to split — caller grits it
+    const pieces = r > 52 ? 3 : 2;
+    const childR = Math.max(MIN_STONE_R, r / Math.sqrt(pieces)); // area-conserving
+    const out = [];
+    for (let k = 0; k < pieces; k++) {
+      const ang = (k / pieces) * Math.PI * 2 + Math.random() * 0.8, dist = childR * (0.8 + Math.random() * 0.4);
+      const seed = (Math.random() * 4294967296) >>> 0;
+      const child = makeRecord(crypto.randomUUID(), 'stone', seed, o.x + Math.cos(ang) * dist, o.y + Math.sin(ang) * dist, now);
+      child.r = childR;
+      out.push(child);
     }
-    o.stack = topLevel + 1;
-    o.stackBase = baseId;
-    o.x = base.x + (Math.random() * 2 - 1) * 4; // slight cairn wobble, not a ruler-straight column
-    o.y = base.y - o.stack * STACK_STEP;
+    return out;
   }
 
   // A stone dropped OVERLAPPING others — but not centred enough to stack — must not
@@ -1129,11 +1174,11 @@ export class WorldRoom {
   // the deepest overlap; a few passes clear a small cluster. Fully deterministic (no
   // randomness) so every client agrees on where it came to rest.
   #settleStoneClear(o) {
-    const ro = stoneRadius(o.seed);
+    const ro = stoneRadiusOf(o);
     for (let iter = 0; iter < 10; iter++) {
       let worst = null, worstOver = 1e-3;     // ignore sub-unit grazes
-      for (const s of this.#gridNear(o.x, o.y, ro + MAX_STONE_RADIUS, (s) => s.family === 'stone' && s.id !== o.id && s.held === '' && (s.stack || 0) === 0)) {
-        const min = ro + stoneRadius(s.seed);
+      for (const s of this.#gridNear(o.x, o.y, ro + MAX_STONE_RADIUS, (s) => s.family === 'stone' && s.id !== o.id && s.held === '')) {
+        const min = ro + stoneRadiusOf(s);
         const dx = o.x - s.x, dy = o.y - s.y, d = Math.hypot(dx, dy);
         const over = min - d;
         if (over > worstOver) { worstOver = over; worst = { dx, dy, d, min }; }

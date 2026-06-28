@@ -42,7 +42,7 @@ for (let s = 0; s < 16; s++) { const w = wanderAt(s * 2654435761 >>> 0, 'flier',
 check(distinct.size >= 8, `distinct seeds wander differently (${distinct.size}/16 distinct)`);
 
 // 6. radius is a sane, finite, seed-varied tap target
-check(CREATURE_KINDS.every((k) => { const r = creatureR(42, k); return Number.isFinite(r) && r > 2 && r < 26; }), 'creatureR is finite and small');
+check(CREATURE_KINDS.every((k) => { const r = creatureR(42, k); return Number.isFinite(r) && r > 10 && r < 40; }), 'creatureR is finite and a sane tap target');
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -40,6 +40,7 @@ const GLOW_PARALLAX = 0.04;                   // ambient glows drift this fracti
 const DEPTH_TOP = 0.2;                         // objects at the TOP of the screen draw this much smaller (Wave K recession — subtle)
 const ANOM_DISSOLVE_MS = 10000, ANOM_FADE_MS = 3000; // hold an anomaly 10s and it fades from your hands
 const ATTEND_MS = 450;                        // long-press dwell before an object is "attended" (PRD §5.2)
+const DBLTAP_MS = 320;                        // two taps on a stone within this BREAK it into smaller stones
 const STACK_STEP_C = 12, STACK_TALL_C = 4;   // stone-stack rise/level + tall-stack-tap-to-scatter (mirror server)
 const GRIT_MS = 500;                          // a worn-out stone's grit scatter lifetime (spec §4.3)
 const POS_EASE_MAX = 24;                       // a position change up to this (a drift hop) eases; larger snaps
@@ -72,6 +73,7 @@ const SWAY_K = 150;                           // spring stiffness pulling a sway
 const SWAY_DAMP = 0.05;                        // velocity retained/s (light → a small bounce on the way back)
 const SWAY_MAX = 0.17;                         // max lean in radians (~10°) — a sway, never a topple
 const SWAY_IMPULSE = 0.0011;                   // how much a px of drag feeds the lean
+const BEND_FROM_CURSOR = 0.0011;               // a cursor brush sways a plant's canopy (per wu/s of cursor speed, falloff-scaled)
 
 // Spec easing curves (Visual Bible §06).
 const EASE_RISE = cubicBezier(0.22, 1, 0.36, 1);     // pickup / place lift
@@ -232,7 +234,7 @@ function updateLifts(now) {
 function isLifted(id) { return id === heldId || liftValue(id) > 0.002; }
 
 // ---- deterministic-from-seed sizing (never stored) --------------------------
-function stoneSize(seed) { return 12 + PG.rng(seed >>> 0)() * 34; }            // pebble..rock, world units
+function stoneSize(o) { return o.r != null ? o.r : (12 + PG.rng(o.seed >>> 0)() * 34); } // base from seed; `r` once fused/split
 function seedScale(seed) { return 0.9 + PG.rng((seed ^ 0x9e3779b9) >>> 0)() * 0.9; }
 function anomalyR(o) { return 18 + PG.rng(o.seed >>> 0)() * 14; } // luminous, ~18-32 wu
 function crystalR(o) { return 6 + PG.rng(o.seed >>> 0)() * 7; }   // small, ~6-13 wu
@@ -241,7 +243,7 @@ function crystalR(o) { return 6 + PG.rng(o.seed >>> 0)() * 7; }   // small, ~6-1
 function shownMat(o) { return o._matShown != null ? o._matShown : (o.maturity || 0); }
 function shownAged(o) { return o._agedShown != null ? o._agedShown : (o.aged || 0); }
 function objRadius(o) {
-  if (o.family === 'stone') return stoneSize(o.seed);
+  if (o.family === 'stone') return stoneSize(o);
   if (o.family === 'anomaly') return anomalyR(o);
   if (o.family === 'crystal') return crystalR(o);
   if (o.family === 'creature') return creatureR(o.seed >>> 0, o.kind || 'crawler');
@@ -273,7 +275,7 @@ function isMovable(o) {
 }
 function stoneGeom(o) {
   const er = Math.min(0.95, o.handling * 0.04); // handling erodes the stone (PRD §3.2)
-  if (!o._sg || o._sgEr !== er) { o._sg = PG.makeStone(o.seed >>> 0, stoneSize(o.seed), er); o._sgEr = er; }
+  if (!o._sg || o._sgEr !== er || o._sgR !== (o.r || 0)) { o._sg = PG.makeStone(o.seed >>> 0, stoneSize(o), er); o._sgEr = er; o._sgR = o.r || 0; } // regen on fuse/split
   return o._sg;
 }
 // Draw any object (stone, seed, or plant) at (cx, cy) in the current transform.
@@ -285,11 +287,12 @@ function paintObject(o, cx, cy, ang = 0) {
   if (o.family === 'creature') { drawCreature(ctx, o.seed >>> 0, o.kind || 'crawler', cx, cy, animT, ang); return; }
   const mat = shownMat(o), aged = shownAged(o);
   if (mat < SPROUT_C) { PG.drawSeed(ctx, o.seed >>> 0, cx, cy, seedScale(o.seed) * (1 + mat * 1.4)); return; }
-  if (mat >= BIG_TREE_MAT) {                          // a rooted tree: grip the earth, and sway from a drag
-    drawRoots(ctx, o.seed >>> 0, cx, cy, mat);
-    const bend = o._bend || 0;
-    if (bend) { ctx.save(); ctx.translate(cx, cy); ctx.rotate(bend); PG.drawPlant(ctx, o.seed >>> 0, 0, 0, mat, aged); ctx.restore(); return; }
-  }
+  if (mat >= BIG_TREE_MAT) drawRoots(ctx, o.seed >>> 0, cx, cy, mat); // roots only on the biggest (rooted) plants
+  // Any sprouted plant SWAYS by leaning its canopy about its base (trunk anchored at
+  // the ground) — used by the rooted-tree drag AND the cursor brush (Wave M). Never a
+  // whole-object slide.
+  const bend = o._bend || 0;
+  if (bend) { ctx.save(); ctx.translate(cx, cy); ctx.rotate(bend); PG.drawPlant(ctx, o.seed >>> 0, 0, 0, mat, aged); ctx.restore(); return; }
   PG.drawPlant(ctx, o.seed >>> 0, cx, cy, mat, aged);
 }
 // A soft contact shadow grounds an object on the plane (a little perspective — it
@@ -508,7 +511,9 @@ function settleFlying() {
 function lightnessOf(o) {
   if (o.held || o.family === 'stone' || o.family === 'anomaly' || o.family === 'creature') return 0; // creatures move themselves
   if (o.family === 'crystal') return 0.45;
-  return Math.max(0, 1 - shownMat(o) * 1.3); // ~1 at seed → 0 by ~maturity 0.77
+  // only a LOOSE pre-sprout seed/leaf (no trunk) slides under the cursor; a sprouted
+  // plant has a trunk, so it SWAYS instead (handled in updateNudge) — never slides.
+  return shownMat(o) < SPROUT_C ? 1 : 0;
 }
 // How much an object YIELDS to being bumped by a carried/thrown object — lighter
 // things give a lot, stones bump but resist, held/rooted/luminous things don't move.
@@ -516,7 +521,8 @@ function collisionGive(o) {
   if (o.held || o.id === heldId || flying.has(o.id) || o.family === 'anomaly' || o.family === 'creature' || !isMovable(o)) return 0;
   if (o.family === 'stone') return 0.4;
   if (o.family === 'crystal') return 0.7;
-  return Math.max(0.5, 1 - shownMat(o) * 0.5);
+  if (o.family === 'seed') return shownMat(o) < SPROUT_C ? 0.8 : 0; // loose seeds shove aside; a sprouted plant doesn't slide (it sways)
+  return 0;
 }
 // Local, cosmetic displacement: a moving cursor brushes light things aside (a render
 // offset _ox/_oy on a damped spring), and they settle back to rest. Never the real
@@ -529,6 +535,14 @@ function updateNudge(now) {
   const speed = (now - lastHoverT) < 60 ? Math.hypot(mouseVelW.x, mouseVelW.y) : 0;
   const active = speed > NUDGE_MIN_SPEED;
   for (const o of objects.values()) {
+    // A sprouted plant SWAYS when the moving cursor brushes it — the canopy leans in the
+    // cursor's travel direction (trunk anchored at the base), never sliding the whole
+    // tree. Feeds the same _bend spring updateSway settles (Wave M).
+    if (active && o.family === 'seed' && shownMat(o) >= SPROUT_C && !o.held && o.id !== heldId &&
+        Math.abs(o.x - mouseWorld.x) < NUDGE_RADIUS && Math.abs(o.y - mouseWorld.y) < NUDGE_RADIUS) {
+      const d = Math.hypot(o.x - mouseWorld.x, o.y - mouseWorld.y);
+      if (d < NUDGE_RADIUS) { const fall = 1 - d / NUDGE_RADIUS; o._bendV = (o._bendV || 0) + mouseVelW.x * fall * fall * BEND_FROM_CURSOR; swaying.add(o.id); }
+    }
     const resting = !o._ox && !o._oy && !o._ovx && !o._ovy;
     // Only objects near the moving cursor are stirred; already-displaced ones still
     // spring back. A resting object that's neither is skipped — so the cost is ~the
@@ -748,6 +762,7 @@ function trackMouseHover(cx, cy) {
   mouseWorld = w; lastHoverW = w; lastHoverT = t;
 }
 let grab = null;                 // pending press on an object: { id, ox, oy } (object-centre − pointer, world units)
+let lastTapId = null, lastTapT = 0; // double-tap-a-stone detection (→ break)
 let holdMode = null;             // null | 'drag' (an object carried by a pressed pointer)
 let holdOff = { x: 0, y: 0 };    // world-unit offset object-centre − pointer, so a grab doesn't snap to centre
 
@@ -897,10 +912,12 @@ function endPointer(e) {
     else placeHold();
   } else if (grab && !moved && !wasLong && !multiTouched) { // a still tap on an object
     const o = objects.get(grab.id);
-    if (o && o.family === 'stone' && stackHeight(o) >= STACK_TALL_C) {
-      send({ t: 'scatter', id: o.id, token, ts: Date.now() }); // tall stack → topple
+    if (o && o.family === 'stone') {                       // double-tap a stone → break it into smaller stones
+      const tnow = performance.now();
+      if (lastTapId === o.id && tnow - lastTapT < DBLTAP_MS) { send({ t: 'break', id: o.id, token, ts: Date.now() }); lastTapId = null; }
+      else { lastTapId = o.id; lastTapT = tnow; }
     }
-    grab = null;                                          // otherwise a plain tap does nothing (no sticky pickup)
+    grab = null;                                          // otherwise a single tap does nothing (no sticky pickup)
   } else {
     grab = null;
   }
@@ -1098,6 +1115,7 @@ function onMessage(raw) {
       if (m.stack != null) o.stack = m.stack;
       if (m.stackBase != null) o.stackBase = m.stackBase;
       if (m.wanderT0 != null) o.wanderT0 = m.wanderT0; // a placed creature re-anchored its wander
+      if (m.r != null) o.r = m.r; // a fused stone grew (regens its geometry via stoneGeom)
       o.heldBy = m.heldBy || ''; // who's carrying it (ephemeral pid) — drives the felt-presence tether
       if (m.id !== heldId) {
         if (o.held && !wasHeld) setLift(o.id, 1, LIFT_MS, EASE_RISE);

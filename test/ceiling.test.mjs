@@ -50,7 +50,8 @@ await setHeat(C.x, C.y, 1.0);
 await tick(1, 0.0);
 check(has(await snap(), C.id), 'nearby warmth tends a stone (resets isolation, survives)');
 
-// 3.5 a long-stacked stone is tended — it must not crumble the instant it scatters
+// 3.5 fusing consumes the dropped stone, and the fused stone is an ORDINARY stone for
+// isolation — left forgotten long enough, it crumbles like any other (no special sparing).
 const free = stones(await snap()).filter((o) => ![A.id, B.id, C.id].includes(o.id));
 const [D, E] = free;
 const ctl = await open(); await ctl.world;
@@ -58,14 +59,12 @@ const move = async (id, x, y) => {
   ctl.send(JSON.stringify({ t: 'pickup', id, token: 'ceil-tok', ts: Date.now() })); await wait(60);
   ctl.send(JSON.stringify({ t: 'place', id, token: 'ceil-tok', x, y, ts: Date.now() })); await wait(60);
 };
-await move(D.id, 5000, 5000);   // a base in open, unwarmed space
-await move(E.id, 5000, 5000);   // stack E on top
-await isolate(E.id, FADE);      // pretend it has been stacked a very long time
+await move(D.id, 5000, 5000);   // a target in open, unwarmed space
+await move(E.id, 5000, 5000);   // drop E onto D → fuse (E consumed, D grows)
+check(!has(await snap(), E.id), 'fusing consumes the dropped stone');
+await isolate(D.id, FADE);      // the fused stone, untouched & unwarmed for ages
 await tick(1, 0.0);
-check(has(await snap(), E.id), 'a stacked stone is tended (does not fade however isolated)');
-ctl.send(JSON.stringify({ t: 'scatter', id: E.id, token: 'ceil-tok', ts: Date.now() })); await wait(100);
-await tick(1, 0.0);
-check(has(await snap(), E.id), 'a just-scattered stone does not instantly crumble to grit');
+check(!has(await snap(), D.id), 'a fused stone is ordinary — forgotten long enough, it crumbles to grit');
 ctl.close();
 
 // 4. anomalies never fade, even when maximally isolated

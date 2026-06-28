@@ -29,31 +29,40 @@
     /* a slightly larger invisible hover target so the tiny dot is reachable */
     #dothit { position: fixed; right: 0; bottom: 0; width: 44px; height: 44px; }
 
-    /* The one control PRD §8.4 permits: a tiny ring (hollow=silent, filled=sounding). */
+    /* The one sound control: a small speaker icon — muted (slash) when silent,
+       sounding (waves) when on. Peripheral; fades after 2s like the connection dot. */
     #snd {
-      position: fixed; left: 13px; bottom: 13px;
-      width: 7px; height: 7px; border-radius: 50%;
-      border: 1px solid #6a6258; background: transparent; opacity: 0;
-      transition: opacity .6s ease, background .4s ease, border-color .4s ease;
+      position: fixed; left: 11px; bottom: 11px;
+      width: 19px; height: 19px; opacity: 0; color: #8a8478;
+      transition: opacity .6s ease, color .4s ease;
       pointer-events: none;
     }
-    #snd.on { background: #8a8478; border-color: #8a8478; }
-    #snd.show { opacity: .4; }
-    /* First-visit hint: a few gentle pulses so the one sound control is findable
-       (wordless — no label, true to the spec). Removed by JS after it plays. */
-    @keyframes sndHint {
-      0%, 100% { opacity: .3;  box-shadow: 0 0 0 0 rgba(200,146,42,0); }
-      50%      { opacity: .9;  box-shadow: 0 0 8px 2px rgba(200,146,42,.45); }
-    }
+    #snd svg { width: 100%; height: 100%; display: block; fill: none;
+      stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+    #snd .spk { fill: currentColor; stroke: none; }       /* the speaker cone */
+    #snd .waves { opacity: 0; transition: opacity .3s ease; } /* shown only when sounding */
+    #snd .mute  { opacity: 1; transition: opacity .3s ease; } /* shown only when silent */
+    #snd.on { color: #b9ad98; }
+    #snd.on .waves { opacity: 1; }
+    #snd.on .mute  { opacity: 0; }
+    #snd.show { opacity: .5; }
+    /* First-visit hint: a few gentle pulses so the sound control is findable (wordless). */
+    @keyframes sndHint { 0%, 100% { opacity: .22; } 50% { opacity: .9; } }
     #snd.hint { animation: sndHint 1.8s ease-in-out 3; }
-    #sndhit { position: fixed; left: 0; bottom: 0; width: 44px; height: 44px; }
+    #sndhit { position: fixed; left: 0; bottom: 0; width: 46px; height: 46px; }
   </style>
 </head>
 <body>
   <canvas id="c"></canvas>
   <div id="dot"></div>
   <div id="dothit"></div>
-  <div id="snd"></div>
+  <div id="snd" role="img" aria-label="sound toggle">
+    <svg viewBox="0 0 24 24">
+      <path class="spk" d="M3 9.5 H6.5 L11 6 V18 L6.5 14.5 H3 Z"/>
+      <g class="waves"><path d="M14.5 8.5 a4.5 4.5 0 0 1 0 7"/><path d="M17 6 a8 8 0 0 1 0 12"/></g>
+      <line class="mute" x1="14.5" y1="8.5" x2="20.5" y2="15.5"/>
+    </svg>
+  </div>
   <div id="sndhit"></div>
   <script type="module" src="./client.js"></script>
 </body>
