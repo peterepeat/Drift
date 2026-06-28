@@ -92,6 +92,15 @@ const GROWTH_MULT = { growing: 1.0, turning: 0.25, resting: 0.0, rising: 0.6 };
 const AGE_MULT = { growing: 0.7, turning: 1.4, resting: 0.3, rising: 0.8 };
 const lerp = (a, b, t) => a + (b - a) * t;
 
+// ---- communion bloom: the reward for tending a patch TOGETHER ---------------
+// When two (or more) people linger in the same patch for a little while, the world
+// BLOSSOMS there — a burst of flowering plants, sometimes a luminous anomaly —
+// something that can never happen alone. The wordless "come do this with me". Tracked
+// in-memory by the midpoint cell of each close presence-pair; sustained ⇒ bloom, then
+// a cooldown so a patch can't farm it. (The "what's the point" answer: shared wonder.)
+const COMMUNION_R = 300;                  // two presences within this share a patch
+const COMMUNION_TICKS = 2;                // sustained ticks of togetherness before it blooms
+const COMMUNION_COOLDOWN = 4;             // ticks a bloomed patch rests before it can bloom again
 // ---- anomalies (Family 4): rare, luminous, no lifecycle ---------------------
 const MAX_ANOMALIES = 4;                  // the world holds at most a few — seeing one is luck
 const ANOMALY_SPAWN_CHANCE = 0.03;        // per tick, when conditions allow
@@ -257,6 +266,7 @@ export class WorldRoom {
     this.lastCheckpoint = 0;       // wall-clock ms of the last full snapshot (persisted; survives eviction)
     this.season = 0;               // monotonic season phase (floor % 4 = current season)
     this.bounds = null;            // {x,y} half-extents of the object field — the client clamps its camera to this (no wandering into the void)
+    this.communion = new Map();    // midpoint-cell -> sustained-togetherness ticks (negative = cooldown); in-memory, never persisted
     this.state.blockConcurrencyWhile(async () => { await this.#load(); });
   }
 
@@ -993,6 +1003,10 @@ export class WorldRoom {
       if (now - p.ts > PRESENCE_STALE_MS + 5000) this.presencePos.delete(pid);
     }
 
+    // Communion: where people tend a patch TOGETHER, the world blossoms (the reward
+    // for bringing a friend). Presence-driven; the blooms spawn like any other object.
+    this.#communion(now, spawned);
+
     // Rarely, a mature plant births an anomaly — only in generative seasons,
     // and only while the world holds fewer than a few. Seeing one is luck.
     if (anomalies.length < MAX_ANOMALIES && ANOMALY_SEASONS[sb.cur] &&
@@ -1338,6 +1352,50 @@ export class WorldRoom {
     const y = parent.y + Math.sin(ang) * dist;
     const seed = (Math.random() * 4294967296) >>> 0;
     return makeSeedRecord(crypto.randomUUID(), seed, x, y, now);
+  }
+
+  // Communion: where two+ people LINGER together, the world blossoms. Each tick, every
+  // close presence-pair's midpoint cell accrues a counter; once sustained it blooms a
+  // burst of flowering plants (+ sometimes an anomaly) there, then rests on a cooldown.
+  // In-memory + presence-driven (no storage); the blooms themselves are ordinary
+  // spawned objects (ride the normal spawn write). Returns nothing; pushes to `spawned`.
+  #communion(now, spawned) {
+    const live = [];
+    for (const p of this.presencePos.values()) if (now - p.ts <= PRESENCE_STALE_MS) live.push(p);
+    const active = new Set();
+    for (let i = 0; i < live.length; i++) for (let j = i + 1; j < live.length; j++) {
+      const a = live[i], b = live[j];
+      if (Math.hypot(a.x - b.x, a.y - b.y) > COMMUNION_R) continue;
+      const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+      const key = Math.round(mx / COMMUNION_R) + ',' + Math.round(my / COMMUNION_R);
+      if (active.has(key)) continue;     // one bloom-progress per patch per tick
+      active.add(key);
+      const c = (this.communion.get(key) || 0) + 1;
+      if (c >= COMMUNION_TICKS && this.objects.size + spawned.length < this.maxObjects - CEIL_TRIM) {
+        this.communion.set(key, -COMMUNION_COOLDOWN);         // bloom, then rest
+        for (const o of this.#communionBloom(mx, my, now)) spawned.push(o);
+      } else this.communion.set(key, c);
+    }
+    // patches no longer shared cool off (negative = cooldown counts back up to 0)
+    for (const [key, c] of this.communion) {
+      if (active.has(key)) continue;
+      const nc = c < 0 ? c + 1 : c - 1;
+      if (nc === 0) this.communion.delete(key); else this.communion.set(key, nc);
+    }
+  }
+  #communionBloom(x, y, now) {
+    const out = [];
+    const k = 2 + Math.floor(Math.random() * 2);             // 2-3 flowering plants, born mature
+    for (let i = 0; i < k; i++) {
+      const ang = Math.random() * Math.PI * 2, d = 24 + Math.random() * 66;
+      const seed = (Math.random() * 4294967296) >>> 0;
+      out.push(makeSeedRecord(crypto.randomUUID(), seed, x + Math.cos(ang) * d, y + Math.sin(ang) * d, now, 0.82 + Math.random() * 0.18, 0));
+    }
+    if (Math.random() < 0.3) {                                // sometimes the rarest gift: a luminous anomaly
+      const seed = (Math.random() * 4294967296) >>> 0;
+      out.push(makeAnomalyRecord(crypto.randomUUID(), seed, ANOMALY_KINDS[Math.floor(Math.random() * ANOMALY_KINDS.length)], x, y, now));
+    }
+    return out;
   }
 
   #spawnAnomaly(parent, now, at, kind) {
