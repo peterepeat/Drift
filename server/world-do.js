@@ -154,7 +154,7 @@ const CREATURE_SEEK_R = 720;              // how far a creature looks for an att
 const CREATURE_ARRIVE = 42;               // stop this near the goal (graze/rest beside it, don't pile on)
 const CREATURE_DRIVE_TICKS = 5;           // a creature holds one drive ~this many ticks before it shifts
 
-// ---- stones: erosion-to-grit & stacking (Family 1) -------------------------
+// ---- stones: erosion-to-grit, fuse & break (Family 1) ----------------------
 // Stones don't grow; they erode by handling (each place wears them smoother and
 // smaller, client-side from `handling`) and eventually dissolve into grit. They also
 // FUSE: drop one onto another and they combine into a single larger stone (area-
@@ -162,10 +162,6 @@ const CREATURE_DRIVE_TICKS = 5;           // a creature holds one drive ~this ma
 // are too small and crumble to grit. A fused/split stone carries a stored radius `r`
 // (absent ⇒ the seed-derived base size); the SHAPE is still regenerated from the seed.
 const GRIT_HANDLING = 26;                 // handled this many times, a stone is worn to grit and gone
-const STACK_STEP = 12;                    // (legacy, unused) world units a stone once rose per stack level
-const STACK_TALL = 4;                     // (legacy, unused)
-const STACK_MAX = 6;                      // (legacy, unused)
-const TOPPLE_CHANCE = 0.12;               // (legacy, unused)
 const MAX_STONE_R = 88;                   // a fused stone caps here (world units)
 const MIN_STONE_R = 9;                    // break a stone below this and it crumbles to grit instead
 // Stone footprint in world units — base size from seed; `o.r` overrides once fused/split.
@@ -202,7 +198,7 @@ const PATCH_MAX = 400;                     // cap objects streamed per viewport 
 
 // ---- spatial grid (in-memory; PRD §7.3 — toward a 10k-object world) ---------
 // A uniform spatial hash over object positions makes the per-tick / per-message
-// neighbour queries (water-flow stone deflection, interest box scans, stack-on-
+// neighbour queries (water-flow stone deflection, interest box scans, fuse-on-
 // place) O(neighbours) instead of O(all objects), so the population can grow
 // toward the PRD's 10k without the tick or a viewport report scanning the whole
 // world. It is PURELY in-memory: built from this.objects on load, maintained as
@@ -310,8 +306,6 @@ export class WorldRoom {
     if (typeof o.heat !== 'number') { o.heat = 0; changed = true; }
     if (typeof o.shedAccum !== 'number') { o.shedAccum = 0; changed = true; }
     if (typeof o.decay !== 'number') { o.decay = 0; changed = true; }
-    if (typeof o.stack !== 'number') { o.stack = 0; changed = true; }
-    if (typeof o.stackBase !== 'string') { o.stackBase = ''; changed = true; }
     // Records from before the last_touched clock start their fade timer NOW, not
     // at created_at — otherwise a long-lived world's stones would all crumble to
     // grit on the first tick after this deploy.
@@ -466,8 +460,7 @@ export class WorldRoom {
       const x = parseFloat(url.searchParams.get('x')), y = parseFloat(url.searchParams.get('y'));
       if (!Number.isFinite(x) || !Number.isFinite(y)) return Response.json({ ok: false, error: 'bad coords' }, { status: 400 });
       const now = Date.now();
-      if (o.family === 'stone') await this.#detachFromStack(o, now); // relocating a stacked stone leaves the stack
-      o.x = x; o.y = y; o.stack = 0; o.stackBase = ''; o.last_touched = now;
+      o.x = x; o.y = y; o.last_touched = now;
       this.#gridUpdate(o);
       this.driftMark.delete(o.id);
       await this.#persist(o);
@@ -587,7 +580,6 @@ export class WorldRoom {
       id: o.id, family: o.family, x: o.x, y: o.y, seed: o.seed,
       handling: o.handling, held: o.held !== '',
       maturity: o.maturity, aged: o.aged, created_at: o.created_at,
-      stack: o.stack || 0, stackBase: o.stackBase || '',
     };
     if (o.kind) p.kind = o.kind; // anomalies + creatures carry their form/kind
     if (o.family === 'creature') p.wanderT0 = o.wanderT0; // the shared wander anchor
@@ -598,8 +590,7 @@ export class WorldRoom {
   #stateMsg(o, now) {
     const m = {
       t: 'object_state', id: o.id, x: o.x, y: o.y, handling: o.handling,
-      held: o.held !== '', maturity: o.maturity, aged: o.aged,
-      stack: o.stack || 0, stackBase: o.stackBase || '', ts: now,
+      held: o.held !== '', maturity: o.maturity, aged: o.aged, ts: now,
       heldBy: o.held !== '' ? o.heldConn : '', // who's carrying it ('' = nobody) — for the felt-presence tether
     };
     if (o.family === 'creature') m.wanderT0 = o.wanderT0; // re-anchor on the wire so a placed creature continues smoothly for everyone
@@ -729,9 +720,6 @@ export class WorldRoom {
       if (o.held === '') {
         // Single-threaded DO -> this read-then-write IS the atomic compare-and-set.
         o.held = m.token; o.heldConn = pid; o.held_at = now; o.last_touched = now;
-        // Lifting a stone out of a stack: anything resting above it loses its
-        // support and scatters; the lifted stone leaves the stack.
-        if (o.family === 'stone') await this.#detachFromStack(o, now);
         await this.#persist(o);
         this.#send(ws, { t: 'pickup_ack', id: o.id, ok: true });
         this.#bcast(this.#stateMsg(o, now), ws);
@@ -810,12 +798,6 @@ export class WorldRoom {
       this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id); this.dirty.delete(o.id);
       await this.state.storage.delete('obj:' + o.id); this.objWrites++;
       this.#bcast({ t: 'object_gone', id: o.id }, null);
-
-    } else if (m.t === 'scatter') {
-      // Tapping a tall stack topples it (no ownership — anyone can knock it down).
-      const o = this.objects.get(m.id);
-      if (!o || o.family !== 'stone') return;
-      await this.#toppleStack(o.stackBase || o.id, now);
 
     } else if (m.t === 'presence_move') {
       this.lastSeen.set(pid, now);
@@ -968,11 +950,11 @@ export class WorldRoom {
 
     // Isolation (PRD §4.3): derived from last_touched — no per-tick write. Warmth
     // refreshes the clock (in memory; persisted at the next checkpoint); a forgotten
-    // free stone crumbles to grit. Anomalies, creatures, held, and stacked (cairn)
-    // objects are tended/alive and never fade — and skipping creatures keeps them
-    // from being dirtied every tick (their last_touched is never read).
+    // free stone crumbles to grit. Anomalies, creatures, and held objects are
+    // tended/alive and never fade — and skipping creatures keeps them from being
+    // dirtied every tick (their last_touched is never read).
     for (const o of this.objects.values()) {
-      if (o.family === 'anomaly' || o.family === 'creature' || o.held !== '' || o.stack > 0) continue;
+      if (o.family === 'anomaly' || o.family === 'creature' || o.held !== '') continue;
       if (this.#heatAt(o.x, o.y) > WARM_EPS) { o.last_touched = now; this.dirty.add(o.id); continue; } // refresh is checkpoint-only
       if (o.family === 'stone' && (now - o.last_touched) >= STONE_FADE_MS && !gone.includes(o)) {
         gone.push(o);
@@ -1088,22 +1070,6 @@ export class WorldRoom {
       this.#bcast({ t: 'object_gone', id: o.id }, null);
     }
 
-    // Tall stacks are unstable: the world topples them on its own, sooner the
-    // taller they are. (Height = top level + 1; the base is level 0.)
-    const tops = new Map();               // baseId -> highest level in the stack
-    for (const o of this.objects.values()) {
-      if (o.family !== 'stone') continue;
-      const baseId = o.stackBase || o.id; // base has stack 0, so o.stack is the level either way
-      tops.set(baseId, Math.max(tops.get(baseId) || 0, o.stack));
-    }
-    for (const [baseId, top] of tops) {
-      const height = top + 1;
-      if (height < STACK_TALL) continue;
-      if (height > STACK_MAX || Math.random() < TOPPLE_CHANCE * (height - STACK_TALL + 1)) {
-        await this.#toppleStack(baseId, now);
-      }
-    }
-
     this.season += SEASON_PER_TICK; // advance the world's own season clock (in memory every tick)
     await this.state.storage.put('meta:season', this.season); // one tiny key; cheap
     // Persist the thermal field only when it's live (or just settled to zero) —
@@ -1182,7 +1148,7 @@ export class WorldRoom {
     return out;
   }
 
-  // A stone dropped OVERLAPPING others — but not centred enough to stack — must not
+  // A stone dropped OVERLAPPING others — but not centred enough to fuse — must not
   // pass THROUGH them. Ease it out to just-touching, biased toward the FRONT (down/+y)
   // so it settles against the near side rather than hiding behind. Each pass resolves
   // the deepest overlap; a few passes clear a small cluster. Fully deterministic (no
@@ -1204,40 +1170,6 @@ export class WorldRoom {
       const ul = Math.hypot(ux, uy) || 1;
       o.x += (ux / ul) * (min - d); o.y += (uy / ul) * (min - d);
     }
-  }
-
-  // Lifting stone `o` out of its stack: everything resting above it scatters.
-  async #detachFromStack(o, now) {
-    const baseId = o.stackBase || o.id, lvl = o.stack || 0;
-    const base = this.objects.get(baseId);
-    const gx = base ? base.x : o.x, gy = base ? base.y : o.y;
-    for (const s of this.objects.values()) {
-      if (s.id !== o.id && (s.stackBase || '') === baseId && (s.stack || 0) > lvl) {
-        await this.#scatterStone(s, gx, gy, now);
-      }
-    }
-    o.stack = 0; o.stackBase = '';
-  }
-
-  // Topple a whole stack: base stays put, everything above it scatters around it.
-  async #toppleStack(baseId, now) {
-    const base = this.objects.get(baseId);
-    const gx = base ? base.x : 0, gy = base ? base.y : 0;
-    const members = [];
-    for (const s of this.objects.values()) if ((s.stackBase || '') === baseId && s.stack > 0) members.push(s);
-    for (const s of members) await this.#scatterStone(s, gx, gy, now);
-    if (base) { base.stack = 0; base.stackBase = ''; } // base was already level 0; nothing to move
-  }
-
-  // Move a stone off a stack to a scattered spot around the stack's ground point.
-  async #scatterStone(s, gx, gy, now) {
-    const ang = Math.random() * Math.PI * 2, dist = 18 + s.stack * 10 + Math.random() * 28;
-    s.x = gx + Math.cos(ang) * dist;
-    s.y = gy + Math.sin(ang) * dist;
-    this.#gridUpdate(s);
-    s.stack = 0; s.stackBase = ''; s.last_touched = now; // a just-scattered stone is freshly disturbed
-    await this.#persist(s);
-    this.#bcast(this.#stateMsg(s, now), null);
   }
 
   // ---- water flow ------------------------------------------------------------
@@ -1335,11 +1267,11 @@ export class WorldRoom {
     return makeRecord(crypto.randomUUID(), 'stone', seed, wx, wy, now);
   }
 
-  // What drifts on the water: free, unheld, unstacked things that aren't stones
-  // (the channel walls) or anomalies, and aren't pre-sprout seeds (those must be
-  // left undisturbed to take root). So mature plants and crystals creep along.
+  // What drifts on the water: free, unheld things that aren't stones (the channel
+  // walls) or anomalies, and aren't pre-sprout seeds (those must be left
+  // undisturbed to take root). So mature plants and crystals creep along.
   #driftEligible(o) {
-    if (o.held !== '' || o.stack > 0) return false;
+    if (o.held !== '') return false;
     if (o.family === 'stone' || o.family === 'anomaly' || o.family === 'creature') return false; // creatures move themselves
     if (o.family === 'seed' && o.maturity < SPROUT) return false;
     return true;

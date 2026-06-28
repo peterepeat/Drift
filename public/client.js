@@ -41,7 +41,6 @@ const DEPTH_TOP = 0.2;                         // objects at the TOP of the scre
 const ANOM_DISSOLVE_MS = 10000, ANOM_FADE_MS = 3000; // hold an anomaly 10s and it fades from your hands
 const ATTEND_MS = 450;                        // long-press dwell before an object is "attended" (PRD §5.2)
 const DBLTAP_MS = 320;                        // two taps on a stone within this BREAK it into smaller stones
-const STACK_STEP_C = 12, STACK_TALL_C = 4;   // stone-stack rise/level + tall-stack-tap-to-scatter (mirror server)
 const GRIT_MS = 500;                          // a worn-out stone's grit scatter lifetime (spec §4.3)
 const POS_EASE_MAX = 24;                       // a position change up to this (a drift hop) eases; larger snaps
 // Mouse-displacement (Wave 6): a moving cursor brushes light things (leaves, seeds)
@@ -376,8 +375,8 @@ function paintAttend(o, t) {
   ctx.beginPath(); ctx.arc(c.x, c.y, rad, 0, Math.PI * 2); ctx.fill();
   ctx.restore();
 }
-// A stack's ground line (the base sits here; each level is stored STACK_STEP up).
-function groundY(o) { return o.y + (o.stack || 0) * STACK_STEP_C; }
+// An object's ground line — where it sits and sorts in the painter's order.
+function groundY(o) { return o.y; }
 // Fliers are airborne, so their DEPTH (paint order) is lifted above ground clutter —
 // they always pass OVER rocks instead of being hidden behind one they overfly. A
 // per-seed amount spreads them through the canopy height, so each reads as weaving
@@ -388,16 +387,6 @@ function flierLift(o) { return 56 + PG.rng((o.seed ^ 0x5f5e10) >>> 0)() * 120; }
 // breath of pseudo-depth; subtle so the pan-time "breathing" stays imperceptible.
 // Stored per object each frame (in the cull pass) so the draw AND the hit-test agree.
 function depthScaleAt(screenY) { return 1 - (1 - clamp(screenY / vh, 0, 1)) * DEPTH_TOP; }
-// Height of the stack a stone belongs to (1 = a lone stone on the ground).
-function stackHeight(o) {
-  const baseId = o.stackBase || o.id;
-  let top = 0;
-  for (const s of objects.values()) {
-    if (s.family !== 'stone') continue;
-    if ((s.stackBase || s.id) === baseId) top = Math.max(top, s.stackBase ? (s.stack || 0) : 0);
-  }
-  return top + 1;
-}
 // Lifted object drawn in screen space so the 10px rise / shadow stay constant
 // regardless of zoom; intrinsic size still scales with zoom via camera.z.
 function drawHeldScreen(o, sx, sy, lift) {
@@ -726,10 +715,9 @@ function hitTest(w) {
     const p = posOf(o);
     const d = Math.hypot(p.x - w.x, p.y - w.y);
     if (d > hitRadius(o)) continue;
-    // The top of a stack wins (lift a cairn from the top); otherwise the object
-    // whose centre is NEAREST the tap — so a small thing directly under the cursor
-    // beats a larger neighbour whose body merely overlaps the point.
-    const score = (o.stack || 0) * 1e6 - d;
+    // The object whose centre is NEAREST the tap wins — so a small thing directly
+    // under the cursor beats a larger neighbour whose body merely overlaps the point.
+    const score = -d;
     if (score > best) { best = score; pick = o; }
   }
   return pick;
@@ -1098,11 +1086,11 @@ function onMessage(raw) {
       if (!o) break; // unknown (already dissolved) — ignore
       const wasHeld = o.held;
       // A small move on a free object is water-drift — ease it (no pop), like growth.
-      // Larger jumps (place, scatter, topple, initial) snap. Held objects always snap.
+      // Larger jumps (place, initial) snap. Held objects always snap.
       const dx = m.x - o.x, dy = m.y - o.y;
       // A free creature's home migrates each tick (goal-seeking, Wave G1) — ALWAYS ease
       // it (never snap), so it drifts smoothly. Others ease a small water-drift hop and
-      // snap larger jumps (place, scatter, initial).
+      // snap larger jumps (place, initial).
       const easeCreature = o.family === 'creature' && !m.held && m.id !== heldId;
       if (easeCreature || (!m.held && m.id !== heldId && dx * dx + dy * dy <= POS_EASE_MAX * POS_EASE_MAX)) {
         o._tx = m.x; o._ty = m.y; // leave o.x/o.y to glide toward the target
@@ -1112,8 +1100,6 @@ function onMessage(raw) {
       o.handling = m.handling; o.held = !!m.held;
       if (m.maturity != null) o.maturity = m.maturity;
       if (m.aged != null) o.aged = m.aged;
-      if (m.stack != null) o.stack = m.stack;
-      if (m.stackBase != null) o.stackBase = m.stackBase;
       if (m.wanderT0 != null) o.wanderT0 = m.wanderT0; // a placed creature re-anchored its wander
       if (m.r != null) o.r = m.r; // a fused stone grew (regens its geometry via stoneGeom)
       o.heldBy = m.heldBy || ''; // who's carrying it (ephemeral pid) — drives the felt-presence tether
@@ -1233,8 +1219,8 @@ function frame(now) {
     o._depthScale = depthScaleAt(s.y); // size-by-depth (Wave K) — used by draw + hit-test
     list.push(o);
   }
-  // painter's depth by ground line, then bottom-up within a stack so the top stone occludes
-  list.sort((a, b) => (a._sortY - b._sortY) || ((a.stack || 0) - (b.stack || 0)) || (a.id < b.id ? -1 : 1));
+  // painter's depth by ground line; ties broken by id for a stable, deterministic order
+  list.sort((a, b) => (a._sortY - b._sortY) || (a.id < b.id ? -1 : 1));
   // attend (§5.2): ease the reveal in/out and bloom it behind the attended object
   attendT += ((attendId ? 1 : 0) - attendT) * 0.14;
   if (attendT > 0.01 && attendId) { const ao = objects.get(attendId); if (ao && !isLifted(ao.id)) paintAttend(ao, attendT); }

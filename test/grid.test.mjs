@@ -1,5 +1,5 @@
 // Spatial grid (PRD §7.3): an in-memory spatial hash makes the per-tick / per-
-// message neighbour queries (flow deflection, interest box scans, stack-on-place)
+// message neighbour queries (flow deflection, interest box scans, fuse-on-place)
 // O(neighbours). It's purely an indexing layer, so it must (a) stay perfectly
 // consistent with the object map across EVERY mutation, and (b) be behaviour-
 // identical. /admin/grid exposes a self-consistency check (gated; inert in prod).

@@ -48,7 +48,7 @@ const a = byId(wf, A), bGone = !byId(wf, B);
 check(bGone, 'the dropped stone is consumed by the fuse (one stone, not a pile)');
 check(a && a.r != null && a.r > rA0, `the target grew into a larger stone (r ${a && a.r ? a.r.toFixed(0) : '?'} > base ${rA0.toFixed(0)})`);
 
-// 1b. a stone dropped OVERLAPPING another (but off-centre, so it won't stack) settles
+// 1b. a stone dropped OVERLAPPING another (but off-centre, so it won't fuse) settles
 // CLEAR — adjacent and touching — instead of passing straight through it.
 const P = pool[13], Q = pool[14], SITE = 3000;
 const w1b = await snap();
