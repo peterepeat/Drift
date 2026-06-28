@@ -196,7 +196,8 @@ const flashes = [];            // brief crystal-dissolution flashes { x, y, star
 const grits = [];              // brief stone-to-grit scatters { x, y, seed, r, start }
 const creatureEvts = [];       // brief birth-shimmer / death-puff cues { x, y, start, birth } — the ecosystem made legible
 const CREATURE_EVT_MS = 760;   // lifetime of a birth/death cue
-let pool = null;               // the world water pool { x, y, r }
+let pool = null;               // the central water pool { x, y, r } (flow + audio anchor)
+let pools = [];                // every pond the world carries (Wave P) — all rendered as water
 let myPid = null;
 let seasonPhase = 0;           // monotonic season clock from the server (feels, never labelled)
 let lastSat = -1;              // last-applied canvas saturation (avoids per-frame style writes)
@@ -1068,6 +1069,7 @@ function onMessage(raw) {
       if (m.season != null) seasonPhase = m.season;
       if (m.now != null) clockSkew = m.now - Date.now(); // lock the creature wander clock to the server's
       if (m.pool) pool = m.pool;
+      if (Array.isArray(m.pools) && m.pools.length) pools = m.pools; else if (pool) pools = [pool]; // every pond (fallback: the central one)
       if (m.bounds && Number.isFinite(m.bounds.x) && Number.isFinite(m.bounds.y)) worldBounds = m.bounds; // before the arrive, so a stranded home is pulled back in
       // Orient on the FIRST arrival only (a reconnect must not yank the camera back):
       // a returning visitor drifts toward their remembered home, a new one toward the cog.
@@ -1203,8 +1205,8 @@ function frame(now) {
     dpr * (vw / 2 - camera.x * camera.z), dpr * (vh / 2 - camera.y * camera.z));
   { const hw = (vw / 2) / camera.z, hh = (vh / 2) / camera.z; // world-anchored terrain tint, beneath water + objects
     paintGroundPatches(ctx, { minX: camera.x - hw, maxX: camera.x + hw, minY: camera.y - hh, maxY: camera.y + hh }); }
-  paintWaterWorld(ctx, pool, animT); // wet sheen beneath the objects
-  if (poolOnScreen()) paintFlow(ctx, pool, animT); // faint flow streaks — only when the pool is in view
+  for (const pd of pools) paintWaterWorld(ctx, pd, animT); // every pond, beneath the objects
+  if (poolOnScreen()) paintFlow(ctx, pool, animT); // faint flow streaks — only the central pool's drift band
   const list = [];
   // Viewport culling: only the objects on (or just off) screen are sorted/drawn.
   // Lifted/held objects are never culled — they're drawn in the screen-space pass.

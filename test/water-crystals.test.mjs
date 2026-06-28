@@ -57,5 +57,23 @@ const fresh = await spawn();
 await tickG(330); // > 300 ticks at CRYSTAL_DECAY=1/300
 check(!crystals(await snap()).find((o) => o.id === fresh.crystal.id), 'a free crystal dissolves after ~its lifespan');
 
+// 6. the world carries multiple ponds; pools[0] is the central pool (== w.pool)
+check(Array.isArray(w0.pools) && w0.pools.length >= 2, `world_state carries multiple ponds (${w0.pools?.length})`);
+check(!!(w0.pools && w0.pools[0] && w0.pools[0].x === w0.pool.x && w0.pools[0].y === w0.pool.y && w0.pools[0].r === w0.pool.r), 'pools[0] is the central pool');
+
+// 7. no trees in water: a seed dropped into a pond is nudged to its bank next tick
+const place = (id, x, y) => fetch(`${base}/admin/place?id=${id}&x=${x}&y=${y}`, { method: 'POST', headers: { 'x-admin-key': 'local-dev-key' } }).then((r) => r.json());
+const pond = (w0.pools && w0.pools[1]) || w0.pool; // a quiet outer pond
+const seedObj = (await snap()).objects.find((o) => o.family === 'seed' && !o.held);
+if (seedObj) {
+  await place(seedObj.id, pond.x, pond.y); // drop it dead-centre of the pond
+  await tickN(1, 2.0);                      // one tick relocates it to the bank
+  const after = (await snap()).objects.find((o) => o.id === seedObj.id);
+  const dist = after ? Math.hypot(after.x - pond.x, after.y - pond.y) : -1;
+  check(after && dist > pond.r, `a seed in a pond is nudged to its bank (dist ${dist.toFixed(0)} > r ${pond.r})`);
+} else {
+  check(false, 'a seed exists to test pond relocation');
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

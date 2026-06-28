@@ -149,21 +149,24 @@ export function paintSky(ctx, w, h, phase) {
 export const paintGrade = PG.paintGrade;
 
 // ---- water -----------------------------------------------------------------
-// A world-anchored pool of wet sheen (drawn in the world transform, beneath
-// objects). Pale cool grey-blue (#a8b8c4), with a slow breathing shimmer.
+// A world-anchored pond of water (drawn in the world transform, beneath objects).
+// A real, calm BLUE (Wave P — ponds read as water, not a faint grey sheen), with a
+// slow breathing shimmer. Used for every pond the world carries.
+const WATER_BLUE = '#2f78c0';  // pond body — saturated enough to read blue over the warm glow
+const WATER_DEEP = '#1f4f88';  // a deeper centre so the pond has body, not just a flat tint
 export function paintWaterWorld(ctx, pool, t) {
   if (!pool) return;
   const { x, y, r } = pool;
   const g = ctx.createRadialGradient(x, y, 0, x, y, r);
-  g.addColorStop(0, PG.rgba(PALETTE.waterCore, 0.16));
-  g.addColorStop(0.7, PG.rgba(PALETTE.waterCore, 0.06));
-  g.addColorStop(1, PG.rgba(PALETTE.waterCore, 0));
+  g.addColorStop(0, PG.rgba(WATER_DEEP, 0.55));
+  g.addColorStop(0.55, PG.rgba(WATER_BLUE, 0.34));
+  g.addColorStop(1, PG.rgba(WATER_BLUE, 0));
   ctx.save();
   ctx.fillStyle = g;
   ctx.beginPath(); ctx.ellipse(x, y, r, r * 0.7, 0, 0, Math.PI * 2); ctx.fill();
   const b = 0.5 + 0.5 * Math.sin(t * 0.4); // slow shimmer
   ctx.globalCompositeOperation = 'lighter';
-  ctx.strokeStyle = PG.rgba('#cfe0ea', 0.04 + 0.05 * b);
+  ctx.strokeStyle = PG.rgba('#bfe2f2', 0.05 + 0.06 * b);
   ctx.lineWidth = 2;
   ctx.beginPath(); ctx.ellipse(x, y, r * (0.5 + 0.28 * b), r * 0.7 * (0.5 + 0.28 * b), 0, 0, Math.PI * 2); ctx.stroke();
   ctx.restore();

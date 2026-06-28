@@ -109,10 +109,33 @@ const ANOMALY_RADIUS = 200;               // world units an anomaly influences
 const ANOMALY_GROW_BOOST = 0.02;          // extra maturity/tick for seeds near an anomaly
 const ANOMALY_AGE_SLOW = 0.4;             // aging multiplier near an anomaly (slows decay)
 
-// ---- water & crystals (Family 3) -------------------------------------------
-// Water pools in the world's low centre (where objects accumulate). Crystalline
-// formations grow at the pool's edge and slowly dissolve in a brief flash.
-const POOL = { x: 0, y: 0, r: 350 };      // the world's water pool (world units)
+// ---- water, ponds & crystals (Family 3) ------------------------------------
+// Water gathers in pools. The CENTRAL pool sits at the world's low centre (where
+// objects accumulate); a few smaller PONDS are scattered around it (Wave P).
+// Crystalline formations grow at the central pool's edge and slowly dissolve in a
+// brief flash. Plants never take root IN water — a seed that lands in a pond is
+// nudged to its bank (#shed + a per-tick relocation pass).
+const POOLS = [
+  { x: 0, y: 0, r: 350 },                  // the central pool — flow + crystals anchor here (POOL)
+  { x: -1180, y: 640, r: 250 },
+  { x: 1020, y: -760, r: 210 },
+  { x: 520, y: 1180, r: 230 },
+];
+const POOL = POOLS[0];                      // the central/primary pool (world_state.pool; flow & crystal anchor)
+const POND_BANK_PAD = 16;                   // a seed that lands in a pond settles this far past its rim
+const POND_RELOCATE_MAX = 64;               // cap seeds nudged out of water per tick (bounds the broadcast burst)
+// The pond (if any) containing world point (x,y), within its rim × (1+margin).
+function poolContaining(x, y, margin = 0) {
+  for (const p of POOLS) { const dx = x - p.x, dy = y - p.y, rr = p.r * (1 + margin); if (dx * dx + dy * dy <= rr * rr) return p; }
+  return null;
+}
+// The nearest point just OUTSIDE pond p's rim from (x,y) — where an in-water seed settles.
+function bankPoint(p, x, y, seed = 0) {
+  let dx = x - p.x, dy = y - p.y, d = Math.hypot(dx, dy);
+  if (d < 1) { const a = rng(seed >>> 0)() * Math.PI * 2; dx = Math.cos(a); dy = Math.sin(a); d = 1; } // dead-centre → deterministic direction
+  const rr = p.r + POND_BANK_PAD;
+  return { x: p.x + (dx / d) * rr, y: p.y + (dy / d) * rr };
+}
 const CRYSTAL_CAP = 10;                    // at most this many crystals at once
 const CRYSTAL_SPAWN_CHANCE = 0.05;        // per tick, while under the cap
 const CRYSTAL_DECAY = 1 / 300;            // decay/tick (~5h to dissolve) — slow, impermanent
@@ -603,7 +626,7 @@ export class WorldRoom {
     // #inBox); the box-less full world stays a plain scan (old / test clients).
     const src = box ? this.#gridQueryBox(box) : this.objects.values();
     for (const o of src) { if (box && !this.#inBox(o, box)) continue; objects.push(this.#pub(o)); }
-    return { t: 'world_state', now: Date.now(), pid, season: this.season, pool: POOL, cog: { x: this.cog.x, y: this.cog.y }, bounds: this.bounds || this.#computeBounds(), objects };
+    return { t: 'world_state', now: Date.now(), pid, season: this.season, pool: POOL, pools: POOLS, cog: { x: this.cog.x, y: this.cog.y }, bounds: this.bounds || this.#computeBounds(), objects };
   }
   // Half-extents of the whole object field (every object, not just the box) — the
   // client clamps its camera here so it can never wander far into empty space. A
@@ -612,6 +635,7 @@ export class WorldRoom {
   #computeBounds() {
     let bx = 0, by = 0;
     for (const o of this.objects.values()) { const ax = Math.abs(o.x), ay = Math.abs(o.y); if (ax > bx) bx = ax; if (ay > by) by = ay; }
+    for (const p of POOLS) { const ax = Math.abs(p.x) + p.r, ay = Math.abs(p.y) + p.r; if (ax > bx) bx = ax; if (ay > by) by = ay; } // every pond stays reachable
     return { x: Math.max(900, bx), y: Math.max(900, by) };
   }
   // Interest box from a viewport centre + half-extents, widened by INTEREST_MARGIN.
@@ -1053,6 +1077,24 @@ export class WorldRoom {
     // (→ gone, or a routed flee → changed). Self-balancing (cap + per-species floor).
     this.#socialCreatures(now, spawned, gone, changed);
 
+    // No trees in water (Wave P): any free seed/plant sitting in a pond is nudged to
+    // its bank — catches seeds that drifted in and any caught inside a pond's footprint
+    // (e.g. a new pond placed over existing growth). Capped per tick; broadcast +
+    // dirtied via `changed`, so it rides the checkpoint with no per-tick write.
+    let relocated = 0;
+    for (const o of this.objects.values()) {
+      if (relocated >= POND_RELOCATE_MAX) break;
+      if (o.family !== 'seed' || o.held !== '') continue;
+      const p = poolContaining(o.x, o.y);
+      if (!p) continue;
+      const b = bankPoint(p, o.x, o.y, o.seed);
+      o.x = b.x; o.y = b.y;
+      this.#gridUpdate(o);
+      this.driftMark.delete(o.id);
+      if (!changed.includes(o)) changed.push(o);
+      relocated++;
+    }
+
     // Broadcast every threshold-crossing for smooth visuals, but DON'T write per
     // crossing: mark it dirty and let the periodic checkpoint persist it (the
     // broadcast/persist decouple — write rate tracks the checkpoint cadence, not the
@@ -1280,8 +1322,10 @@ export class WorldRoom {
   #shed(parent, now) {
     const ang = Math.random() * Math.PI * 2;
     const dist = 55 + Math.random() * 105; // shed further out so growth doesn't re-clump the world
-    const x = parent.x + Math.cos(ang) * dist;
-    const y = parent.y + Math.sin(ang) * dist;
+    let x = parent.x + Math.cos(ang) * dist;
+    let y = parent.y + Math.sin(ang) * dist;
+    const inPond = poolContaining(x, y); // seeds never take root in water — settle on the bank
+    if (inPond) { const b = bankPoint(inPond, x, y); x = b.x; y = b.y; }
     const seed = (Math.random() * 4294967296) >>> 0;
     return makeSeedRecord(crypto.randomUUID(), seed, x, y, now);
   }
