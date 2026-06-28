@@ -67,9 +67,22 @@ export function fishR(seed) {
 // A small living thing in the world's muted palette. Heading `ang` orients a
 // crawler along its motion; `t` (seconds, local is fine) animates legs/wings so it
 // reads as alive even while its slow drift is barely moving. Form is from `seed`.
-export function drawCreature(ctx, seed, kind, cx, cy, t, ang = 0) {
+export function drawCreature(ctx, seed, kind, cx, cy, t, ang = 0, glowHue = null) {
   const r = rng(seed >>> 0);
   const size = (kind === 'flier' ? 0.85 : 1) * (9.2 + r() * 5.2); // body half-length, world units — ~2× so creatures read clearly
+  if (glowHue != null) { // anomaly glow buff — a bright, pulsing rainbow halo (touched by wonder)
+    const pulse = 0.65 + 0.35 * Math.sin(t * 3.5 + (seed & 7));
+    const rad = size * (2.8 + 0.6 * pulse);
+    ctx.save(); ctx.globalCompositeOperation = 'lighter';
+    const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, rad);
+    g.addColorStop(0, `hsla(${glowHue},98%,80%,${0.95 * pulse})`);
+    g.addColorStop(0.3, `hsla(${glowHue},95%,62%,${0.5 * pulse})`);
+    g.addColorStop(1, `hsla(${glowHue},95%,60%,0)`);
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, rad, 0, TAU); ctx.fill();
+    ctx.fillStyle = `hsla(${glowHue},100%,88%,${0.6 * pulse})`; // a bright core
+    ctx.beginPath(); ctx.arc(cx, cy, size * 0.7, 0, TAU); ctx.fill();
+    ctx.restore();
+  }
   const bodyHue = mix('#2b2620', r() < 0.5 ? '#3a2f24' : '#26303a', r()); // warm charcoal ↔ cool
   const sheen = lighten(bodyHue, 0.16);
   ctx.save();

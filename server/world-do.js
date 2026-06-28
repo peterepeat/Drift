@@ -114,8 +114,11 @@ const ANOMALY_AGE_SLOW = 0.4;             // aging multiplier near an anomaly (s
 // mature tree; geometric kinds BURST a grown tree into a scatter of saplings.
 const ANOM_TOUCH_R = 76;                   // a drop within this of the other object triggers the power
 const ANOM_BURST_MIN = 3, ANOM_BURST_MAX = 5; // saplings a burst scatters
-// kind → power. point/breath (light/breath = life) ripen; prism/rotor (geometry/spin) burst.
+// kind → PLANT power. point/breath (light/breath = life) ripen; prism/rotor (geometry/spin) burst.
 const ANOMALY_POWER = { point: 'ripen', breath: 'ripen', prism: 'burst', rotor: 'burst' };
+// Drop an anomaly on a CREATURE (or a creature on an anomaly) and it gets a buff: a
+// rainbow GLOW + 2× speed for a few minutes. (A heart kind will TAME instead — later.)
+const GLOW_MS = 180000;                    // a glow buff lasts ~3 min
 
 // ---- water, ponds & crystals (Family 3) ------------------------------------
 // Water gathers in pools. The CENTRAL pool sits at the world's low centre (where
@@ -641,6 +644,7 @@ export class WorldRoom {
     };
     if (o.kind) p.kind = o.kind; // anomalies + creatures carry their form/kind
     if (o.wanderT0 != null) p.wanderT0 = o.wanderT0; // the shared wander anchor (creatures + fish)
+    if (o.glowUntil) { p.glowUntil = o.glowUntil; p.glowHue = o.glowHue; } // anomaly glow buff (rainbow + 2× speed)
     if (o.family === 'stone' && o.r != null) p.r = o.r; // a fused/split stone's stored radius (shape still from seed)
     if (o.held !== '') p.heldBy = o.heldConn; // the holder's EPHEMERAL pid (same id presence carries) — links a carried thing to its carrier; never the token
     return p;
@@ -652,6 +656,7 @@ export class WorldRoom {
       heldBy: o.held !== '' ? o.heldConn : '', // who's carrying it ('' = nobody) — for the felt-presence tether
     };
     if (o.wanderT0 != null) m.wanderT0 = o.wanderT0; // re-anchor on the wire so a placed creature/fish continues smoothly for everyone
+    if (o.glowUntil) { m.glowUntil = o.glowUntil; m.glowHue = o.glowHue; } // anomaly glow buff
     if (o.family === 'stone' && o.r != null) m.r = o.r;   // a fused stone broadcasts its grown radius
     return m;
   }
@@ -822,6 +827,10 @@ export class WorldRoom {
           }
           return;
         }
+        // Dropped onto an anomaly → a buff (glow + 2× speed). o falls through to the
+        // generic persist/broadcast below, which carries the buff fields to everyone.
+        const an = this.#anomalyNear(o.x, o.y);
+        if (an) this.#buffCreature(o, an.kind, now);
       }
       // Disturbing a pre-sprout seed resets its growth — it must be left be to take.
       if (o.family === 'seed' && o.maturity < SPROUT) { o.maturity = 0; o.heat = 0; }
@@ -829,11 +838,14 @@ export class WorldRoom {
       // anomaly, and the anomaly's power works on the plant (by kind). The anomaly
       // itself is never consumed — it persists, a reusable wonder.
       if (o.family === 'anomaly') {
-        const target = this.#plantNear(o.x, o.y, o);
-        if (target) {
+        const target = this.#anomalyTargetNear(o.x, o.y, o);
+        if (target && target.family === 'seed') {
           const power = ANOMALY_POWER[o.kind] || 'ripen';
           if (power === 'burst') { if ((target.maturity || 0) >= SPROUT) await this.#burstPlant(target, now); }
           else if ((target.maturity || 0) < 1 || (target.aged || 0) > 0) await this.#ripenPlant(target, now);
+        } else if (target && target.family === 'creature') { // a creature beneath it → buff (glow + 2× speed)
+          this.#buffCreature(target, o.kind, now);
+          await this.#persist(target); this.#bcast(this.#stateMsg(target, now), null);
         }
         // the anomaly settles at its spot — falls through to the persist/broadcast below
       } else if (o.family === 'seed') {
@@ -1304,6 +1316,23 @@ export class WorldRoom {
       if (d <= ANOM_TOUCH_R && d < best) { best = d; target = o; }
     }
     return target;
+  }
+  // The nearest free PLANT or CREATURE within ANOM_TOUCH_R of (x,y) — what an anomaly
+  // dropped here would work its power on (ripen/burst a plant; glow/tame a creature).
+  #anomalyTargetNear(x, y, self) {
+    let target = null, best = Infinity;
+    for (const o of this.#gridNear(x, y, ANOM_TOUCH_R, (o) => (o.family === 'seed' || o.family === 'creature') && o.held === '')) {
+      if (o === self) continue;
+      const d = Math.hypot(o.x - x, o.y - y);
+      if (d <= ANOM_TOUCH_R && d < best) { best = d; target = o; }
+    }
+    return target;
+  }
+  // Apply a creature buff by anomaly kind: a rainbow GLOW + 2× speed for a while.
+  // (Sets fields only — caller persists/broadcasts.) Returns the buff applied.
+  #buffCreature(c, kind, now) {
+    c.glowUntil = now + GLOW_MS; c.glowHue = Math.floor(Math.random() * 360);
+    return 'glow';
   }
   // The nearest free ANOMALY within ANOM_TOUCH_R of (x,y).
   #anomalyNear(x, y) {

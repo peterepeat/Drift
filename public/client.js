@@ -260,10 +260,23 @@ function objRadius(o) {
 // its home the instant it's placed — then drifts out on a new route (no snap). Heading
 // is the wander's near-future direction (the anchor cancels in the delta). Same
 // (seed, kind, home, wanderT0, clock) → same point on every client.
+const GLOW_SEC = 180; // glow-buff duration in seconds (mirror server GLOW_MS)
+// Warp a creature's wander time: 2× during a glow buff. Continuous at both edges of the
+// buff (no jump) — after it ends the wander simply carries a constant phase offset.
+function creatureWarpT(o, t) {
+  if (!o.glowUntil) return t;
+  const gu = o.glowUntil / 1000, gs = gu - GLOW_SEC;
+  if (t <= gs) return t;
+  if (t < gu) return gs + (t - gs) * 2;       // 2× speed while glowing
+  return gs + GLOW_SEC * 2 + (t - gu);         // after: normal speed, phase-shifted (invisible)
+}
+// Is this creature currently glowing? → its rainbow hue, else null.
+function glowHueOf(o) { return (o.glowUntil && (Date.now() + clockSkew) < o.glowUntil) ? (o.glowHue || 0) : null; }
 function creaturePos(o) {
   const t = syncedT(), seed = o.seed >>> 0, kind = o.family === 'fish' ? 'fish' : (o.kind || 'crawler');
   const t0 = (o.wanderT0 || 0) / 1000;
-  const w = wanderAt(seed, kind, t), a = wanderAt(seed, kind, t0), w2 = wanderAt(seed, kind, t + 0.2);
+  const tg = creatureWarpT(o, t), tg2 = creatureWarpT(o, t + 0.2);
+  const w = wanderAt(seed, kind, tg), a = wanderAt(seed, kind, t0), w2 = wanderAt(seed, kind, tg2);
   return { x: o.x + (w.x - a.x), y: o.y + (w.y - a.y), ang: Math.atan2(w2.y - w.y, w2.x - w.x) };
 }
 // Where an object is drawn / tested THIS frame: a free creature wanders; everything
@@ -289,7 +302,7 @@ function paintObject(o, cx, cy, ang = 0) {
   if (o.family === 'stone') { PG.drawStone(ctx, stoneGeom(o), cx, cy); return; }
   if (o.family === 'anomaly') { PG.drawAnomaly(ctx, o.kind || 'breath', animT, cx, cy, anomalyR(o)); return; }
   if (o.family === 'crystal') { PG.drawCrystal(ctx, o.seed >>> 0, cx, cy, crystalR(o), animT); return; }
-  if (o.family === 'creature') { drawCreature(ctx, o.seed >>> 0, o.kind || 'crawler', cx, cy, animT, ang); return; }
+  if (o.family === 'creature') { drawCreature(ctx, o.seed >>> 0, o.kind || 'crawler', cx, cy, animT, ang, glowHueOf(o)); return; }
   if (o.family === 'fish') { drawFish(ctx, o.seed >>> 0, cx, cy, animT, ang); return; }
   const mat = shownMat(o), aged = shownAged(o);
   if (mat < SPROUT_C) { PG.drawSeed(ctx, o.seed >>> 0, cx, cy, seedScale(o.seed) * (1 + mat * 1.4)); return; }
@@ -1138,6 +1151,7 @@ function onMessage(raw) {
       if (m.maturity != null) o.maturity = m.maturity;
       if (m.aged != null) o.aged = m.aged;
       if (m.wanderT0 != null) o.wanderT0 = m.wanderT0; // a placed creature re-anchored its wander
+      if (m.glowUntil != null) { o.glowUntil = m.glowUntil; o.glowHue = m.glowHue; } // anomaly glow buff
       if (m.r != null) o.r = m.r; // a fused stone grew (regens its geometry via stoneGeom)
       o.heldBy = m.heldBy || ''; // who's carrying it (ephemeral pid) — drives the felt-presence tether
       if (m.id !== heldId) {

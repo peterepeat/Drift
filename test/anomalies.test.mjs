@@ -92,5 +92,14 @@ check(seedsAfter > seedsBefore, `the burst scattered saplings (seeds ${seedsBefo
 // 9. the anomaly is NOT consumed by using its power (reusable wonder)
 check(!!anomalies(await snap()).find((a) => a.id === anR.anomaly.id), 'an anomaly persists after working its power (reusable)');
 
+// 10. GLOW: an anomaly dropped on a creature buffs it (rainbow glow + 2× speed)
+const spawnCreature = (x, y, kind) => fetch(`${base}/admin/creature?x=${x}&y=${y}&kind=${kind}`, { method: 'POST', headers: { 'x-admin-key': 'local-dev-key' } }).then((r) => r.json());
+const cr = await spawnCreature(5000, 5000, 'crawler');         // a quiet spot, far from any pond
+const anG = await spawnK(8000, 5000, 'rotor');
+await drop(anG.anomaly.id, 5000, 5000);                        // carry the anomaly onto the creature
+const afterC = (await snap()).objects.find((o) => o.id === cr.creature.id);
+check(!!(afterC && typeof afterC.glowUntil === 'number' && afterC.glowUntil > Date.now() && typeof afterC.glowHue === 'number'),
+  `an anomaly on a creature glows it (glowing=${!!afterC?.glowUntil}, hue=${afterC?.glowHue})`);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
