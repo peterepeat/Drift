@@ -1209,8 +1209,7 @@ function frame(now) {
   // objects (world space) — single matrix folds dpr + zoom + pan
   ctx.setTransform(dpr * camera.z, 0, 0, dpr * camera.z,
     dpr * (vw / 2 - camera.x * camera.z), dpr * (vh / 2 - camera.y * camera.z));
-  { const hw = (vw / 2) / camera.z, hh = (vh / 2) / camera.z; // world-anchored terrain tint, beneath water + objects
-    paintGroundPatches(ctx, { minX: camera.x - hw, maxX: camera.x + hw, minY: camera.y - hh, maxY: camera.y + hh }); }
+  paintGroundPatches(ctx); // world-anchored terrain tint (precomputed buffer, one blit), beneath water + objects
   for (const pd of pools) paintWaterWorld(ctx, pd, animT); // every pond, beneath the objects
   if (poolOnScreen()) paintFlow(ctx, pool, animT); // faint flow streaks — only the central pool's drift band
   const list = [];

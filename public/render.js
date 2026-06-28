@@ -62,36 +62,43 @@ export function paintNoise(ctx, w, h, seed) {
   ctx.drawImage(noiseCanvas(w, h, seed), 0, 0, w, h); ctx.restore();
 }
 
-// ---- ground terrain variation (world-anchored; Wave O) ---------------------
-// The land isn't a uniform brown: a slow low-frequency field tints broad regions
-// warmer (sandy) or cooler (mossy green) over the dark base. WORLD-anchored (drawn
-// in the world transform, so the terrain stays put as you pan — a property of the
-// LAND, not the screen) and beneath water + objects. Deliberately SUBTLE so it
-// reads as place, never pattern, and never competes with what's in your hands.
-const GP_CELL = 230;          // world units between patch centres
-const GP_RADIUS = 260;        // soft blob radius (> cell, so neighbours overlap → blend)
-const GP_SAND = '#b59a63';    // warm sandy tint (dusty, not bright)
-const GP_MOSS = '#5f8040';    // cool mossy-green tint
-let _gpNoise = null;
-export function paintGroundPatches(ctx, box) {
-  if (!_gpNoise) _gpNoise = PG.makeNoise(0x5a17d); // its own field, distinct from the value-noise overlay
-  const cx0 = Math.floor(box.minX / GP_CELL), cx1 = Math.floor(box.maxX / GP_CELL);
-  const cy0 = Math.floor(box.minY / GP_CELL), cy1 = Math.floor(box.maxY / GP_CELL);
-  ctx.save();
-  // Normal compositing (not additive): the tint COLOURS the ground toward sand /
-  // moss, so a region reads as different earth — not a glow over the same earth.
-  for (let cx = cx0; cx <= cx1; cx++) for (let cy = cy0; cy <= cy1; cy++) {
-    const v = PG.fbm(_gpNoise, cx * 0.45, cy * 0.45, 3); // terrain value [-1,1] at this cell
+// ---- ground terrain variation (world-anchored; Wave O, reworked) -----------
+// The land isn't a uniform brown: a slow low-frequency noise field tints it warmer
+// (sandy) or cooler (mossy) in LARGE, SOFT, CONTINUOUS regions. Rendered ONCE to a
+// small offscreen buffer (organic boundaries come free from upscaling the noise — no
+// discs, no grid) and blitted each frame with ONE drawImage in the world transform.
+// So it's world-anchored AND costs nothing per-frame regardless of zoom (the old
+// per-cell radial-gradient loop was the pan/zoom perf regression). Deliberately
+// SUBTLE — a breath of place, never pattern.
+const GP_WORLD_HALF = 8000;    // the buffer covers ±this around origin (world units)
+const GP_RES = 256;            // buffer is GP_RES² px, upscaled smooth over the world span
+const GP_SAND = [181, 154, 99]; // warm sandy tint (rgb)
+const GP_MOSS = [96, 128, 66];  // cool mossy tint (rgb)
+const GP_THRESH = 0.20;        // only stronger noise tints — leaves big neutral areas (fewer, larger regions)
+const GP_ALPHA = 0.13;         // peak tint opacity — subtle
+let _gpCanvas = null;
+function gpCanvas() {
+  if (_gpCanvas) return _gpCanvas;
+  const cv = document.createElement('canvas'); cv.width = GP_RES; cv.height = GP_RES;
+  const cx = cv.getContext('2d'); const img = cx.createImageData(GP_RES, GP_RES);
+  const noise = PG.makeNoise(0x5a17d);
+  const span = GP_WORLD_HALF * 2;
+  for (let py = 0; py < GP_RES; py++) for (let px = 0; px < GP_RES; px++) {
+    const wx = -GP_WORLD_HALF + (px / GP_RES) * span, wy = -GP_WORLD_HALF + (py / GP_RES) * span;
+    const v = PG.fbm(noise, wx * 0.00052, wy * 0.00052, 4); // low frequency → large regions
     const mag = Math.abs(v);
-    if (mag < 0.08) continue;                            // neutral ground — leave it
-    const a = Math.min(0.34, (mag - 0.08) * 0.52);       // perceptible regions, still calm; capped
-    if (a <= 0.003) continue;
-    const wx = cx * GP_CELL, wy = cy * GP_CELL;
-    const g = ctx.createRadialGradient(wx, wy, 0, wx, wy, GP_RADIUS);
-    g.addColorStop(0, PG.rgba(v > 0 ? GP_SAND : GP_MOSS, a));
-    g.addColorStop(1, PG.rgba(v > 0 ? GP_SAND : GP_MOSS, 0));
-    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(wx, wy, GP_RADIUS, 0, Math.PI * 2); ctx.fill();
+    const i = (py * GP_RES + px) * 4;
+    const rgb = v > 0 ? GP_SAND : GP_MOSS;
+    const a = mag > GP_THRESH ? Math.min(1, (mag - GP_THRESH) / 0.45) * GP_ALPHA : 0; // smooth ramp from neutral
+    img.data[i] = rgb[0]; img.data[i + 1] = rgb[1]; img.data[i + 2] = rgb[2]; img.data[i + 3] = a * 255;
   }
+  cx.putImageData(img, 0, 0);
+  _gpCanvas = cv; return cv;
+}
+export function paintGroundPatches(ctx) {
+  ctx.save();
+  ctx.imageSmoothingEnabled = true; // bilinear upscale → soft organic boundaries (no discs)
+  ctx.drawImage(gpCanvas(), -GP_WORLD_HALF, -GP_WORLD_HALF, GP_WORLD_HALF * 2, GP_WORLD_HALF * 2);
   ctx.restore();
 }
 
