@@ -37,6 +37,10 @@ run_node() {
 boot() {
   pkill -9 -f "wrangler dev" 2>/dev/null || true
   pkill -9 -f workerd 2>/dev/null || true
+  # wrangler dev spawns long-lived `esbuild --service` children that ORPHAN when
+  # wrangler is SIGKILLed — kill them too, or they pile up across suites/runs and
+  # peg the CPU (dozens of idle esbuild @ ~1-2% each). Scoped to this project.
+  pkill -9 -f "$PWD/node_modules/@esbuild" 2>/dev/null || true
   sleep 3
   rm -rf .wrangler/state
   WRANGLER_SEND_METRICS=false npx wrangler dev --port "$PORT" --ip 127.0.0.1 > "$LOG" 2>&1 &
@@ -68,4 +72,5 @@ for suite in protocol interest grid checkpoint decouple growth seasons anomalies
 done
 pkill -9 -f "wrangler dev" 2>/dev/null || true
 pkill -9 -f workerd 2>/dev/null || true
+pkill -9 -f "$PWD/node_modules/@esbuild" 2>/dev/null || true # don't leave orphaned esbuild services behind
 [ "$fail" = 0 ] && echo "ALL SUITES PASSED" || { echo "SOME SUITES FAILED"; exit 1; }
