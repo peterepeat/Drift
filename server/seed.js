@@ -81,6 +81,17 @@ export const makeCrystalRecord = (id, seed, x, y, now) => {
 // compute (see public/creatures.js). Pickable like anything else; placed, its home
 // moves there. `kind` selects crawler vs flier.
 export const CREATURE_KINDS = ['crawler', 'flier'];
+
+// Fish (Family 6): they swim within a pond (Wave P/Q). Like creatures, the record
+// holds only existence + a HOME (x/y inside the pond); the live position is a
+// deterministic, BOUNDED wander the clients compute (public/creatures.js), so a fish
+// never leaves the water and costs the always-ticking world nothing to keep moving.
+export const makeFishRecord = (id, seed, x, y, now) => {
+  const r = makeRecord(id, 'fish', seed, x, y, now);
+  r.wanderT0 = now;
+  return r;
+};
+
 export const makeCreatureRecord = (id, seed, kind, x, y, now) => {
   const r = makeRecord(id, 'creature', seed, x, y, now);
   r.kind = kind;

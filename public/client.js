@@ -8,7 +8,7 @@ import { paintGround, paintGlows, paintNoise, paintGroundPatches, paintPresence,
 import { inViewport, CULL_MARGIN } from './cull.js';
 import { Audio } from './audio.js';
 import { flingStep, ema, nudge, spring } from './physics.js';
-import { wanderAt, drawCreature, creatureR } from './creatures.js';
+import { wanderAt, drawCreature, creatureR, drawFish, fishR } from './creatures.js';
 
 // ---- tuning constants -------------------------------------------------------
 const Z0 = 1.0, ZMIN = 0.2, ZMAX = 4.0;     // zoom = CSS px per world unit
@@ -193,6 +193,7 @@ const objects = new Map();     // id -> { id, family, x, y, seed, handling, held
 const presences = new Map();   // pid -> { x, y, born, last, gone }
 const lifts = new Map();       // id -> lift animation state
 const flashes = [];            // brief crystal-dissolution flashes { x, y, start }
+const ripples = [];            // brief water ripples — a bug dropped in a pond becomes fish food { x, y, start }
 const grits = [];              // brief stone-to-grit scatters { x, y, seed, r, start }
 const creatureEvts = [];       // brief birth-shimmer / death-puff cues { x, y, start, birth } — the ecosystem made legible
 const CREATURE_EVT_MS = 760;   // lifetime of a birth/death cue
@@ -247,6 +248,7 @@ function objRadius(o) {
   if (o.family === 'anomaly') return anomalyR(o);
   if (o.family === 'crystal') return crystalR(o);
   if (o.family === 'creature') return creatureR(o.seed >>> 0, o.kind || 'crawler');
+  if (o.family === 'fish') return fishR(o.seed >>> 0);
   const mat = shownMat(o);
   return mat < SPROUT_C ? 10 * seedScale(o.seed) : 10 + mat * 26; // plants present a larger tap target
 }
@@ -256,7 +258,7 @@ function objRadius(o) {
 // is the wander's near-future direction (the anchor cancels in the delta). Same
 // (seed, kind, home, wanderT0, clock) → same point on every client.
 function creaturePos(o) {
-  const t = syncedT(), seed = o.seed >>> 0, kind = o.kind || 'crawler';
+  const t = syncedT(), seed = o.seed >>> 0, kind = o.family === 'fish' ? 'fish' : (o.kind || 'crawler');
   const t0 = (o.wanderT0 || 0) / 1000;
   const w = wanderAt(seed, kind, t), a = wanderAt(seed, kind, t0), w2 = wanderAt(seed, kind, t + 0.2);
   return { x: o.x + (w.x - a.x), y: o.y + (w.y - a.y), ang: Math.atan2(w2.y - w.y, w2.x - w.x) };
@@ -264,7 +266,7 @@ function creaturePos(o) {
 // Where an object is drawn / tested THIS frame: a free creature wanders; everything
 // else sits at its true position plus any local cursor-displacement offset.
 function posOf(o) {
-  if (o.family === 'creature' && !o.held && o.id !== heldId) return creaturePos(o);
+  if ((o.family === 'creature' || o.family === 'fish') && !o.held && o.id !== heldId) return creaturePos(o);
   return { x: o.x + (o._ox || 0), y: o.y + (o._oy || 0) };
 }
 // The biggest trees have ROOTED — they're immovable landmarks (never grabbed; you
@@ -285,6 +287,7 @@ function paintObject(o, cx, cy, ang = 0) {
   if (o.family === 'anomaly') { PG.drawAnomaly(ctx, o.kind || 'breath', animT, cx, cy, anomalyR(o)); return; }
   if (o.family === 'crystal') { PG.drawCrystal(ctx, o.seed >>> 0, cx, cy, crystalR(o), animT); return; }
   if (o.family === 'creature') { drawCreature(ctx, o.seed >>> 0, o.kind || 'crawler', cx, cy, animT, ang); return; }
+  if (o.family === 'fish') { drawFish(ctx, o.seed >>> 0, cx, cy, animT, ang); return; }
   const mat = shownMat(o), aged = shownAged(o);
   if (mat < SPROUT_C) { PG.drawSeed(ctx, o.seed >>> 0, cx, cy, seedScale(o.seed) * (1 + mat * 1.4)); return; }
   if (mat >= BIG_TREE_MAT) drawRoots(ctx, o.seed >>> 0, cx, cy, mat); // roots only on the biggest (rooted) plants
@@ -300,7 +303,7 @@ function paintObject(o, cx, cy, ang = 0) {
 // for a high upper-left light; plants root at their base, compact things sit below
 // centre. Anomalies (luminous, floating) and fliers (airborne) cast none/less.
 function paintGroundShadow(o, cx, cy, rad) {
-  if (o.family === 'anomaly') return;
+  if (o.family === 'anomaly' || o.family === 'fish') return; // fish are under the water — no ground shadow
   const rooted = o.family === 'seed' && shownMat(o) >= SPROUT_C;   // a plant roots at cy; everything else sits below centre
   const flier = o.family === 'creature' && (o.kind === 'flier');
   const baseY = rooted ? cy + rad * 0.12 : cy + rad * 0.42;
@@ -340,7 +343,7 @@ function drawRoots(ctx, seed, cx, cy, mat) {
 }
 function drawObjectWorld(o) {
   let cx, cy, ang = 0;
-  if (o.family === 'creature') { const p = creaturePos(o); cx = p.x; cy = p.y; ang = p.ang; } // live wander + heading
+  if (o.family === 'creature' || o.family === 'fish') { const p = creaturePos(o); cx = p.x; cy = p.y; ang = p.ang; } // live wander + heading
   else { cx = o.x + (o._ox || 0); cy = o.y + (o._oy || 0); } // + local cursor-displacement (Wave 6)
   const ds = o._depthScale || 1; // size-by-depth (Wave K) — set in the cull pass
   paintGroundShadow(o, cx, cy, objRadius(o) * ds);
@@ -499,7 +502,7 @@ function settleFlying() {
 // growing plants get heavier as they mature and root, crystals stir a little, and
 // stones / anomalies / held things don't move at all.
 function lightnessOf(o) {
-  if (o.held || o.family === 'stone' || o.family === 'anomaly' || o.family === 'creature') return 0; // creatures move themselves
+  if (o.held || o.family === 'stone' || o.family === 'anomaly' || o.family === 'creature' || o.family === 'fish') return 0; // creatures + fish move themselves
   if (o.family === 'crystal') return 0.45;
   // only a LOOSE pre-sprout seed/leaf (no trunk) slides under the cursor; a sprouted
   // plant has a trunk, so it SWAYS instead (handled in updateNudge) — never slides.
@@ -508,7 +511,7 @@ function lightnessOf(o) {
 // How much an object YIELDS to being bumped by a carried/thrown object — lighter
 // things give a lot, stones bump but resist, held/rooted/luminous things don't move.
 function collisionGive(o) {
-  if (o.held || o.id === heldId || flying.has(o.id) || o.family === 'anomaly' || o.family === 'creature' || !isMovable(o)) return 0;
+  if (o.held || o.id === heldId || flying.has(o.id) || o.family === 'anomaly' || o.family === 'creature' || o.family === 'fish' || !isMovable(o)) return 0;
   if (o.family === 'stone') return 0.4;
   if (o.family === 'crystal') return 0.7;
   if (o.family === 'seed') return shownMat(o) < SPROUT_C ? 0.8 : 0; // loose seeds shove aside; a sprouted plant doesn't slide (it sways)
@@ -713,6 +716,7 @@ function hitTest(w) {
   let pick = null, best = -Infinity;
   for (const o of objects.values()) {
     if (o.held) continue;
+    if (o.family === 'fish') continue; // fish swim free — not pickable (they stay in the water)
     const p = posOf(o);
     const d = Math.hypot(p.x - w.x, p.y - w.y);
     if (d > hitRadius(o)) continue;
@@ -1132,7 +1136,8 @@ function onMessage(raw) {
     }
     case 'object_gone': {
       const og = objects.get(m.id);
-      if (og && og.family === 'crystal') flashes.push({ x: og.x, y: og.y, start: performance.now() }); // brief flash
+      if (m.splash) ripples.push({ x: m.x, y: m.y, start: performance.now() }); // a bug dropped in a pond → fish food
+      else if (og && og.family === 'crystal') flashes.push({ x: og.x, y: og.y, start: performance.now() }); // brief flash
       else if (og && (og.family === 'stone' || m.grit)) // worn to grit — a brief scatter of dust
         grits.push({ x: og.x, y: og.y, seed: og.seed, r: objRadius(og), start: performance.now() });
       else if (og && og.family === 'creature') { const p = creaturePos(og); creatureEvts.push({ x: p.x, y: p.y, start: performance.now(), birth: false }); } // a passing — a soft puff
@@ -1217,7 +1222,7 @@ function frame(now) {
     if (!inViewport(s.x, s.y, vw, vh, CULL_MARGIN)) continue;
     // Depth = ground line; a free creature sorts by its LIVE wander y (where it's
     // actually drawn, not its home), and a flier rides above ground clutter.
-    o._sortY = (o.family === 'creature' && o.id !== heldId && !o.held)
+    o._sortY = ((o.family === 'creature' || o.family === 'fish') && o.id !== heldId && !o.held)
       ? p.y + (o.kind === 'flier' ? flierLift(o) : 0)
       : groundY(o);
     o._depthScale = depthScaleAt(s.y); // size-by-depth (Wave K) — used by draw + hit-test
@@ -1305,6 +1310,19 @@ function frame(now) {
     ctx.save(); ctx.globalCompositeOperation = 'lighter';
     ctx.strokeStyle = PG.rgba('#eaf4ff', 0.85 * (1 - p)); ctx.lineWidth = 2;
     ctx.beginPath(); ctx.arc(s.x, s.y, 4 + p * 22, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+  }
+  // brief water ripples (~650ms expanding rings) — a bug dropped in a pond became fish food
+  for (let i = ripples.length - 1; i >= 0; i--) {
+    const rp = ripples[i], age = now - rp.start;
+    if (age > 650) { ripples.splice(i, 1); continue; }
+    const p = age / 650, s = worldToScreen(rp.x, rp.y), z = camera.z;
+    ctx.save(); ctx.globalCompositeOperation = 'lighter';
+    for (let k = 0; k < 2; k++) { // two staggered rings spreading outward
+      const pk = p - k * 0.2; if (pk <= 0) continue;
+      ctx.strokeStyle = PG.rgba('#bfe2f2', 0.5 * (1 - pk)); ctx.lineWidth = 1.6;
+      ctx.beginPath(); ctx.arc(s.x, s.y, (5 + pk * 34) * z, 0, Math.PI * 2); ctx.stroke();
+    }
     ctx.restore();
   }
 

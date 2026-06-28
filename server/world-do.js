@@ -18,7 +18,7 @@
 // for hold ownership; broadcasts carry an ephemeral per-connection `pid` and a
 // boolean `held` — never the token.
 // =============================================================================
-import { generateWorld, makeRecord, makeSeedRecord, makeAnomalyRecord, ANOMALY_KINDS, makeCrystalRecord, makeCreatureRecord, CREATURE_KINDS, reseedAction, SEED_VERSION, rng, makeNoise } from './seed.js';
+import { generateWorld, makeRecord, makeSeedRecord, makeAnomalyRecord, ANOMALY_KINDS, makeCrystalRecord, makeCreatureRecord, makeFishRecord, CREATURE_KINDS, reseedAction, SEED_VERSION, rng, makeNoise } from './seed.js';
 import { FLOW_SEED, FLOW_SCALE, FLOW_REACH } from '../public/flow.js'; // shared with the client visual
 
 const TICK_MS = 60000;
@@ -136,6 +136,15 @@ function bankPoint(p, x, y, seed = 0) {
   const rr = p.r + POND_BANK_PAD;
   return { x: p.x + (dx / d) * rr, y: p.y + (dy / d) * rr };
 }
+// ---- fish (Family 6): a few swim in each pond (Wave Q) ----------------------
+// Existence + a HOME inside a pond only; the live position is a deterministic wander
+// the clients compute (public/creatures.js, kind 'fish'), BOUNDED so a fish never
+// leaves the water. The tick keeps each pond stocked to a floor and tops up toward a
+// cap. Spared isolation-fade, the ceiling trim, and water-drift (they're alive).
+const FISH_PER_POND = 3;                   // each pond is kept stocked to at least this many
+const FISH_MAX_PER_POND = 6;              // ...and never more than this
+const FISH_SPAWN_CHANCE = 0.18;            // per pond per tick, between the floor and the cap
+const FISH_HOME_FRAC = 0.5;                // a fish's home sits within this fraction of the pond radius from its centre (home ± reach stays in the water)
 const CRYSTAL_CAP = 10;                    // at most this many crystals at once
 const CRYSTAL_SPAWN_CHANCE = 0.05;        // per tick, while under the cap
 const CRYSTAL_DECAY = 1 / 300;            // decay/tick (~5h to dissolve) — slow, impermanent
@@ -467,6 +476,16 @@ export class WorldRoom {
       return Response.json({ ok: true, creature: { id: cr.id, kind: cr.kind, x: cr.x, y: cr.y } });
     }
 
+    // Ops/testing only: spawn one fish in a pond (?pond= index, default central). Gated.
+    if (url.pathname === '/admin/fish') {
+      if (!this.#adminOk(request)) return Response.json({ ok: false, error: 'forbidden' }, { status: 403 });
+      const pi = Math.max(0, Math.min(POOLS.length - 1, parseInt(url.searchParams.get('pond') || '0', 10) || 0));
+      const f = this.#spawnFish(Date.now(), POOLS[pi]);
+      this.objects.set(f.id, f); this.#gridAdd(f); await this.#persist(f);
+      this.#bcast({ t: 'object_new', o: this.#pub(f) }, null);
+      return Response.json({ ok: true, fish: { id: f.id, x: f.x, y: f.y, pond: pi } });
+    }
+
     // Ops/testing only: read the water flow vector at (?x=&y=). Gated.
     if (url.pathname === '/admin/flow') {
       if (!this.#adminOk(request)) return Response.json({ ok: false, error: 'forbidden' }, { status: 403 });
@@ -605,7 +624,7 @@ export class WorldRoom {
       maturity: o.maturity, aged: o.aged, created_at: o.created_at,
     };
     if (o.kind) p.kind = o.kind; // anomalies + creatures carry their form/kind
-    if (o.family === 'creature') p.wanderT0 = o.wanderT0; // the shared wander anchor
+    if (o.wanderT0 != null) p.wanderT0 = o.wanderT0; // the shared wander anchor (creatures + fish)
     if (o.family === 'stone' && o.r != null) p.r = o.r; // a fused/split stone's stored radius (shape still from seed)
     if (o.held !== '') p.heldBy = o.heldConn; // the holder's EPHEMERAL pid (same id presence carries) — links a carried thing to its carrier; never the token
     return p;
@@ -616,7 +635,7 @@ export class WorldRoom {
       held: o.held !== '', maturity: o.maturity, aged: o.aged, ts: now,
       heldBy: o.held !== '' ? o.heldConn : '', // who's carrying it ('' = nobody) — for the felt-presence tether
     };
-    if (o.family === 'creature') m.wanderT0 = o.wanderT0; // re-anchor on the wire so a placed creature continues smoothly for everyone
+    if (o.wanderT0 != null) m.wanderT0 = o.wanderT0; // re-anchor on the wire so a placed creature/fish continues smoothly for everyone
     if (o.family === 'stone' && o.r != null) m.r = o.r;   // a fused stone broadcasts its grown radius
     return m;
   }
@@ -769,7 +788,25 @@ export class WorldRoom {
       if (Number.isFinite(m.x) && Number.isFinite(m.y)) { o.x = m.x; o.y = m.y; } // corrupt coords → release in place, don't teleport to 0,0
       o.held = ''; o.heldConn = ''; o.held_at = 0;
       o.handling += 1; o.last_touched = now; // a placed object has just been tended
-      if (o.family === 'creature') o.wanderT0 = now; // re-anchor: it wanders on a NEW route from where it was set down
+      if (o.family === 'creature') {
+        o.wanderT0 = now; // re-anchor: it wanders on a NEW route from where it was set down
+        // A ground bug dropped into a pond becomes FISH FOOD (Wave Q): it sinks (a
+        // splash) and a fish rises if the pond has room — drop a bug, feed the water.
+        const pond = o.kind === 'crawler' ? poolContaining(o.x, o.y) : null;
+        if (pond) {
+          this.#gridRemove(o);
+          this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id); this.dirty.delete(o.id);
+          await this.state.storage.delete('obj:' + o.id); this.objWrites++;
+          this.#bcast({ t: 'object_gone', id: o.id, splash: true, x: o.x, y: o.y }, null);
+          const counts = this.#fishCountByPond(), idx = POOLS.indexOf(pond);
+          if (idx >= 0 && counts[idx] < FISH_MAX_PER_POND) {
+            const f = this.#spawnFish(now, pond);
+            this.objects.set(f.id, f); this.#gridAdd(f); await this.#persist(f);
+            this.#bcast({ t: 'object_new', o: this.#pub(f) }, null);
+          }
+          return;
+        }
+      }
       // Disturbing a pre-sprout seed resets its growth — it must be left be to take.
       if (o.family === 'seed' && o.maturity < SPROUT) { o.maturity = 0; o.heat = 0; }
       if (o.family === 'stone') {
@@ -978,7 +1015,7 @@ export class WorldRoom {
     // tended/alive and never fade — and skipping creatures keeps them from being
     // dirtied every tick (their last_touched is never read).
     for (const o of this.objects.values()) {
-      if (o.family === 'anomaly' || o.family === 'creature' || o.held !== '') continue;
+      if (o.family === 'anomaly' || o.family === 'creature' || o.family === 'fish' || o.held !== '') continue;
       if (this.#heatAt(o.x, o.y) > WARM_EPS) { o.last_touched = now; this.dirty.add(o.id); continue; } // refresh is checkpoint-only
       if (o.family === 'stone' && (now - o.last_touched) >= STONE_FADE_MS && !gone.includes(o)) {
         gone.push(o);
@@ -993,7 +1030,7 @@ export class WorldRoom {
       const goneSet = new Set(gone.map((o) => o.id)); // O(1) membership at ceiling scale
       const cands = [];
       for (const o of this.objects.values()) {
-        if (o.family === 'anomaly' || o.family === 'creature' || o.held !== '' || goneSet.has(o.id)) continue;
+        if (o.family === 'anomaly' || o.family === 'creature' || o.family === 'fish' || o.held !== '' || goneSet.has(o.id)) continue;
         cands.push(o);
       }
       cands.sort((a, b) => a.last_touched - b.last_touched); // longest-untouched first
@@ -1055,6 +1092,17 @@ export class WorldRoom {
     }
     if (creatureCount + creAdded < MAX_CREATURES && this.objects.size + spawned.length < creRoom && Math.random() < CREATURE_SPAWN_CHANCE) {
       const k = minorityKind(); spawned.push(this.#spawnCreature(now, null, k)); kindCount[k]++;
+    }
+
+    // Fish (Wave Q): keep every pond stocked. Floor-fill to FISH_PER_POND, then a
+    // chance-gated top-up toward the cap — so a fresh world's ponds fill quickly and a
+    // pond that loses fish refills. (Pending fish count toward the per-pond cap so one
+    // tick can't overfill.) Gated below the breathing room like creatures.
+    const fishCounts = this.#fishCountByPond();
+    for (const s of spawned) if (s.family === 'fish') { for (let i = 0; i < POOLS.length; i++) { const p = POOLS[i]; const dx = s.x - p.x, dy = s.y - p.y; if (dx * dx + dy * dy <= p.r * p.r) { fishCounts[i]++; break; } } }
+    for (let i = 0; i < POOLS.length; i++) {
+      while (fishCounts[i] < FISH_PER_POND && this.objects.size + spawned.length < creRoom) { spawned.push(this.#spawnFish(now, POOLS[i])); fishCounts[i]++; }
+      if (fishCounts[i] < FISH_MAX_PER_POND && this.objects.size + spawned.length < creRoom && Math.random() < FISH_SPAWN_CHANCE) { spawned.push(this.#spawnFish(now, POOLS[i])); fishCounts[i]++; }
     }
 
     // Goal-seeking drift (Wave G1): step each free creature's HOME toward what it
@@ -1314,7 +1362,7 @@ export class WorldRoom {
   // undisturbed to take root). So mature plants and crystals creep along.
   #driftEligible(o) {
     if (o.held !== '') return false;
-    if (o.family === 'stone' || o.family === 'anomaly' || o.family === 'creature') return false; // creatures move themselves
+    if (o.family === 'stone' || o.family === 'anomaly' || o.family === 'creature' || o.family === 'fish') return false; // creatures + fish move themselves
     if (o.family === 'seed' && o.maturity < SPROUT) return false;
     return true;
   }
@@ -1407,6 +1455,24 @@ export class WorldRoom {
     }
     const seed = (Math.random() * 4294967296) >>> 0;
     return makeCreatureRecord(crypto.randomUUID(), seed, k, x, y, now);
+  }
+
+  // A fish's home sits well INSIDE a pond (≤ FISH_HOME_FRAC of the radius from its
+  // centre), so home + its bounded wander never crosses the rim — it stays in the water.
+  #spawnFish(now, pond) {
+    const ang = Math.random() * Math.PI * 2, rr = Math.sqrt(Math.random()) * pond.r * FISH_HOME_FRAC;
+    const x = pond.x + Math.cos(ang) * rr, y = pond.y + Math.sin(ang) * rr;
+    const seed = (Math.random() * 4294967296) >>> 0;
+    return makeFishRecord(crypto.randomUUID(), seed, x, y, now);
+  }
+  // Count current fish by the pond their home sits in (index into POOLS; -1 = none).
+  #fishCountByPond() {
+    const counts = new Array(POOLS.length).fill(0);
+    for (const o of this.objects.values()) {
+      if (o.family !== 'fish') continue;
+      for (let i = 0; i < POOLS.length; i++) { const p = POOLS[i]; const dx = o.x - p.x, dy = o.y - p.y; if (dx * dx + dy * dy <= p.r * p.r) { counts[i]++; break; } }
+    }
+    return counts;
   }
 
   // What a creature is drawn toward THIS tick, or null to just roam. Its drive cycles

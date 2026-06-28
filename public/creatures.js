@@ -22,9 +22,13 @@ export const CREATURE_KINDS = ['crawler', 'flier'];
 // `pace` scales the wander's temporal frequency = traversal SPEED; reach is
 // renormalised independently, so a higher pace covers the same path 50% faster
 // (Wave O: +50% — the world feels livelier) without wandering any further.
+// `fish` (Wave Q) has a SHORT reach so it stays inside its pond and a slow, gliding
+// pace — it reads as swimming, not skittering. Its home is placed well inside the
+// pond (≤ half-radius from centre), so home ± reach never crosses the rim.
 const KIND = {
   crawler: { reach: 34, pace: 1.875, bob: 0 },
   flier:   { reach: 74, pace: 2.55, bob: 6 },
+  fish:    { reach: 70, pace: 1.05, bob: 0 },
 };
 
 // PURE & DETERMINISTIC: the wander offset from home at shared time t (seconds).
@@ -50,6 +54,13 @@ export function wanderAt(seed, kind, t) {
 export function creatureR(seed, kind) {
   const r = rng((seed ^ 0x9e37) >>> 0);
   return (kind === 'flier' ? 20 : 26) + r() * 10; // ~2× (more visible / easier to grab); grab padding adds the rest
+}
+
+// Fish cull / sort radius (world units) — seed-varied; fish are not pickable, so this
+// is only for culling and depth-sorting them within the pond.
+export function fishR(seed) {
+  const r = rng((seed ^ 0x515f) >>> 0);
+  return 22 + r() * 12;
 }
 
 // ---- drawing (browser only; caller is in the world transform) ---------------
@@ -114,4 +125,33 @@ function drawFlier(ctx, r, s, t, body, sheen) {
   const g = ctx.createLinearGradient(0, -s * 1.2, 0, s * 1.2);
   g.addColorStop(0, sheen); g.addColorStop(1, darken(body, 0.06));
   ctx.fillStyle = g; ctx.beginPath(); ctx.ellipse(0, 0, s * 0.5, s * 1.3, 0, 0, TAU); ctx.fill();
+}
+
+// A small fish seen from above, swimming (Wave Q). `ang` orients it along its heading;
+// `t` (seconds) swishes the tail so it reads as alive even when barely drifting. Cool,
+// muted, seed-varied — calm, never cartoonish. Caller is in the world transform.
+export function drawFish(ctx, seed, cx, cy, t, ang = 0) {
+  const r = rng(seed >>> 0);
+  const s = 8 + r() * 5.5;                                 // body half-length, world units
+  const body = mix('#90a8b8', r() < 0.5 ? '#9aa890' : '#86a2b8', r()); // pale cool grey-blue ↔ muted (reads against dark water)
+  const belly = lighten(body, 0.22);
+  const swish = Math.sin(t * 3 + (seed & 7)) * 0.6;        // slow tail beat
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(ang + Math.PI / 2);                            // nose (-y) points along heading
+  ctx.save(); ctx.translate(0, s * 0.9); ctx.rotate(swish * 0.6); // tail fin behind the body, swishing
+  ctx.fillStyle = rgba(darken(body, 0.05), 0.85);
+  ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(-s * 0.7, s * 0.9); ctx.lineTo(s * 0.7, s * 0.9); ctx.closePath(); ctx.fill();
+  ctx.restore();
+  const g = ctx.createLinearGradient(0, -s, 0, s);          // body — a smooth lens, nose forward
+  g.addColorStop(0, belly); g.addColorStop(1, darken(body, 0.06));
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.moveTo(0, -s * 1.15);
+  ctx.quadraticCurveTo(s * 0.62, -s * 0.1, 0, s * 0.95);
+  ctx.quadraticCurveTo(-s * 0.62, -s * 0.1, 0, -s * 1.15);
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = rgba('#eef6fb', 0.32);                    // dorsal highlight — a glint along the spine
+  ctx.beginPath(); ctx.ellipse(0, -s * 0.15, s * 0.18, s * 0.55, 0, 0, TAU); ctx.fill();
+  ctx.restore();
 }
