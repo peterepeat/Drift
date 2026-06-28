@@ -18,7 +18,7 @@
 // for hold ownership; broadcasts carry an ephemeral per-connection `pid` and a
 // boolean `held` — never the token.
 // =============================================================================
-import { generateWorld, makeRecord, makeSeedRecord, makeAnomalyRecord, ANOMALY_KINDS, makeCrystalRecord, makeCreatureRecord, makeFishRecord, CREATURE_KINDS, reseedAction, SEED_VERSION, rng, makeNoise } from './seed.js';
+import { generateWorld, makeRecord, makeSeedRecord, makeAnomalyRecord, ANOMALY_KINDS, makeCrystalRecord, makeCreatureRecord, makeFishRecord, makeMarkRecord, CREATURE_KINDS, reseedAction, SEED_VERSION, rng, makeNoise } from './seed.js';
 import { FLOW_SEED, FLOW_SCALE, FLOW_REACH } from '../public/flow.js'; // shared with the client visual
 
 const TICK_MS = 60000;
@@ -255,6 +255,13 @@ const GRID_CELL = 256;                     // world units per grid cell (> FLOW_
 // the heat GRADIENT bends the water flow toward cooler areas. This field is
 // SEPARATE from the per-object `heat` that drives growth (unchanged), and is
 // never transmitted — heat is invisible (PRD §4.1).
+// ---- ground marks (Family 7, Wave S): a shared, ephemeral drawing surface ----
+// Double-click bare ground → a small rock-shaped tinted stain, visible to everyone,
+// that HEALS over ~10 minutes (the tick removes it once aged out). Capped so the
+// surface can't fill up; oldest is evicted first. Spared isolation/ceiling/drift.
+const MARK_LIFE_MS = 10 * TICK_MS;         // a mark fully heals (and is removed) after ~10 min
+const MARK_MAX = 400;                       // at most this many marks at once (oldest evicted)
+
 const HEAT_CELL = 200;                     // world units per heat cell
 const FIELD_HALF = 2000;                   // field covers ±this around the origin (20×20 = 400 cells)
 const HEAT_MAX = 1.0;                      // per-cell heat ceiling
@@ -570,6 +577,7 @@ export class WorldRoom {
       if (!o) return Response.json({ ok: false, error: 'no such object' }, { status: 404 });
       const ticks = Math.max(0, parseInt(url.searchParams.get('n') || '0', 10) || 0);
       o.last_touched = Date.now() - ticks * TICK_MS;
+      o.created_at = Date.now() - ticks * TICK_MS; // also age the birth clock (drives mark-heal / lifespan tests)
       await this.#persist(o);
       return Response.json({ ok: true, id: o.id, agedTicks: ticks });
     }
@@ -887,6 +895,23 @@ export class WorldRoom {
       await this.state.storage.delete('obj:' + o.id); this.objWrites++;
       this.#bcast({ t: 'object_gone', id: o.id }, null);
 
+    } else if (m.t === 'mark') {
+      // Double-click bare ground → leave a rock-shaped tinted stain (Wave S). Visible to
+      // all, heals over ~10 min. Land only (not water); oldest evicted at the cap.
+      if (!Number.isFinite(m.x) || !Number.isFinite(m.y)) return;
+      if (poolContaining(m.x, m.y)) return; // marks settle on land, not on the water
+      let count = 0, oldest = null;
+      for (const o of this.objects.values()) if (o.family === 'mark') { count++; if (!oldest || o.created_at < oldest.created_at) oldest = o; }
+      if (count >= MARK_MAX && oldest) { // make room: evict the oldest mark
+        this.#gridRemove(oldest);
+        this.objects.delete(oldest.id); this.dirty.delete(oldest.id);
+        await this.state.storage.delete('obj:' + oldest.id); this.objWrites++;
+        this.#bcast({ t: 'object_gone', id: oldest.id }, null);
+      }
+      const mk = makeMarkRecord(crypto.randomUUID(), (Math.random() * 4294967296) >>> 0, m.x, m.y, now);
+      this.objects.set(mk.id, mk); this.#gridAdd(mk); await this.#persist(mk);
+      this.#bcast({ t: 'object_new', o: this.#pub(mk) }, null);
+
     } else if (m.t === 'presence_move') {
       this.lastSeen.set(pid, now);
       this.presencePos.set(pid, { x: m.x, y: m.y, ts: now });
@@ -966,6 +991,10 @@ export class WorldRoom {
         else this.dirty.add(o.id);          // decay advances with no discrete write — the checkpoint must catch it
         continue;
       }
+      if (o.family === 'mark') {            // ground marks heal and vanish after ~10 min (Wave S)
+        if (now - (o.created_at || now) >= MARK_LIFE_MS) gone.push(o);
+        continue;
+      }
       if (o.family !== 'seed') continue;    // stones / anomalies have no time-based change here
 
       const beforeHeat = o.heat, beforeShed = o.shedAccum;
@@ -1042,7 +1071,7 @@ export class WorldRoom {
     // tended/alive and never fade — and skipping creatures keeps them from being
     // dirtied every tick (their last_touched is never read).
     for (const o of this.objects.values()) {
-      if (o.family === 'anomaly' || o.family === 'creature' || o.family === 'fish' || o.held !== '') continue;
+      if (o.family === 'anomaly' || o.family === 'creature' || o.family === 'fish' || o.family === 'mark' || o.held !== '') continue;
       if (this.#heatAt(o.x, o.y) > WARM_EPS) { o.last_touched = now; this.dirty.add(o.id); continue; } // refresh is checkpoint-only
       if (o.family === 'stone' && (now - o.last_touched) >= STONE_FADE_MS && !gone.includes(o)) {
         gone.push(o);
@@ -1057,7 +1086,7 @@ export class WorldRoom {
       const goneSet = new Set(gone.map((o) => o.id)); // O(1) membership at ceiling scale
       const cands = [];
       for (const o of this.objects.values()) {
-        if (o.family === 'anomaly' || o.family === 'creature' || o.family === 'fish' || o.held !== '' || goneSet.has(o.id)) continue;
+        if (o.family === 'anomaly' || o.family === 'creature' || o.family === 'fish' || o.family === 'mark' || o.held !== '' || goneSet.has(o.id)) continue;
         cands.push(o);
       }
       cands.sort((a, b) => a.last_touched - b.last_touched); // longest-untouched first
@@ -1435,7 +1464,7 @@ export class WorldRoom {
   // undisturbed to take root). So mature plants and crystals creep along.
   #driftEligible(o) {
     if (o.held !== '') return false;
-    if (o.family === 'stone' || o.family === 'anomaly' || o.family === 'creature' || o.family === 'fish') return false; // creatures + fish move themselves
+    if (o.family === 'stone' || o.family === 'anomaly' || o.family === 'creature' || o.family === 'fish' || o.family === 'mark') return false; // creatures + fish move themselves; marks + others don't drift
     if (o.family === 'seed' && o.maturity < SPROUT) return false;
     return true;
   }

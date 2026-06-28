@@ -92,6 +92,11 @@ export const makeFishRecord = (id, seed, x, y, now) => {
   return r;
 };
 
+// Ground marks (Wave S): a rock-shaped tinted stain someone left by double-clicking
+// bare ground — existence + position + seed (shape) only. It heals (fades) over ~10
+// minutes and is then removed: a rudimentary, shared, EPHEMERAL drawing surface.
+export const makeMarkRecord = (id, seed, x, y, now) => makeRecord(id, 'mark', seed, x, y, now);
+
 export const makeCreatureRecord = (id, seed, kind, x, y, now) => {
   const r = makeRecord(id, 'creature', seed, x, y, now);
   r.kind = kind;

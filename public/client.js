@@ -42,6 +42,9 @@ const ANOM_DISSOLVE_MS = 10000, ANOM_FADE_MS = 3000; // hold an anomaly 10s and 
 const ATTEND_MS = 450;                        // long-press dwell before an object is "attended" (PRD §5.2)
 const DBLTAP_MS = 320;                        // two taps on a stone within this BREAK it into smaller stones
 const GRIT_MS = 500;                          // a worn-out stone's grit scatter lifetime (spec §4.3)
+const MARK_LIFE_MS = 10 * 60 * 1000;          // a ground mark heals over ~10 min (mirror server MARK_LIFE_MS)
+const MARK_SIZE = 24;                          // ground-mark footprint (world units) — small, rock-shaped
+const MARK_TINT = '#d3c6ab';                   // pale warm stain — a drawn mark visible on the dark ground
 const POS_EASE_MAX = 24;                       // a position change up to this (a drift hop) eases; larger snaps
 // Mouse-displacement (Wave 6): a moving cursor brushes light things (leaves, seeds)
 // aside and they spring back. PURELY LOCAL & cosmetic — a render-only offset, never
@@ -339,6 +342,28 @@ function drawRoots(ctx, seed, cx, cy, mat) {
     ctx.strokeStyle = PG.rgba(col, 0.55);
     ctx.stroke();
   }
+  ctx.restore();
+}
+// A ground mark (Wave S): a rock-shaped tinted STAIN drawn flat on the ground (it's a
+// disturbance of the earth, not an object sitting on it — so no shadow/depth), fading
+// as it heals. `life` runs 1→0 over the mark's ~10-min life. Shape reuses the stone
+// polygon (so it's "oddly shaped like a rock"); a soft radial alpha keeps the edge calm.
+function markGeom(o) { if (!o._mg) o._mg = PG.makeStone(o.seed >>> 0, MARK_SIZE, 0.4); return o._mg; }
+function drawMark(o, life) {
+  const g = markGeom(o), a = 0.34 * Math.min(1, life * 1.4); // hold near-full, then ease out as it heals
+  const P = g.pts.map((p) => ({ x: o.x + Math.cos(p.a) * p.rad, y: o.y + Math.sin(p.a) * p.rad }));
+  ctx.save();
+  ctx.beginPath();
+  for (let i = 0; i <= P.length; i++) { // rounded polygon — quad-smooth through edge midpoints (like a stone)
+    const b0 = P[i % P.length], b1 = P[(i + 1) % P.length];
+    const mx = (b0.x + b1.x) / 2, my = (b0.y + b1.y) / 2;
+    if (i === 0) ctx.moveTo(mx, my); else ctx.quadraticCurveTo(b0.x, b0.y, mx, my);
+  }
+  ctx.closePath();
+  const rg = ctx.createRadialGradient(o.x, o.y, 0, o.x, o.y, g.radius * 1.05); // soft toward the rim
+  rg.addColorStop(0, PG.rgba(MARK_TINT, a));
+  rg.addColorStop(1, PG.rgba(MARK_TINT, a * 0.35));
+  ctx.fillStyle = rg; ctx.fill();
   ctx.restore();
 }
 function drawObjectWorld(o) {
@@ -716,7 +741,7 @@ function hitTest(w) {
   let pick = null, best = -Infinity;
   for (const o of objects.values()) {
     if (o.held) continue;
-    if (o.family === 'fish') continue; // fish swim free — not pickable (they stay in the water)
+    if (o.family === 'fish' || o.family === 'mark') continue; // fish swim free, marks are ground stains — neither pickable
     const p = posOf(o);
     const d = Math.hypot(p.x - w.x, p.y - w.y);
     if (d > hitRadius(o)) continue;
@@ -903,14 +928,20 @@ function endPointer(e) {
     const speed = Math.hypot(flingVel.x, flingVel.y);
     if (speed > THROW_MIN && (performance.now() - lastCarryT) < 90) startFling();
     else placeHold();
-  } else if (grab && !moved && !wasLong && !multiTouched) { // a still tap on an object
-    const o = objects.get(grab.id);
+  } else if (!moved && !wasLong && !multiTouched) {       // a still, deliberate tap
+    const tnow = performance.now();
+    const o = grab ? objects.get(grab.id) : null;
     if (o && o.family === 'stone') {                       // double-tap a stone → break it into smaller stones
-      const tnow = performance.now();
       if (lastTapId === o.id && tnow - lastTapT < DBLTAP_MS) { send({ t: 'break', id: o.id, token, ts: Date.now() }); lastTapId = null; }
       else { lastTapId = o.id; lastTapT = tnow; }
+    } else if (!grab && p) {                               // a tap on BARE ground → double-tap leaves a mark (Wave S)
+      const w = screenToWorld(p.sx, p.sy);
+      if (!hitTest(w)) {                                   // truly empty (not over a rooted tree / object)
+        if (lastTapId === 'ground' && tnow - lastTapT < DBLTAP_MS) { send({ t: 'mark', x: w.x, y: w.y, ts: Date.now() }); lastTapId = null; }
+        else { lastTapId = 'ground'; lastTapT = tnow; }
+      }
     }
-    grab = null;                                          // otherwise a single tap does nothing (no sticky pickup)
+    grab = null;                                          // a single tap does nothing (no sticky pickup)
   } else {
     grab = null;
   }
@@ -1212,11 +1243,21 @@ function frame(now) {
   paintGroundPatches(ctx); // world-anchored terrain tint (precomputed buffer, one blit), beneath water + objects
   for (const pd of pools) paintWaterWorld(ctx, pd, animT); // every pond, beneath the objects
   if (poolOnScreen()) paintFlow(ctx, pool, animT); // faint flow streaks — only the central pool's drift band
+  // ground marks (Wave S): flat rock-shaped stains, beneath objects, healing over ~10 min
+  const markNow = Date.now() + clockSkew; // server clock for the heal age
+  for (const o of objects.values()) {
+    if (o.family !== 'mark') continue;
+    const life = 1 - (markNow - (o.created_at || markNow)) / MARK_LIFE_MS;
+    if (life <= 0) continue;
+    const s = worldToScreen(o.x, o.y);
+    if (!inViewport(s.x, s.y, vw, vh, CULL_MARGIN)) continue;
+    drawMark(o, life);
+  }
   const list = [];
   // Viewport culling: only the objects on (or just off) screen are sorted/drawn.
   // Lifted/held objects are never culled — they're drawn in the screen-space pass.
   for (const o of objects.values()) {
-    if (isLifted(o.id)) continue;
+    if (isLifted(o.id) || o.family === 'mark') continue; // marks are drawn in their own pass above
     const p = posOf(o);
     const s = worldToScreen(p.x, p.y);
     if (!inViewport(s.x, s.y, vw, vh, CULL_MARGIN)) continue;

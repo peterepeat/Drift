@@ -65,7 +65,7 @@ for unit in cull audio-map physics creatures seed; do
 done
 
 # Integration suites — each against a FRESH worker on an isolated port.
-for suite in protocol interest grid checkpoint decouple growth seasons anomalies water-crystals stones water-flow thermal ceiling creature-world creature-social communion fish; do
+for suite in protocol interest grid checkpoint decouple growth seasons anomalies water-crystals stones water-flow thermal ceiling creature-world creature-social communion fish marks; do
   boot
   echo "=== $suite ==="
   run_node "test/$suite.test.mjs" || fail=1
