@@ -6,7 +6,7 @@
 // by more than CULL_MARGIN (which leaves room for an object's body and shadow to
 // stay visible when its centre is just off-screen).
 // =============================================================================
-export const CULL_MARGIN = 160; // CSS px of slack beyond the viewport edges
+export const CULL_MARGIN = 280; // CSS px of slack beyond the viewport edges (generous, so objects are already drawn as they scroll in — no pop-in at the edge)
 export function inViewport(sx, sy, vw, vh, m = CULL_MARGIN) {
   return sx >= -m && sx <= vw + m && sy >= -m && sy <= vh + m;
 }

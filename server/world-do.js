@@ -214,6 +214,8 @@ const GIANT_STUCK_TICKS = 2;              // no real progress this many ticks (e
 const GIANT_REACH = 64;                   // close enough to tend its goal
 const GIANT_SIGHT = 900;                  // how far it looks for something to tend
 const GIANT_ROAM = 2600;                  // when nothing needs tending it strolls this far around its biased centre — out toward the boundary, sowing the sparse fringe
+const GIANT_YIELD = 0.8;                   // a giant LEAVES a job to its companion if the companion is within this fraction of its own distance to it — so the closer one takes it and the pair spread out (no two-on-one pile-ups)
+const GIANT_PERSONAL = 500;                // if the two come within this, the one farther from its own territory peels off home — they keep room between them (no standing on top of each other)
 const GIANT_FUSE_R = 78;                  // it presses two stones THIS close together into one (a small, eased nudge — a cairn)
 const GIANT_THIN_R = 160;                 // it THINS a plant standing in a patch this crowded (same-family count within this radius)
 const GIANT_THIN_N = 12;                  // ...crowded means at least this many neighbours (a patient force against runaway thickets)
@@ -264,7 +266,7 @@ const FLOW_HEAT = 0.6;                     // how strongly the heat gradient ben
 // objects the client lacks (`world_patch`). PURELY in-memory: no storage writes, no
 // new alarms — this never touches the DO rows_written budget. Falls back to the full
 // payload when a client sends no viewport (old clients / tests stay correct).
-const INTEREST_MARGIN = 1.6;              // send a ring this many viewport half-extents beyond the screen
+const INTEREST_MARGIN = 2.4;              // send a ring this many viewport half-extents beyond the screen (a generous preload so panning doesn't reveal objects streaming in)
 const PATCH_MAX = 400;                     // cap objects streamed per viewport update (rest follow next tick)
 
 // ---- spatial grid (in-memory; PRD §7.3 — toward a 10k-object world) ---------
@@ -534,10 +536,11 @@ export class WorldRoom {
     if (url.pathname === '/admin/giant') {
       if (!this.#adminOk(request)) return Response.json({ ok: false, error: 'forbidden' }, { status: 403 });
       const px = url.searchParams.get('x'), py = url.searchParams.get('y'), off = url.searchParams.get('off');
-      const g0 = this.giants[0];
-      if (px != null && py != null) { g0.x = parseFloat(px); g0.y = parseFloat(py); g0.goal = null; } // place the FIRST gardener (tests drive it)
+      const i = Math.max(0, Math.min(this.giants.length - 1, parseInt(url.searchParams.get('i') || '0', 10) || 0)); // which gardener (tests can drive either to check spreading)
+      const gi = this.giants[i];
+      if (px != null && py != null) { gi.x = parseFloat(px); gi.y = parseFloat(py); gi.goal = null; }
       if (off != null) for (const g of this.giants) g.off = off === '1';                                // off toggles BOTH
-      return Response.json({ ok: true, giant: { x: g0.x, y: g0.y, goal: g0.goal, off: !!g0.off }, giants: this.giants.map((g) => ({ x: g.x, y: g.y })) });
+      return Response.json({ ok: true, giant: { x: gi.x, y: gi.y, goal: gi.goal, off: !!gi.off }, giants: this.giants.map((g) => ({ x: g.x, y: g.y, goal: g.goal ? g.goal.kind : null })) });
     }
 
     // Ops/testing only: spawn one fish in a pond (?pond= index, default central). Gated.
@@ -1859,6 +1862,16 @@ export class WorldRoom {
   // the density-throttled shedding; the giant actively reduces the surplus.)
   #giantPickGoal(g) {
     g.cycle = (g.cycle || 0) + 1;
+    // GIVE EACH OTHER ROOM: when the two crowd the same spot, the one FARTHER from its own
+    // territory peels off toward home (the nearer-home one keeps working) — so a co-located
+    // pair fans back out instead of standing on top of each other.
+    const sib = this.#giantSibling(g);
+    if (sib && Math.hypot(sib.x - g.x, sib.y - g.y) < GIANT_PERSONAL) {
+      const hx = this.cog.x + g.bias.x, hy = this.cog.y + g.bias.y;        // my territory centre
+      const dHome = Math.hypot(g.x - hx, g.y - hy);
+      const dSibHome = Math.hypot(sib.x - (this.cog.x + sib.bias.x), sib.y - (this.cog.y + sib.bias.y));
+      if (dHome >= dSibHome) return { kind: 'stroll', x: hx, y: hy };      // I'm the visitor here → head home, leave this patch to my companion
+    }
     // FIRST, specific tending right here (rotated for variety so it isn't always the same):
     // ripen a sapling, thin a thicket, fill a hole, build a cairn.
     const rot = (arr) => { const s = g.cycle % arr.length; for (let i = 0; i < arr.length; i++) { const goal = arr[(s + i) % arr.length](); if (goal) return goal; } return null; };
@@ -1871,11 +1884,25 @@ export class WorldRoom {
     const a = Math.random() * Math.PI * 2, r = Math.random() * GIANT_ROAM; // truly nothing — stroll its biased side of the world (incl. out toward the fringe, where it sows)
     return { kind: 'stroll', x: this.cog.x + g.bias.x + Math.cos(a) * r, y: this.cog.y + g.bias.y + Math.sin(a) * r };
   }
+  #giantSibling(g) { for (const x of this.giants) if (x !== g && !x.off) return x; return null; }
+  // Nearest matching object — but the two gardeners coordinate so they spread out instead
+  // of piling onto the same spot: a giant (1) never targets the job its companion has
+  // already CLAIMED (its current goal), and (2) YIELDS any job the companion is clearly
+  // closer to (comparative distance to where the companion is headed). So the nearer one
+  // takes each job and the other drifts off to its own work — more interesting to watch.
   #giantNearest(g, kind, filter, extra) {
+    const sib = this.#giantSibling(g);
+    const claimed = sib && sib.goal ? sib.goal.id : null;                 // the companion already called this one
+    const sx = sib ? (sib.goal ? sib.goal.x : sib.x) : 0;                 // where the companion is headed (its goal, else itself)
+    const sy = sib ? (sib.goal ? sib.goal.y : sib.y) : 0;
     let best = null, bd = GIANT_SIGHT;
     for (const o of this.#gridNear(g.x, g.y, GIANT_SIGHT, filter)) {
+      if (o.id === claimed) continue;
       const d = Math.hypot(o.x - g.x, o.y - g.y);
-      if (d < bd && (!extra || extra(o))) { bd = d; best = o; }
+      if (d >= bd) continue;
+      if (sib && Math.hypot(o.x - sx, o.y - sy) < d * GIANT_YIELD) continue; // the companion is clearly closer — leave it to them
+      if (extra && !extra(o)) continue;
+      bd = d; best = o;
     }
     return best ? { kind, id: best.id, x: best.x, y: best.y } : null;
   }

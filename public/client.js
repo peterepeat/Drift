@@ -102,8 +102,8 @@ if (!token) { token = crypto.randomUUID(); localStorage.setItem('drift_session',
 // object shadows, the LOD pixel threshold, and drifting litter. Hysteresis + a cooldown
 // keep it from flapping. No UI, no toggle: it just adapts. Tier 0 = full, higher = leaner.
 const QUALITY_TIERS = [
-  { dprCap: 2,    noise: 1, glows: 1, flow: 1, sky: 1, grade: 1, sat: 1, patches: 1, shadows: 1, leaves: 1, lodPx: 8  }, // full
-  { dprCap: 1.5,  noise: 0, glows: 1, flow: 1, sky: 1, grade: 1, sat: 1, patches: 1, shadows: 1, leaves: 1, lodPx: 10 }, // drop the full-screen noise; cap retina
+  { dprCap: 2,    noise: 1, glows: 1, flow: 1, sky: 1, grade: 1, sat: 1, patches: 1, shadows: 1, leaves: 1, lodPx: 7  }, // full — detail persists a touch further out before LOD kicks in
+  { dprCap: 1.5,  noise: 0, glows: 1, flow: 1, sky: 1, grade: 1, sat: 1, patches: 1, shadows: 1, leaves: 1, lodPx: 9  }, // drop the full-screen noise; cap retina
   { dprCap: 1.25, noise: 0, glows: 0, flow: 0, sky: 1, grade: 1, sat: 0, patches: 1, shadows: 1, leaves: 0, lodPx: 16 }, // drop glows/flow/litter + the sat-filter (a real GPU win)
   { dprCap: 1,    noise: 0, glows: 0, flow: 0, sky: 0, grade: 0, sat: 0, patches: 0, shadows: 0, leaves: 0, lodPx: 28 }, // bare: no sky/grade/patches/shadows, aggressive LOD
 ];

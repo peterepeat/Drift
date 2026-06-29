@@ -85,5 +85,20 @@ const afterB = nearB(await snap());
 const stillBoulder = afterB.some((o) => (o.r || 0) > 62);
 check(hadBoulder && !stillBoulder && afterB.length >= 2, `the giant breaks a boulder back toward the middle (1 boulder -> ${afterB.length} smaller stones, none over the cap)`);
 
+// 8. SPREAD — the two gardeners don't pile onto the same spot. Stacked together with a
+// patch of work just off to one side, the nearer one claims it and the other yields the
+// whole patch and drifts off to its own side (claim + comparative-distance).
+const setG = (i, x, y) => fetch(`${base}/admin/giant?i=${i}&x=${x}&y=${y}`, { method: 'POST', headers: key }).then((r) => r.json());
+const P = { x: 17000, y: 17000 }, WORK = { x: 17000, y: 17700 }; // both start at P; a cluster 700u off (out of reach → they WALK, goals persist)
+const patch = (await snap()).objects.filter((o) => o.family === 'seed' && !o.held).slice(0, 8).map((o) => o.id);
+for (const id of patch) { await place(id, WORK.x + (Math.random() * 100 - 50), WORK.y + (Math.random() * 100 - 50)); await lifecycle(id, 0.3, 0); }
+await setG(0, P.x, P.y); await setG(1, P.x, P.y);            // stack BOTH gardeners on the same spot
+const before8 = (await snap()).giants;
+check(Math.hypot(before8[0].x - before8[1].x, before8[0].y - before8[1].y) < 1, 'the two gardeners start stacked (0u apart)');
+await tickG(5);                                              // one claims the patch, the other yields it + keeps its distance
+const after8 = (await snap()).giants;
+const apart = Math.hypot(after8[0].x - after8[1].x, after8[0].y - after8[1].y);
+check(apart > 300, `stacked gardeners spread apart instead of piling up (${apart.toFixed(0)}u apart after 5 ticks)`);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

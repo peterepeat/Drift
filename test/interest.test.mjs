@@ -11,7 +11,7 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const post = (p) => fetch(`${base}${p}`, { method: 'POST', headers: KEY }).then((r) => r.json());
 const place = (id, x, y) => post(`/admin/place?id=${id}&x=${x}&y=${y}`);
 
-const MARGIN = 1.6; // must match INTEREST_MARGIN in world-do.js
+const MARGIN = 2.4; // must match INTEREST_MARGIN in world-do.js
 
 function open(query = '') {
   const ws = new WebSocket(WS + query);
