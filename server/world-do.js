@@ -240,12 +240,13 @@ const GIANT_SOW_CLEAR = 220;             // it SOWS a seed where there's no plan
 // Stones don't grow; they erode by handling (each place wears them smoother and
 // smaller, client-side from `handling`) and eventually dissolve into grit. They also
 // FUSE: drop one onto another and they combine into a single larger stone (area-
-// adding); and BREAK: a double-click splits one into smaller stones, until the pieces
-// are too small and crumble to grit. A fused/split stone carries a stored radius `r`
-// (absent ⇒ the seed-derived base size); the SHAPE is still regenerated from the seed.
+// adding); and BREAK: a double-click splits one into smaller stones, down to a floor —
+// at the floor a break is a NO-OP (the stone persists, never vanishes from breaking). A
+// fused/split stone carries a stored radius `r` (absent ⇒ the seed-derived base size);
+// the SHAPE is still regenerated from the seed.
 const GRIT_HANDLING = 26;                 // handled this many times, a stone is worn to grit and gone
 const MAX_STONE_R = 88;                   // floor for the fuse/settle grid-query bound (this.maxStoneR)
-const MIN_STONE_R = 9;                    // break a stone below this and it crumbles to grit instead
+const MIN_STONE_R = 16;                   // the smallest a stone breaks down to — still clearly visible; below ~MIN×1.35 a break does nothing (the stone stays, never breaks to nothing)
 // EQUILIBRIUM: stones drift toward a middling size rather than merging without bound.
 // The giant merges PEBBLES (r < EQ) it finds paired up, and breaks down BOULDERS
 // (r > CAP) it finds — a patient two-way force toward the middle. Hand-fusing still
@@ -988,7 +989,7 @@ export class WorldRoom {
       let pieces = null, puff = null;
       if (o.family === 'stone') { pieces = this.#breakStone(o, now); puff = { grit: true }; } // a dust puff
       else if (o.family === 'anomaly' && this.#anomalyKindsOf(o).length > 1) { pieces = this.#breakAnomaly(o, now); puff = { burst: true, x: o.x, y: o.y }; } // a soft ripple
-      if (!pieces) return; // nothing breakable here
+      if (!pieces || !pieces.length) return; // nothing breakable here (a too-small stone just stays — never breaks to nothing)
       this.#gridRemove(o);
       this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id); this.dirty.delete(o.id);
       await this.state.storage.delete('obj:' + o.id); this.objWrites++;
@@ -1423,7 +1424,7 @@ export class WorldRoom {
   // the floor crumbles to grit instead. Returns the spawned children (for broadcast).
   #breakStone(o, now) {
     const r = stoneRadiusOf(o);
-    if (r <= MIN_STONE_R * 1.35) return []; // too small to split — caller grits it
+    if (r <= MIN_STONE_R * 1.35) return []; // already at the floor — caller no-ops, the stone stays (never breaks to nothing)
     const pieces = r > 52 ? 3 : 2;
     const childR = Math.max(MIN_STONE_R, r / Math.sqrt(pieces)); // area-conserving
     const out = [];

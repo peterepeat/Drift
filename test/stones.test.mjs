@@ -123,6 +123,16 @@ check(drowned.length === 0, `no rocks sit in any pool after a drop + tick (${dro
 const r6 = byId(w7, ROCK);
 check(!r6 || !inWater(r6), 'the rock dropped in the pool rolled out to the bank');
 
+// 8. BREAK never deletes a rock: at the floor size a double-click is a NO-OP — the stone
+// stays (it used to crumble to nothing). Force a floor-size stone, break it, confirm it's
+// still there, whole.
+const key2 = { 'x-admin-key': 'local-dev-key' };
+await fetch(`${base}/admin/place?id=${pool[7]}&x=-16000&y=16000&r=16`, { method: 'POST', headers: key2 });
+const r8 = radOf(byId(await snap(), pool[7]));
+ctl.send(JSON.stringify({ t: 'break', id: pool[7], token: TOK, ts: Date.now() })); await wait(150);
+const after8 = byId(await snap(), pool[7]);
+check(!!after8 && radOf(after8) === r8, `a floor-size rock is no longer breakable — a double-click leaves it whole (r ${r8.toFixed(0)})`);
+
 ctl.close();
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
