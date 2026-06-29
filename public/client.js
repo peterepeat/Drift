@@ -334,7 +334,6 @@ function creatureWarpT(o, t) {
 }
 // Is this creature currently glowing? → its rainbow hue, else null.
 function glowHueOf(o) { return (o.glowUntil && (Date.now() + clockSkew) < o.glowUntil) ? (o.glowHue || 0) : null; }
-const TAME_SEC = 150;          // mirror server TAME_MS
 const TAME_GAP = 64;           // a tamed creature hovers this far from its person
 const FOLLOW_RANGE = 1600;     // ...and only follows a person within this
 // How tamed this creature is right now: 0..1, eased in at the start and out at the end
@@ -343,8 +342,10 @@ function tameFactor(o) {
   if (!o.tameUntil) return 0;
   const remain = o.tameUntil - (Date.now() + clockSkew);
   if (remain <= 0) return 0;
-  const elapsed = TAME_SEC * 1000 - remain;
-  return Math.max(0, Math.min(1, Math.min(elapsed / 2500, remain / 2500)));
+  // ease IN from when we first saw the bond begin (duration-agnostic — works for a 2.5-min
+  // heart-tame OR a 2-hour befriend), and OUT over the final 2.5s as it lapses.
+  const inF = o._tameStart ? Math.min(1, (performance.now() - o._tameStart) / 2500) : 1;
+  return Math.max(0, Math.min(1, Math.min(inF, remain / 2500)));
 }
 function isTamed(o) { return tameFactor(o) > 0.02; }
 // A friendly little 3-note flourish when you greet the giant — all on the season
@@ -981,6 +982,26 @@ function updateHover(cx, cy) { // desktop: attend whatever the mouse rests on
   attendId = o ? o.id : null;
 }
 
+// ---- befriend (the come-back hook): hold your attention on a creature ~2.2s and it BONDS
+// to you — the server tames it (it then hovers near you, trailing you, drawn aglow) and we
+// remember it. All the client adds is the steady-attention dwell; tame does the rest.
+const BEFRIEND_DWELL = 2200;            // ms of unbroken attention on one creature to befriend it
+let befriendTrack = null, befriendSince = 0, befriendSent = false;
+let myFriendId = (() => { try { return localStorage.getItem('drift_friend'); } catch { return null; } })(); // a befriended creature, remembered across visits
+function updateBefriend(now) {
+  const o = (attendId && !heldId) ? objects.get(attendId) : null;
+  if (!o || o.family !== 'creature' || isLifted(o.id)) { befriendTrack = null; befriendSent = false; return; }
+  if (o.id !== befriendTrack) { befriendTrack = o.id; befriendSince = now; befriendSent = false; return; } // a new creature → restart the dwell
+  if (!befriendSent && now - befriendSince >= BEFRIEND_DWELL) {
+    befriendSent = true;
+    myFriendId = o.id; try { localStorage.setItem('drift_friend', o.id); } catch {}
+    send({ t: 'befriend', id: o.id, token, ts: Date.now() });
+    const p = creaturePos(o);
+    creatureEvts.push({ x: p.x, y: p.y, start: now, birth: true }); // a warm confirming bloom where it stands
+    giantChime();                                                   // a soft little flourish (silent unless sound is on)
+  }
+}
+
 // ---- pointer input (Pointer Events only) — direct manipulation --------------
 // A pointerdown on a free object becomes a CARRY as soon as it moves (drag to
 // move); a press-release without moving is a "follow" pickup that tracks the
@@ -1372,7 +1393,7 @@ function onMessage(raw) {
       if (m.aged != null) o.aged = m.aged;
       if (m.wanderT0 != null) o.wanderT0 = m.wanderT0; // a placed creature re-anchored its wander
       if (m.glowUntil != null) { o.glowUntil = m.glowUntil; o.glowHue = m.glowHue; } // anomaly glow buff
-      if (m.tameUntil != null) o.tameUntil = m.tameUntil; // tamed (follows the nearest person)
+      if (m.tameUntil != null) { const sNow = Date.now() + clockSkew; if (!(o.tameUntil > sNow)) o._tameStart = performance.now(); o.tameUntil = m.tameUntil; } // tamed (hovers near + follows its person); stamp when the bond began so it eases in
       if (m.r != null) o.r = m.r; // a fused stone grew (regens its geometry via stoneGeom)
       if (m.kinds) o.kinds = m.kinds; // a fused anomaly's hybrid kinds (blended form + breakability)
       o.heldBy = m.heldBy || ''; // who's carrying it (ephemeral pid) — drives the felt-presence tether
@@ -1474,6 +1495,7 @@ function frame(now) {
   updateSway(now);
   if (Q.leaves) updateLeaves(now);
   updateDissolve(now);
+  updateBefriend(now); // steady attention on a creature bonds it to you (come-back hook)
   updateArrive(now);
   clampCam(); // backstop: keep the camera in bounds across resize / a shrinking world bound
 

@@ -215,6 +215,11 @@ const CREATURE_SEP_STEP = 24;             // max world units the anti-crowd push
 // toward a nearby person and mills a little way off — so lingering draws life to you.
 const CURIOSITY_R = 760;                  // a creature this near a presence may amble over (during its roam phase)
 const CURIOSITY_STANDOFF = 95;            // it stops this far off (curious, not crowding — the wander + anti-crowd keep it loose)
+// BEFRIEND (the come-back hook): attend a creature steadily and it BONDS to you. Bonding
+// = tamed (the client already renders a tamed creature hovering near its person + draws it
+// aglow), just for a long while + triggered by attention instead of a heart anomaly. So you
+// have a companion that greets you when you return to where you befriended it.
+const BEFRIEND_MS = 2 * 60 * 60 * 1000;   // a befriended creature stays bonded ~2h (re-attend to refresh)
 // ---- the giant: a shared, world-tending NPC (the gardener, built in stages) -
 const GIANT_SEED = 0x6a11d7;              // fixed form — one big, gentle creature for everyone
 const GIANT_STEP = 800;                   // world units it covers per tick — the client walks it CONTINUOUSLY along its heading between ticks (no longer looks parked). Brisk (not rushed) so it's always visibly going somewhere
@@ -1022,6 +1027,15 @@ export class WorldRoom {
     } else if (m.t === 'giant_skip') {
       // a friendly tap on the giant — it lets go of what it was about to do and ambles on
       for (const g of this.giants) { g.goal = null; g.stuck = 0; } // a friendly tap lets the gardeners amble on
+
+    } else if (m.t === 'befriend') {
+      // sustained attention has bonded a creature to someone — it becomes tamed (follows the
+      // nearest person for a good long while) so they have a companion to return to.
+      const o = this.objects.get(m.id);
+      if (!o || o.family !== 'creature' || o.held !== '') return;
+      o.tameUntil = now + BEFRIEND_MS;
+      await this.#persist(o);
+      this.#bcast(this.#stateMsg(o, now), null);
 
     } else if (m.t === 'presence_move') {
       this.lastSeen.set(pid, now);
@@ -1834,6 +1848,8 @@ export class WorldRoom {
     return best;
   }
   #creatureGoal(c) {
+    // (A bonded/tamed creature's FOLLOW is rendered client-side — it hovers near its person
+    // via creaturePos/tameFactor — so the server leaves its home in the ecosystem.)
     const drive = this.#creatureDrive(c);
     if (drive === 'roam') {                            // a free-wander phase — but if someone is lingering nearby, amble over to them
       const p = this.#nearestPresence(c.x, c.y, CURIOSITY_R);

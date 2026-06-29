@@ -122,5 +122,16 @@ await tickG(30);
 const post = minSpacing(await snap());
 check(post.n >= 2 && post.m > pre.m && post.m > 25, `a pile of ${NPILE} creatures spreads out (closest pair ${pre.m.toFixed(0)}u -> ${post.m.toFixed(0)}u)`);
 
+// 10. BEFRIEND: a `befriend` message bonds a creature to you — the server tames it for a
+// LONG while (the come-back hook). The follow + glow are rendered client-side; here we
+// just confirm the durable bond is set.
+const bf = await spawn('crawler', 33000, 33000);
+const bws = await open(); await bws.world;
+bws.send(JSON.stringify({ t: 'befriend', id: bf.creature.id, token: 'bff-tok', ts: Date.now() }));
+await wait(150);
+const bonded = creatures(await snap()).find((o) => o.id === bf.creature.id);
+check(!!bonded && bonded.tameUntil > Date.now() + 60 * 60 * 1000, `befriending a creature bonds it for a long while (tamed=${!!(bonded && bonded.tameUntil)})`);
+bws.close();
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
