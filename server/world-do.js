@@ -226,14 +226,15 @@ const CREATURE_FOLLOW_STEP = 130;         // home units it closes toward its per
 // ---- the giant: a shared, world-tending NPC (the gardener, built in stages) -
 const GIANT_SEED = 0x6a11d7;              // fixed form — one big, gentle creature for everyone
 const GIANT_STEP = 800;                   // world units it covers per tick — the client walks it CONTINUOUSLY along its heading between ticks (no longer looks parked). Brisk (not rushed) so it's always visibly going somewhere
-const GIANT_MAX_HOPS = 4;                  // a tick resolves up to this many NON-tending waypoints (drink/watch/stroll) before settling — so a giant never burns a whole 60s tick standing still doing nothing; it just walks on
-const GIANT_STUCK_TICKS = 2;              // no real progress this many ticks (e.g. a pond in the way) → give up the goal and wander on
+const GIANT_MAX_HOPS = 5;                  // a tick resolves up to this many waypoints before settling — so a giant never burns a whole 60s tick standing still doing nothing
+const GIANT_TENDS_PER_TICK = 2;            // it can finish up to this many tending jobs in one tick (2× throughput in a cluster) — half the time per job, while its body animates calmly
+const GIANT_STUCK_TICKS = 4;              // no PROGRESS toward the goal this many ticks (e.g. a goal it can only circle) → give up + reroute (enough patience to round a pond first)
 const GIANT_REACH = 64;                   // close enough to tend its goal
-const GIANT_SIGHT = 900;                  // how far it looks for something to tend
-const GIANT_ROAM = 2600;                  // when nothing needs tending it strolls this far around its biased centre — out toward the boundary, sowing the sparse fringe
+const GIANT_SIGHT = 1300;                 // how far it looks for something to tend (wide, so a big boulder is noticed from afar)
+const GIANT_ROAM = 2600;                  // legacy stroll radius (now it explores the whole world via the bounds — see #giantPickGoal)
 const GIANT_YIELD = 0.8;                   // a giant LEAVES a job to its companion if the companion is within this fraction of its own distance to it — so the closer one takes it and the pair spread out (no two-on-one pile-ups)
 const GIANT_PERSONAL = 500;                // if the two come within this, the one farther from its own territory peels off home — they keep room between them (no standing on top of each other)
-const GIANT_NEED_SCALE = 520;              // distance falloff for need-scoring: a job's pull = need ÷ (1 + dist/this), so an EGREGIOUS need (a big boulder, a packed thicket) wins even from across the field
+const GIANT_NEED_SCALE = 700;              // distance falloff for need-scoring: a job's pull = need ÷ (1 + dist/this). Higher = distance matters less, so an EGREGIOUS need wins even from across the field
 const GIANT_FUSE_R = 78;                  // it presses two stones THIS close together into one (a small, eased nudge — a cairn)
 const GIANT_THIN_R = 160;                 // it THINS a plant standing in a patch this crowded (same-family count within this radius)
 const GIANT_THIN_N = 12;                  // ...crowded means at least this many neighbours (a patient force against runaway thickets)
@@ -1889,6 +1890,16 @@ export class WorldRoom {
   // plant, or presses two adjacent stones into one). Server-authoritative + broadcast
   // on the tick; the client glides it between waypoints (no per-frame sync). Its own
   // position is in-memory only (zero new writes); its tending mutates real objects.
+  // The pond (if any) whose body the giant's straight step would cross — segment-vs-circle,
+  // so it catches both stepping INTO a pond and stepping OVER a small one. Used to route around.
+  #pondAcross(x, y, dirX, dirY, s) {
+    for (const p of POOLS) {
+      const proj = Math.max(0, Math.min(s, (p.x - x) * dirX + (p.y - y) * dirY));
+      const cx = x + dirX * proj, cy = y + dirY * proj;
+      if (Math.hypot(p.x - cx, p.y - cy) < p.r + GIANT_REACH) return p;
+    }
+    return null;
+  }
   async #giantStep(g, now) {
     if (g.off) return; // disabled (tests that isolate write-economy turn the giants off)
     // A tick ends in exactly one of two states: WALKING toward something (the client
@@ -1896,29 +1907,47 @@ export class WorldRoom {
     // never ends "standing still doing nothing": a non-tending waypoint (drink/watch/
     // stroll) is resolved and the giant walks straight on within the same tick, so the
     // pair always reads as busy — and the brisk GIANT_STEP makes that motion quick.
+    let tended = 0;
     for (let hop = 0; hop < GIANT_MAX_HOPS; hop++) {
-      if (!g.goal || !this.#giantGoalValid(g.goal)) { g.goal = this.#giantPickGoal(g); g.stuck = 0; }
+      if (!g.goal || !this.#giantGoalValid(g.goal)) { g.goal = this.#giantPickGoal(g); g.stuck = 0; g.bestDist = Infinity; }
       const dx = g.goal.x - g.x, dy = g.goal.y - g.y, d = Math.hypot(dx, dy) || 1;
       if (d > GIANT_REACH) {
         const s = Math.min(GIANT_STEP, d);
-        let nx = g.x + (dx / d) * s, ny = g.y + (dy / d) * s;
-        const pond = poolContaining(nx, ny);              // a land creature — it rounds ponds, never wades
-        if (pond) { const b = bankPoint(pond, nx, ny, 0); nx = b.x; ny = b.y; }
-        const moved = Math.hypot(nx - g.x, ny - g.y);
-        g.x = nx; g.y = ny; g.hx = dx / d; g.hy = dy / d; g.walk = 1; g.tending = 0;
-        if (moved < GIANT_STEP * 0.3) { g.stuck = (g.stuck || 0) + 1; if (g.stuck >= GIANT_STUCK_TICKS) { g.goal = null; g.stuck = 0; } } // blocked (a pond) → give up + reroute
-        else g.stuck = 0;
+        let dirX = dx / d, dirY = dy / d;
+        // If a pond's body lies across the straight path, CIRCUMNAVIGATE — steer along its
+        // rim toward the goal (rather than ramming the bank + getting stuck). Catches both
+        // stepping-into and stepping-over a pond (segment-vs-circle).
+        const block = this.#pondAcross(g.x, g.y, dirX, dirY, s);
+        // only route AROUND a pond that's BETWEEN us and the goal — not one the goal sits on
+        // (a drink/watch spot at the rim is approached directly; the wade-backstop keeps it dry).
+        if (block && Math.hypot(g.goal.x - block.x, g.goal.y - block.y) > block.r + GIANT_REACH * 2) {
+          const rx = g.x - block.x, ry = g.y - block.y, rl = Math.hypot(rx, ry) || 1;
+          let tx = -ry / rl, ty = rx / rl;                 // a rim tangent...
+          if (tx * dirX + ty * dirY < 0) { tx = -tx; ty = -ty; } // ...the way that heads toward the goal
+          dirX = tx; dirY = ty;
+        }
+        let nx = g.x + dirX * s, ny = g.y + dirY * s;
+        const wade = poolContaining(nx, ny);              // backstop: never wade — hug the bank if even the tangent dips in
+        if (wade) { const b = bankPoint(wade, nx, ny, 0); nx = b.x; ny = b.y; }
+        g.x = nx; g.y = ny; g.hx = dirX; g.hy = dirY; g.walk = 1; g.tending = 0;
+        // PROGRESS-based stuck: quit only if it isn't getting CLOSER to the goal (e.g. a goal
+        // across/inside a pond it can only circle). Rounding a REACHABLE goal closes the gap,
+        // so it won't quit mid-route.
+        const after = Math.hypot(g.goal.x - g.x, g.goal.y - g.y);
+        if (after < (g.bestDist != null ? g.bestDist : Infinity) - GIANT_STEP * 0.25) { g.bestDist = after; g.stuck = 0; }
+        else if (++g.stuck >= GIANT_STUCK_TICKS) { g.goal = null; g.stuck = 0; g.bestDist = Infinity; }
         return; // walking this tick
       }
       // arrived
       const k = g.goal.kind;
-      await this.#giantAct(g, now); g.goal = null;
+      await this.#giantAct(g, now); g.goal = null; g.bestDist = Infinity;
       if (k === 'ripen' || k === 'thin' || k === 'fillhole' || k === 'tendstone' || k === 'breakstone' || k === 'sow') {
-        g.walk = 0; g.tending = 1; return; // a beat of visible work — the client dips its mouth to the spot
+        if (++tended >= GIANT_TENDS_PER_TICK) { g.walk = 0; g.tending = 1; return; } // worked its quota — a beat of visible work
+        // else loop: it may reach + tend ANOTHER nearby job this same tick (2× throughput in a cluster)
       }
-      // a non-tending arrival (drink/watch/stroll): don't freeze — loop and walk on
+      // a non-tending arrival, or room for another tend: loop and walk on
     }
-    g.walk = 0; g.tending = 0; // every hop was a non-tending arrival (rare) — a brief pause
+    g.walk = 0; g.tending = tended > 0 ? 1 : 0; // ran out of hops — show work if we tended, else a brief pause
   }
   #giantGoalValid(goal) {
     if (goal.kind === 'stroll' || goal.kind === 'sow' || goal.kind === 'drink' || goal.kind === 'watch') return true; // point goals — re-checked on arrival
@@ -1953,20 +1982,27 @@ export class WorldRoom {
     // little jitter keeps the pair from being robotic / always picking the identical thing.
     const cands = [];
     const add = (goal, need) => { if (goal) { const d = Math.hypot(goal.x - g.x, goal.y - g.y); cands.push({ goal, score: need * (0.85 + Math.random() * 0.3) / (1 + d / GIANT_NEED_SCALE) }); } };
+    // Severity is weighted HARD (≈2× the gentle jobs) so a real imbalance pulls a gardener
+    // from across the field instead of it puttering on whatever sapling is nearest.
     add(this.#giantFindRipen(g), 1.0);
-    add(this.#giantFindThin(g), 1.7);                          // a thicket is a real imbalance
-    add(this.#giantFindFillhole(g), 1.1);
+    add(this.#giantFindThin(g), 3.0);                          // a thicket is a real imbalance
+    add(this.#giantFindFillhole(g), 1.4);
     add(this.#giantFindStone(g), 0.6);                         // merging pebbles is low-stakes
     const boulder = this.#giantFindBoulder(g);
-    if (boulder) { const bo = this.objects.get(boulder.id); const br = bo ? stoneRadiusOf(bo) : STONE_CAP_R; add(boulder, 2.4 + (br - STONE_CAP_R) / 18); } // egregiousness scales with how far past the cap
+    if (boulder) { const bo = this.objects.get(boulder.id); const br = bo ? stoneRadiusOf(bo) : STONE_CAP_R; add(boulder, 4.5 + (br - STONE_CAP_R) / 9); } // a ridiculous boulder is an URGENT job — scales steeply with how far past the cap
     if (cands.length) { cands.sort((p, q) => q.score - p.score); return cands[0].goal; }
     // THEN, with nothing pressing nearby: sow life into a barren patch, or pause by the
     // water / beside a creature. (So in a dense grove it tends; out in the open it seeds.)
     const rot = (arr) => { const s = g.cycle % arr.length; for (let i = 0; i < arr.length; i++) { const goal = arr[(s + i) % arr.length](); if (goal) return goal; } return null; };
     const idle = rot([() => this.#giantFindSow(g), () => this.#giantFindDrink(g), () => this.#giantFindWatch(g)]);
     if (idle) return idle;
-    const a = Math.random() * Math.PI * 2, r = Math.random() * GIANT_ROAM; // truly nothing — stroll its biased side of the world (incl. out toward the fringe, where it sows)
-    return { kind: 'stroll', x: this.cog.x + g.bias.x + Math.cos(a) * r, y: this.cog.y + g.bias.y + Math.sin(a) * r };
+    // truly nothing nearby → EXPLORE the world widely: a random point across the whole bounds,
+    // leaning toward this giant's home half (so the pair still favour opposite sides). Wide
+    // roaming means far things — a lone monstrous boulder — eventually come into sight + get tended.
+    const bx = (this.bounds && this.bounds.x) || GIANT_ROAM, by = (this.bounds && this.bounds.y) || GIANT_ROAM;
+    const ex = this.cog.x + (Math.random() * 2 - 1) * bx, ey = this.cog.y + (Math.random() * 2 - 1) * by;
+    const hx = this.cog.x + g.bias.x, hy = this.cog.y + g.bias.y; // its home (its side of the world)
+    return { kind: 'stroll', x: ex * 0.6 + hx * 0.4, y: ey * 0.6 + hy * 0.4 }; // 60% explore-anywhere, 40% toward home
   }
   #giantSibling(g) { for (const x of this.giants) if (x !== g && !x.off) return x; return null; }
   // Nearest matching object — but the two gardeners coordinate so they spread out instead

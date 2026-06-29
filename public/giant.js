@@ -20,8 +20,8 @@ export function drawGiant(ctx, cx, cy, R, t, ang = 0, opts = {}) {
   const gait = clamp01(opts.gait != null ? opts.gait : 1);
   const tend = clamp01(opts.tend || 0);
   const face = Math.cos(ang) >= 0 ? 1 : -1;                 // face the way it travels (flip horizontally)
-  const breath = Math.sin(t * 1.6);                         // an always-on breath (a touch quicker — clearly alive)
-  const bob = breath * R * 0.012 + Math.sin(t * 3.0) * R * 0.02 * gait; // gentle bob, livelier afoot
+  const breath = Math.sin(t * 1.3);                         // a slow, calm always-on breath
+  const bob = breath * R * 0.012 + Math.sin(t * 2.2) * R * 0.016 * gait; // a gentle bob afoot (unhurried)
 
   // soft contact shadow at the feet (on the ground, doesn't bob)
   ctx.save();
@@ -41,8 +41,8 @@ export function drawGiant(ctx, cx, cy, R, t, ang = 0, opts = {}) {
   // ---- four legs: an always-on idle weight-shift, a real stride when moving ----
   // The foot swings AGAINST the body's travel (it plants as the body advances over it),
   // so a walking giant reads as walking, not sliding. Amplitude/speed scale with gait.
-  const swingAmp = R * (0.02 + 0.11 * gait);               // a little even at rest, full afoot
-  const legSpeed = 2.8 + 2.6 * gait;                        // a quicker, more purposeful stride (livelier afoot, never a frozen slide)
+  const swingAmp = R * (0.02 + 0.13 * gait);               // strides LENGTHEN with speed (the legs cover ground via longer steps)...
+  const legSpeed = 2.0 + 0.8 * gait;                        // ...but the CADENCE stays calm + near-constant — so fast travel reads as a natural walk, never a manic flutter
   const legX = [-R * 0.17, -R * 0.1, R * 0.1, R * 0.17];   // hind pair, fore pair
   for (let i = 0; i < 4; i++) {
     const ph = t * legSpeed + (i % 2 ? Math.PI : 0);
@@ -76,7 +76,7 @@ export function drawGiant(ctx, cx, cy, R, t, ang = 0, opts = {}) {
   //      with an active working dip; mouth ends up at the ground where it's tending ----
   const upX = R * 0.34, upY = bodyY - R * 0.34;
   const downX = R * 0.3, downY = -R * 0.06;                 // reaching the ground just in front (the work)
-  const workDip = Math.sin(t * 6.2) * R * 0.06 * tend;     // it dips busily as it works — clearly DOING something, never frozen
+  const workDip = Math.sin(t * 2.6) * R * 0.05 * tend;     // a slow, deliberate nod to the work — clearly tending, never a manic bob
   const headX = upX + (downX - upX) * tend;
   const headY = upY + (downY - upY) * tend + workDip + breath * R * 0.012;
   ctx.strokeStyle = BODY; ctx.lineWidth = R * 0.11; ctx.lineCap = 'round';
