@@ -146,7 +146,9 @@ export function makeStone(seed, sizePx, erosion = 0) {
     pts.push({ a, rad });
   }
   const idx = Math.min(3, Math.floor(erosion * 3 + r() * 0.6));
-  const fill = mix(PALETTE.stone[idx], PALETTE.stone[Math.min(3, idx + 1)], r());
+  const base = mix(PALETTE.stone[idx], PALETTE.stone[Math.min(3, idx + 1)], r());
+  // a subtle, unique warm/cool cast per stone (so the greys aren't all identical) — kept faint
+  const fill = mix(base, r() < 0.5 ? '#9a8a76' : '#787f8a', 0.05 + r() * 0.16);
   const luminescence = Math.max(0, erosion - 0.6) / 0.4; // 0 until very old, ->1 near dissolution
   return { pts, radius, fill, luminescence };
 }
@@ -207,14 +209,22 @@ export function drawSeed(ctx, seed, cx, cy, scale = 1, color) {
 
 export function drawPlant(ctx, seed, cx, cy, maturity, aged = 0) {
   const maxDepth = Math.round(2 + maturity * 5);          // 2..7 generations
-  const baseLen = 9 + maturity * 46;                      // grows taller with maturity
+  // Per-plant uniqueness: a SEPARATE seed stream (so it never disturbs the branch RNG below)
+  // gives each plant its own subtle foliage TINT (a slightly different green), a branch SPREAD
+  // character (narrow ↔ wide), a gentle whole-plant LEAN, and a touch of size variation — so
+  // no two plants are quite alike, all still within the green palette.
+  const tr = rng((seed ^ 0x5e3d9b) >>> 0);
+  const tintTo = tr() < 0.5 ? '#cfc878' : '#6f9c88';      // a warmer yellow-green ↔ a cooler blue-green
+  const tintAmt = 0.10 + tr() * 0.20;                     // 0.10..0.30 — subtle
+  const spread = 0.34 + tr() * 0.26;                      // branch fan: narrow ↔ wide
+  const lean = (tr() * 2 - 1) * 0.18;                     // a gentle lean off vertical
+  const baseLen = (9 + maturity * 46) * (0.9 + tr() * 0.2); // grows with maturity, ±10% per plant
   const sat = (0.35 + maturity * 0.65) * (1 - aged * 0.7); // young = pale, mature = rich, aged = fades
-  // Maturity reads as COLOUR (Wave O): a sapling is soft yellow-green, mid-growth a
-  // leaf green, a mature plant a deep forest green — a clear, calm read of age. The
-  // rising `sat` deepens it further (pale sapling → rich mature); `aged` fades it.
-  const core = maturity < 0.5
+  // Maturity reads as COLOUR (Wave O): sapling soft yellow-green → mature deep forest green.
+  let core = maturity < 0.5
     ? mix(PALETTE.growthYoung, PALETTE.growthLight, maturity / 0.5)
     : mix(PALETTE.growthLight, PALETTE.growthDeep, (maturity - 0.5) / 0.5);
+  core = mix(core, tintTo, tintAmt);                      // ← each plant a unique tint of that green
   ctx.save(); ctx.translate(cx, cy); ctx.lineCap = 'round';
   (function branch(g, x, y, ang, len, depth, thick) {
     if (depth > maxDepth || len < 1.5) return;
@@ -228,13 +238,13 @@ export function drawPlant(ctx, seed, cx, cy, maturity, aged = 0) {
     ctx.stroke();
     const n = 2 + (g() < 0.3 ? 1 : 0);
     for (let i = 0; i < n; i++) {
-      const da = (i - (n - 1) / 2) * (0.42 + g() * 0.3) + (g() * 2 - 1) * 0.16;
+      const da = (i - (n - 1) / 2) * (spread + g() * 0.3) + (g() * 2 - 1) * 0.16;
       branch(g, ex, ey, ang + da, len * (0.68 + g() * 0.14), depth + 1, thick * 0.7);
     }
     if (depth === maxDepth && maturity > 0.6 && aged < 0.5 && g() < 0.5) { // mature tips bear nodes
       ctx.beginPath(); ctx.arc(ex, ey, 1.5, 0, Math.PI * 2); ctx.fillStyle = applySat(lighten(PALETTE.growthLight, 0.08), sat); ctx.fill();
     }
-  })(rng(seed), 0, 0, -Math.PI / 2, baseLen, 0, 1.6 + maturity * 2.4);
+  })(rng(seed), 0, 0, -Math.PI / 2 + lean, baseLen, 0, 1.6 + maturity * 2.4);
   ctx.restore();
 }
 
