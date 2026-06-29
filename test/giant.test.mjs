@@ -63,5 +63,14 @@ await tickG(5);
 const hAfter = (await snap()).objects.filter((o) => o.family === 'mark' && Math.hypot(o.x - HOLE.x, o.y - HOLE.y) < 50).length;
 check(hBefore === 1 && hAfter === 0, `the giant fills a dug hole it reaches (${hBefore} -> ${hAfter})`);
 
+// 6. EQUILIBRIUM — it SOWS life in a barren patch (the breed-scarce half of balance)
+const SOW = { x: 11000, y: 11000 };           // empty far field — nothing else to tend out here
+await setGiant(SOW.x, SOW.y);
+const near = (o, c, r) => o.family === 'seed' && Math.hypot(o.x - c.x, o.y - c.y) < r;
+const sBefore = (await snap()).objects.filter((o) => near(o, SOW, 1600)).length;
+await tickG(10);                               // it cycles its finders → with only barren ground around, it sows
+const sAfter = (await snap()).objects.filter((o) => near(o, SOW, 1600)).length;
+check(sAfter > sBefore, `the giant sows life where it's scarce (${sBefore} -> ${sAfter})`);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

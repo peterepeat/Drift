@@ -216,6 +216,7 @@ const GIANT_ROAM = 1400;                  // when nothing needs tending, it stro
 const GIANT_FUSE_R = 78;                  // it presses two stones THIS close together into one (a small, eased nudge — a cairn)
 const GIANT_THIN_R = 160;                 // it THINS a plant standing in a patch this crowded (same-family count within this radius)
 const GIANT_THIN_N = 12;                  // ...crowded means at least this many neighbours (a patient force against runaway thickets)
+const GIANT_SOW_CLEAR = 220;             // it SOWS a seed where there's no plant within this — breeding life back where it's scarce (the other half of balance)
 
 // ---- stones: erosion-to-grit, fuse & break (Family 1) ----------------------
 // Stones don't grow; they erode by handling (each place wears them smoother and
@@ -520,9 +521,10 @@ export class WorldRoom {
     // Ops/testing only: read the giant, or set its position (?x=&y=) + clear its goal. Gated.
     if (url.pathname === '/admin/giant') {
       if (!this.#adminOk(request)) return Response.json({ ok: false, error: 'forbidden' }, { status: 403 });
-      const px = url.searchParams.get('x'), py = url.searchParams.get('y');
+      const px = url.searchParams.get('x'), py = url.searchParams.get('y'), off = url.searchParams.get('off');
       if (px != null && py != null) { this.giant.x = parseFloat(px); this.giant.y = parseFloat(py); this.giant.goal = null; }
-      return Response.json({ ok: true, giant: { x: this.giant.x, y: this.giant.y, goal: this.giant.goal } });
+      if (off != null) this.giant.off = off === '1';
+      return Response.json({ ok: true, giant: { x: this.giant.x, y: this.giant.y, goal: this.giant.goal, off: !!this.giant.off } });
     }
 
     // Ops/testing only: spawn one fish in a pond (?pond= index, default central). Gated.
@@ -1766,6 +1768,7 @@ export class WorldRoom {
   // position is in-memory only (zero new writes); its tending mutates real objects.
   async #giantStep(now) {
     const g = this.giant;
+    if (g.off) return; // disabled (tests that isolate write-economy turn the giant off)
     if (!g.goal || !this.#giantGoalValid(g.goal)) { g.goal = this.#giantPickGoal(g); g.stuck = 0; }
     const dx = g.goal.x - g.x, dy = g.goal.y - g.y, d = Math.hypot(dx, dy) || 1;
     if (d > GIANT_REACH) {
@@ -1780,7 +1783,7 @@ export class WorldRoom {
     } else { await this.#giantAct(g, now); g.goal = null; g.walk = 0; } // arrived — tend, stand still this tick
   }
   #giantGoalValid(goal) {
-    if (goal.kind === 'stroll') return true;
+    if (goal.kind === 'stroll' || goal.kind === 'sow' || goal.kind === 'drink' || goal.kind === 'watch') return true; // point goals — re-checked on arrival
     const o = this.objects.get(goal.id);
     if (!o || o.held !== '') return false;
     if (goal.kind === 'ripen') return o.family === 'seed' && (o.maturity || 0) > 0.02 && (o.maturity || 0) < 1;
@@ -1795,10 +1798,16 @@ export class WorldRoom {
   // the density-throttled shedding; the giant actively reduces the surplus.)
   #giantPickGoal(g) {
     g.cycle = (g.cycle || 0) + 1;
-    const finders = [() => this.#giantFindRipen(g), () => this.#giantFindThin(g), () => this.#giantFindFillhole(g), () => this.#giantFindStone(g)];
-    const start = g.cycle % finders.length;
-    for (let i = 0; i < finders.length; i++) { const goal = finders[(start + i) % finders.length](); if (goal) return goal; }
-    const a = Math.random() * Math.PI * 2, r = Math.random() * GIANT_ROAM; // nothing needs tending — stroll near the world's heart
+    // FIRST, specific tending right here (rotated for variety so it isn't always the same):
+    // ripen a sapling, thin a thicket, fill a hole, build a cairn.
+    const rot = (arr) => { const s = g.cycle % arr.length; for (let i = 0; i < arr.length; i++) { const goal = arr[(s + i) % arr.length](); if (goal) return goal; } return null; };
+    const tend = rot([() => this.#giantFindRipen(g), () => this.#giantFindThin(g), () => this.#giantFindFillhole(g), () => this.#giantFindStone(g)]);
+    if (tend) return tend;
+    // THEN, with nothing pressing nearby: sow life into a barren patch, or pause by the
+    // water / beside a creature. (So in a dense grove it tends; out in the open it seeds.)
+    const idle = rot([() => this.#giantFindSow(g), () => this.#giantFindDrink(g), () => this.#giantFindWatch(g)]);
+    if (idle) return idle;
+    const a = Math.random() * Math.PI * 2, r = Math.random() * GIANT_ROAM; // truly nothing — stroll near the world's heart
     return { kind: 'stroll', x: this.cog.x + Math.cos(a) * r, y: this.cog.y + Math.sin(a) * r };
   }
   #giantNearest(g, kind, filter, extra) {
@@ -1813,6 +1822,34 @@ export class WorldRoom {
   #giantFindThin(g) { return this.#giantNearest(g, 'thin', (o) => o.family === 'seed' && o.held === '', (o) => this.#giantOvercrowded(o)); }
   #giantFindFillhole(g) { return this.#giantNearest(g, 'fillhole', (o) => o.family === 'mark'); }
   #giantFindStone(g) { return this.#giantNearest(g, 'tendstone', (o) => o.family === 'stone' && o.held === '', (o) => !!this.#giantStonePartner(o)); }
+  // SOW: breed life back where it's scarce — find a nearby SPARSE spot (no plant within
+  // GIANT_SOW_CLEAR) and seed it. With THIN (cull the dense), this is the giant moving
+  // life from where there's too much to where there's too little — a sway toward balance.
+  #giantFindSow(g) {
+    if (this.objects.size >= this.maxObjects - 50) return null;        // don't sow into a full world
+    for (let k = 0; k < 6; k++) {
+      const a = Math.random() * Math.PI * 2, r = 220 + Math.random() * (GIANT_SIGHT - 220);
+      const x = g.x + Math.cos(a) * r, y = g.y + Math.sin(a) * r;
+      if (!poolContaining(x, y) && this.#giantSparse(x, y)) return { kind: 'sow', x, y };
+    }
+    return null;
+  }
+  #giantSparse(x, y) { for (const o of this.#gridNear(x, y, GIANT_SOW_CLEAR, (o) => o.family === 'seed')) { if (Math.hypot(o.x - x, o.y - y) <= GIANT_SOW_CLEAR) return false; } return true; }
+  // DRINK: amble to the rim of the nearest pond and pause there (a beat at the water's edge).
+  #giantFindDrink(g) {
+    let best = null, bd = GIANT_SIGHT;
+    for (const p of POOLS) { const e = Math.hypot(g.x - p.x, g.y - p.y) - p.r; if (e < bd) { bd = e; best = p; } }
+    if (!best) return null;
+    const dx = g.x - best.x, dy = g.y - best.y, dd = Math.hypot(dx, dy) || 1;
+    return { kind: 'drink', x: best.x + (dx / dd) * (best.r + 30), y: best.y + (dy / dd) * (best.r + 30) }; // just off the rim, on land
+  }
+  // WATCH: stand a little way off from a creature and watch it a beat (the giant, curious).
+  #giantFindWatch(g) {
+    const c = this.#giantNearest(g, 'watch', (o) => o.family === 'creature' && o.held === '');
+    if (!c) return null;
+    const dx = g.x - c.x, dy = g.y - c.y, dd = Math.hypot(dx, dy) || 1;
+    return { kind: 'watch', x: c.x + (dx / dd) * 70, y: c.y + (dy / dd) * 70 };
+  }
   // Is this plant standing in an over-crowded patch (≥ GIANT_THIN_N same-family neighbours)?
   #giantOvercrowded(o) {
     let n = 0; const r2 = GIANT_THIN_R * GIANT_THIN_R;
@@ -1852,7 +1889,17 @@ export class WorldRoom {
       this.#gridRemove(o); this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id); this.dirty.delete(o.id);
       await this.state.storage.delete('obj:' + o.id); this.objWrites++;
       this.#bcast({ t: 'object_gone', id: o.id }, null);
+    } else if (goal.kind === 'sow') {
+      // breed life where it's scarce — a young sprout at this still-empty spot
+      if (this.objects.size < this.maxObjects && !poolContaining(g.x, g.y) && this.#giantSparse(g.x, g.y)) {
+        const s = makeSeedRecord(crypto.randomUUID(), (Math.random() * 4294967296) >>> 0, g.x, g.y, now);
+        s.maturity = 0.08 + Math.random() * 0.05; // clearly a sprout, not dormant
+        this.objects.set(s.id, s); this.#gridAdd(s); await this.#persist(s);
+        this.#bcast({ t: 'object_new', o: this.#pub(s) }, null);
+      }
     }
+    // drink + watch: no mutation — the giant simply pauses a beat (walk=0); the visual is
+    // the journeyer at the water's edge / standing beside a creature, watching.
   }
   #giantPub() { const g = this.giant; return { x: g.x, y: g.y, hx: g.hx, hy: g.hy, walk: g.walk || 0 }; }
 

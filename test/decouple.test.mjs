@@ -36,10 +36,9 @@ const ws = await open();
 const w0 = await ws.world;
 check(w0.objects.length > 0, `world loaded (${w0.objects.length} objects)`);
 
-// Park the gardener far away: it tends (ripens/fuses) the central objects we're warming,
-// and that tending is a legitimate structural write — but this test isolates the GROWTH/
-// DRIFT decouple, so keep the giant out of it (out there it only strolls, writing nothing).
-await post('/admin/giant?x=80000&y=80000');
+// Turn the gardener OFF: its tending (ripen/thin/sow/fill/fuse) is a legitimate structural
+// write, but this test isolates the GROWTH/DRIFT decouple — so keep the giant out of it.
+await post('/admin/giant?off=1');
 
 // Warm the centre: presence at the origin heats nearby seeds so they grow fast enough
 // to cross the broadcast delta on essentially every tick.
