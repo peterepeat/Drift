@@ -31,9 +31,10 @@ check(crystals(w0).length === 0, 'fresh world has no crystals');
 const sp = await spawn();
 const w1 = await snap();
 const c = crystals(w1).find((o) => o.id === sp.crystal.id);
-const d = Math.hypot(c.x - w0.pool.x, c.y - w0.pool.y) / w0.pool.r;
+const ASPECT = 0.7; // ponds are ellipses (POND_ASPECT) — measure the crystal on the elliptical rim
+const eEdge = Math.hypot((c.x - w0.pool.x) / w0.pool.r, (c.y - w0.pool.y) / (w0.pool.r * ASPECT));
 check(c && c.family === 'crystal', 'spawned object is a crystal');
-check(d > 0.8 && d < 1.2, `crystal forms at the pool edge (${d.toFixed(2)}x pool radius)`);
+check(eEdge > 0.7 && eEdge < 1.25, `crystal forms at the elliptical pool edge (e=${eEdge.toFixed(2)})`);
 
 // 3. auto-spawn + cap
 await tickG(200);
@@ -69,8 +70,9 @@ if (seedObj) {
   await place(seedObj.id, pond.x, pond.y); // drop it dead-centre of the pond
   await tickN(1, 2.0);                      // one tick relocates it to the bank
   const after = (await snap()).objects.find((o) => o.id === seedObj.id);
-  const dist = after ? Math.hypot(after.x - pond.x, after.y - pond.y) : -1;
-  check(after && dist > pond.r, `a seed in a pond is nudged to its bank (dist ${dist.toFixed(0)} > r ${pond.r})`);
+  const ASPECT = 0.7; // mirrors POND_ASPECT (ponds are ellipses)
+  const nx = after ? (after.x - pond.x) / pond.r : 0, ny = after ? (after.y - pond.y) / (pond.r * ASPECT) : 0;
+  check(after && (nx * nx + ny * ny) > 1, `a seed in a pond is nudged out onto the elliptical bank (e=${(nx * nx + ny * ny).toFixed(2)} > 1)`);
 } else {
   check(false, 'a seed exists to test pond relocation');
 }

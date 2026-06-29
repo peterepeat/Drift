@@ -117,7 +117,7 @@ await move(ROCK, waterPool.x, waterPool.y);                        // drop it de
 await tickG(1);                                                    // settle it on the bank
 const w7 = await snap();
 const poolsArr = w7.pools || [w7.pool];
-const inWater = (o) => poolsArr.some((p) => Math.hypot(o.x - p.x, o.y - p.y) <= p.r);
+const inWater = (o) => poolsArr.some((p) => { const nx = (o.x - p.x) / p.r, ny = (o.y - p.y) / (p.r * 0.7); return nx * nx + ny * ny <= 1; }); // elliptical ponds (POND_ASPECT 0.7)
 const drowned = stones(w7).filter((o) => !o.held && inWater(o));
 check(drowned.length === 0, `no rocks sit in any pool after a drop + tick (${drowned.length} in water)`);
 const r6 = byId(w7, ROCK);

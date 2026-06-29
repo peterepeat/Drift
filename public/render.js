@@ -161,6 +161,9 @@ export const paintGrade = PG.paintGrade;
 // slow breathing shimmer. Used for every pond the world carries.
 const WATER_BLUE = '#2f78c0';  // pond body — saturated enough to read blue over the warm glow
 const WATER_DEEP = '#1f4f88';  // a deeper centre so the pond has body, not just a flat tint
+// Ponds are ELLIPSES (squashed vertically — a top-down look): ry = r·POND_ASPECT. MUST match
+// the server's POND_ASPECT (world-do.js) so what's drawn is exactly what the world treats as water.
+export const POND_ASPECT = 0.7;
 export function paintWaterWorld(ctx, pool, t) {
   if (!pool) return;
   const { x, y, r } = pool;
@@ -170,12 +173,12 @@ export function paintWaterWorld(ctx, pool, t) {
   g.addColorStop(1, PG.rgba(WATER_BLUE, 0));
   ctx.save();
   ctx.fillStyle = g;
-  ctx.beginPath(); ctx.ellipse(x, y, r, r * 0.7, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(x, y, r, r * POND_ASPECT, 0, 0, Math.PI * 2); ctx.fill();
   const b = 0.5 + 0.5 * Math.sin(t * 0.4); // slow shimmer
   ctx.globalCompositeOperation = 'lighter';
   ctx.strokeStyle = PG.rgba('#bfe2f2', 0.05 + 0.06 * b);
   ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.ellipse(x, y, r * (0.5 + 0.28 * b), r * 0.7 * (0.5 + 0.28 * b), 0, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath(); ctx.ellipse(x, y, r * (0.5 + 0.28 * b), r * POND_ASPECT * (0.5 + 0.28 * b), 0, 0, Math.PI * 2); ctx.stroke();
   ctx.restore();
 }
 
@@ -193,7 +196,7 @@ export function paintFlow(ctx, pool, t) {
     const r = PG.rng(FLOW_SEED); _flowPts = [];
     for (let i = 0; i < 80; i++) {
       const a = r() * Math.PI * 2, rr = Math.sqrt(r()) * pool.r * FLOW_REACH;
-      _flowPts.push({ x: pool.x + Math.cos(a) * rr, y: pool.y + Math.sin(a) * rr * 0.72, ph: r() * Math.PI * 2 });
+      _flowPts.push({ x: pool.x + Math.cos(a) * rr, y: pool.y + Math.sin(a) * rr * POND_ASPECT, ph: r() * Math.PI * 2 });
     }
   }
   ctx.save();

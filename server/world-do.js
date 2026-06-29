@@ -145,17 +145,28 @@ const POOLS = [
 const POOL = POOLS[0];                      // the central/primary pool (world_state.pool; flow & crystal anchor)
 const POND_BANK_PAD = 16;                   // a seed that lands in a pond settles this far past its rim
 const POND_RELOCATE_MAX = 64;               // cap seeds nudged out of water per tick (bounds the broadcast burst)
-// The pond (if any) containing world point (x,y), within its rim × (1+margin).
+// Ponds are drawn (and now treated) as ELLIPSES — squashed vertically, a top-down look.
+// rx = p.r, ry = p.r·POND_ASPECT. MUST match render.js paintWaterWorld so placement (what's
+// in the water, where the bank is) lines up with the visible pond, not a phantom circle.
+const POND_ASPECT = 0.7;
+// The pond (if any) whose ELLIPSE contains world point (x,y), within its rim × (1+margin).
 function poolContaining(x, y, margin = 0) {
-  for (const p of POOLS) { const dx = x - p.x, dy = y - p.y, rr = p.r * (1 + margin); if (dx * dx + dy * dy <= rr * rr) return p; }
+  for (const p of POOLS) {
+    const rx = p.r * (1 + margin), ry = p.r * POND_ASPECT * (1 + margin);
+    const nx = (x - p.x) / rx, ny = (y - p.y) / ry;
+    if (nx * nx + ny * ny <= 1) return p;
+  }
   return null;
 }
-// The nearest point just OUTSIDE pond p's rim from (x,y) — where an in-water seed settles.
-function bankPoint(p, x, y, seed = 0) {
+// The point just OUTSIDE pond p's elliptical rim, along the ray from its centre through
+// (x,y) — where an in-water seed/stone settles. `padExtra` clears a body's own radius too.
+function bankPoint(p, x, y, seed = 0, padExtra = 0) {
   let dx = x - p.x, dy = y - p.y, d = Math.hypot(dx, dy);
   if (d < 1) { const a = rng(seed >>> 0)() * Math.PI * 2; dx = Math.cos(a); dy = Math.sin(a); d = 1; } // dead-centre → deterministic direction
-  const rr = p.r + POND_BANK_PAD;
-  return { x: p.x + (dx / d) * rr, y: p.y + (dy / d) * rr };
+  const ry = p.r * POND_ASPECT;
+  const t = 1 / Math.hypot(dx / p.r, dy / ry);        // scale to land exactly on the ellipse rim along this ray
+  const pad = POND_BANK_PAD + padExtra;
+  return { x: p.x + dx * t + (dx / d) * pad, y: p.y + dy * t + (dy / d) * pad }; // rim, then pushed just past it
 }
 // ---- fish (Family 6): a few swim in each pond (Wave Q) ----------------------
 // Existence + a HOME inside a pond only; the live position is a deterministic wander
@@ -1580,10 +1591,8 @@ export class WorldRoom {
     const pond = poolContaining(o.x, o.y);
     if (!pond) return null;
     const from = { x: o.x, y: o.y };
-    const b = bankPoint(pond, o.x, o.y, o.seed);
-    let dx = b.x - pond.x, dy = b.y - pond.y; const dd = Math.hypot(dx, dy) || 1;
-    o.x = b.x + (dx / dd) * stoneRadiusOf(o);  // clear the rim by the stone's own radius
-    o.y = b.y + (dy / dd) * stoneRadiusOf(o);
+    const b = bankPoint(pond, o.x, o.y, o.seed, stoneRadiusOf(o)); // past the elliptical rim by the stone's own radius
+    o.x = b.x; o.y = b.y;
     return from;
   }
 
@@ -1774,9 +1783,9 @@ export class WorldRoom {
 
   #spawnCrystal(now, at) {
     const ang = Math.random() * Math.PI * 2;
-    const rr = POOL.r * (0.82 + Math.random() * 0.3); // at / just past the pool edge
-    const x = at ? at.x : POOL.x + Math.cos(ang) * rr;
-    const y = at ? at.y : POOL.y + Math.sin(ang) * rr;
+    const rr = 0.82 + Math.random() * 0.3;            // at / just past the (elliptical) pool edge
+    const x = at ? at.x : POOL.x + Math.cos(ang) * POOL.r * rr;
+    const y = at ? at.y : POOL.y + Math.sin(ang) * POOL.r * POND_ASPECT * rr; // squashed to the ellipse
     const seed = (Math.random() * 4294967296) >>> 0;
     return makeCrystalRecord(crypto.randomUUID(), seed, x, y, now);
   }
@@ -1802,7 +1811,7 @@ export class WorldRoom {
   // centre), so home + its bounded wander never crosses the rim — it stays in the water.
   #spawnFish(now, pond) {
     const ang = Math.random() * Math.PI * 2, rr = Math.sqrt(Math.random()) * pond.r * FISH_HOME_FRAC;
-    const x = pond.x + Math.cos(ang) * rr, y = pond.y + Math.sin(ang) * rr;
+    const x = pond.x + Math.cos(ang) * rr, y = pond.y + Math.sin(ang) * rr * POND_ASPECT; // inside the ELLIPSE (squashed y)
     const seed = (Math.random() * 4294967296) >>> 0;
     return makeFishRecord(crypto.randomUUID(), seed, x, y, now);
   }
@@ -1873,8 +1882,7 @@ export class WorldRoom {
       let p = null, pd = Infinity;                    // (was hardcoded to the central POOL — so every thirsty bug in a huge radius streamed to 0,0)
       for (const q of POOLS) { const e = Math.hypot(c.x - q.x, c.y - q.y) - q.r; if (e < pd) { pd = e; p = q; } }
       if (!p || pd > CREATURE_SEEK_R) return null;    // too far from any water to bother this cycle
-      const dx = c.x - p.x, dy = c.y - p.y, d = Math.hypot(dx, dy) || 1;
-      return { x: p.x + (dx / d) * p.r, y: p.y + (dy / d) * p.r };
+      return bankPoint(p, c.x, c.y, c.seed);          // the (elliptical) water's edge nearest the creature
     }
     const wantPlant = drive === 'feed';               // feed → a growing plant; rest → a stone
     let best = null, bestD = CREATURE_SEEK_R;
