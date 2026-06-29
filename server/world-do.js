@@ -37,6 +37,13 @@ const PRESENCE_STALE_MS = 12000;          // presence older than this stops warm
 const SHED_TICKS = 6;                     // a mature plant sheds ~every 6 ticks
 const SHED_MAX_AGED = 0.6;                // stop shedding once this aged
 const FINAL_SHED = 2;                     // seeds released when a plant dissolves
+// Density-dependent reproduction: a mature plant in a crowded patch sheds less, so the
+// world spreads OUTWARD instead of thickening into impenetrable thickets. Counts same-
+// family plants within SHED_DENSITY_R (grid-local, cheap); below SOFT it sheds freely,
+// at/above MAX the shed is fully suppressed, linear between. Tunable by feel.
+const SHED_DENSITY_R = 160;
+const SHED_DENSITY_SOFT = 4;
+const SHED_DENSITY_MAX = 9;
 const DEFAULT_MAX_OBJECTS = 10000;        // population ceiling (PRD §7.3 — the 10k target). Overridable per-deployment via env.MAX_OBJECTS so the cap can be ramped/rolled back with a Cloudflare var, no code change. Needs Workers Paid for rows_written headroom as the world fills (the checkpoint flushes ~all active objects).
 const MAT_BCAST_DELTA = 0.025;            // broadcast growth when maturity moves this much
 
@@ -1052,8 +1059,8 @@ export class WorldRoom {
         if (o.aged < SHED_MAX_AGED) {
           o.shedAccum += 1;
           if (o.shedAccum >= SHED_TICKS && this.objects.size + spawned.length < this.maxObjects) {
-            o.shedAccum = 0;
-            spawned.push(this.#shed(o, now));
+            o.shedAccum = 0; // reset whether or not it sheds — a crowded plant simply waits another cycle (no burst when the patch later clears)
+            if (Math.random() >= this.#shedSuppression(o)) spawned.push(this.#shed(o, now));
           }
         }
         if (o.aged >= 1) {                  // dissolve: release final seeds, then gone
@@ -1581,6 +1588,22 @@ export class WorldRoom {
     const seed = (Math.random() * 4294967296) >>> 0;
     return makeSeedRecord(crypto.randomUUID(), seed, x, y, now);
   }
+  // How crowded a mature plant's patch is → probability its shed is suppressed (0..1).
+  // Counts same-family neighbours within SHED_DENSITY_R via the in-memory grid (O(local),
+  // zero storage). Below SOFT it sheds freely (0); at/above MAX it's fully suppressed (1);
+  // linear between. This is density-dependent reproduction — the world spreads outward
+  // instead of thickening into thickets, with no retroactive thinning of what's there.
+  #shedSuppression(o) {
+    let n = 0;
+    const r2 = SHED_DENSITY_R * SHED_DENSITY_R;
+    for (const s of this.#gridNear(o.x, o.y, SHED_DENSITY_R, (s) => s.family === 'seed')) {
+      if (s.id === o.id) continue;
+      const dx = s.x - o.x, dy = s.y - o.y;
+      if (dx * dx + dy * dy <= r2 && ++n >= SHED_DENSITY_MAX) return 1; // saturated — early out
+    }
+    if (n <= SHED_DENSITY_SOFT) return 0;
+    return (n - SHED_DENSITY_SOFT) / (SHED_DENSITY_MAX - SHED_DENSITY_SOFT);
+  }
 
   // Communion: where two+ people LINGER together, the world blossoms. Each tick, every
   // close presence-pair's midpoint cell accrues a counter; once sustained it blooms a
@@ -1690,10 +1713,12 @@ export class WorldRoom {
   #creatureGoal(c) {
     const drive = this.#creatureDrive(c);
     if (drive === 'roam') return null;                // a stretch of free wandering, no pull
-    if (drive === 'drink') {                          // head to the nearest point on the pool's rim
-      const dx = c.x - POOL.x, dy = c.y - POOL.y, d = Math.hypot(dx, dy) || 1;
-      if (d > CREATURE_SEEK_R + POOL.r) return null;  // too far from water to bother this cycle
-      return { x: POOL.x + (dx / d) * POOL.r, y: POOL.y + (dy / d) * POOL.r };
+    if (drive === 'drink') {                          // head to the nearest point on the NEAREST pond's rim
+      let p = null, pd = Infinity;                    // (was hardcoded to the central POOL — so every thirsty bug in a huge radius streamed to 0,0)
+      for (const q of POOLS) { const e = Math.hypot(c.x - q.x, c.y - q.y) - q.r; if (e < pd) { pd = e; p = q; } }
+      if (!p || pd > CREATURE_SEEK_R) return null;    // too far from any water to bother this cycle
+      const dx = c.x - p.x, dy = c.y - p.y, d = Math.hypot(dx, dy) || 1;
+      return { x: p.x + (dx / d) * p.r, y: p.y + (dy / d) * p.r };
     }
     const wantPlant = drive === 'feed';               // feed → a growing plant; rest → a stone
     let best = null, bestD = CREATURE_SEEK_R;

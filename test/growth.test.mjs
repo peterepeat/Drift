@@ -80,5 +80,21 @@ let ripeGone = false;
 for (let i = 0; i < 8 && !ripeGone; i++) { await tick(20); ripeGone = !(await snapshot()).objects.find((o) => o.id === ripe.id); }
 check(ripeGone, 'a fully-aged plant dissolves');
 
+// --- density-dependent reproduction: a crowded patch sheds far less than a lone plant.
+//     Out in the empty far field: 1 lone mature plant vs 10 packed tight (saturating the
+//     density radius). The packed patch is throttled to ~zero while the lone plant spreads.
+const place = (id, x, y) => fetch(`${base}/admin/place?id=${id}&x=${x}&y=${y}`, { method: 'POST', headers: { 'x-admin-key': 'local-dev-key' } }).then((r) => r.json());
+const plantsForDensity = (await snapshot()).objects.filter((o) => o.family === 'seed' && o.maturity < 0.86).slice(0, 11).map((o) => o.id);
+const LONE = { x: 7000, y: 0 }, DENSE = { x: -7000, y: 0 };
+await place(plantsForDensity[0], LONE.x, LONE.y); await lifecycle(plantsForDensity[0], 1, 0); // a lone mature plant
+for (let i = 1; i <= 10; i++) { const a = (i / 10) * Math.PI * 2; await place(plantsForDensity[i], DENSE.x + Math.cos(a) * 45, DENSE.y + Math.sin(a) * 45); await lifecycle(plantsForDensity[i], 1, 0); } // 10 packed within the density radius
+await tick(60);                                              // ~10 shed opportunities (every SHED_TICKS)
+const wDen = await snapshot();
+const near = (o, c) => Math.hypot(o.x - c.x, o.y - c.y) < 500;
+const loneKids = wDen.objects.filter((o) => o.family === 'seed' && near(o, LONE)).length - 1;   // minus the one we placed
+const denseKids = wDen.objects.filter((o) => o.family === 'seed' && near(o, DENSE)).length - 10; // minus the ten we placed
+check(loneKids >= 3, `a lone mature plant sheds freely (${loneKids} offspring over 60 ticks)`);
+check(denseKids < loneKids, `a packed patch of 10 plants sheds FEWER than 1 lone plant — crowding throttles reproduction (dense ${denseKids} vs lone ${loneKids})`);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

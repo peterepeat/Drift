@@ -93,5 +93,19 @@ const g1 = creatures(await snap()).find((o) => o.id === gc.creature.id);
 const dAfter = Math.hypot(FARP + 300 - g1.x, FARP - g1.y);
 check(dAfter < dBefore - 100, `a creature drifts toward a nearby plant to feed (${dBefore.toFixed(0)}u -> ${dAfter.toFixed(0)}u)`);
 
+// 8. drink → the NEAREST pond, not the hardcoded central one (the "all bugs walk to the
+// same place" bug). A creature far beyond the central pool's reach but beside an OUTER
+// pond now has a drink target THERE; the old code only ever considered the central pool,
+// so out here it gave no target and the creature sat still.
+const POND3 = { x: 520, y: 1180, r: 230 };               // an outer pond (POOLS[3]); ~2076u from centre
+const rimDist = (c) => Math.hypot(c.x - POND3.x, c.y - POND3.y) - POND3.r;
+const dc = await spawn('crawler', POND3.x, POND3.y + POND3.r + 600); // 600u outside its rim, out of the old central-pool reach
+const dk0 = creatures(await snap()).find((o) => o.id === dc.creature.id);
+const drinkBefore = rimDist(dk0);
+await tickG(26);                                          // a full drive cycle → its 'drink' ticks fire
+const dk1 = creatures(await snap()).find((o) => o.id === dc.creature.id);
+const drinkAfter = rimDist(dk1);
+check(drinkAfter < drinkBefore - 100, `a creature drinks at its NEAREST pond, not the distant central one (${drinkBefore.toFixed(0)}u -> ${drinkAfter.toFixed(0)}u from the outer pond)`);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
