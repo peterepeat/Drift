@@ -101,11 +101,14 @@ if (!token) { token = crypto.randomUUID(); localStorage.setItem('drift_session',
 // resolution (dpr), the full-screen passes (noise/glows/flow/grade/sat-filter), per-
 // object shadows, the LOD pixel threshold, and drifting litter. Hysteresis + a cooldown
 // keep it from flapping. No UI, no toggle: it just adapts. Tier 0 = full, higher = leaner.
+// lodZoom: LOD only kicks in when zoomed OUT past this (camera.z below it). When zoomed
+// IN (z ≥ lodZoom) every object draws full detail, however small — so a close-up sprout
+// is never chunky. LOD is about zoom (distance), not absolute on-screen size.
 const QUALITY_TIERS = [
-  { dprCap: 2,    noise: 1, glows: 1, flow: 1, sky: 1, grade: 1, sat: 1, patches: 1, shadows: 1, leaves: 1, lodPx: 7  }, // full — detail persists a touch further out before LOD kicks in
-  { dprCap: 1.5,  noise: 0, glows: 1, flow: 1, sky: 1, grade: 1, sat: 1, patches: 1, shadows: 1, leaves: 1, lodPx: 9  }, // drop the full-screen noise; cap retina
-  { dprCap: 1.25, noise: 0, glows: 0, flow: 0, sky: 1, grade: 1, sat: 0, patches: 1, shadows: 1, leaves: 0, lodPx: 16 }, // drop glows/flow/litter + the sat-filter (a real GPU win)
-  { dprCap: 1,    noise: 0, glows: 0, flow: 0, sky: 0, grade: 0, sat: 0, patches: 0, shadows: 0, leaves: 0, lodPx: 28 }, // bare: no sky/grade/patches/shadows, aggressive LOD
+  { dprCap: 2,    noise: 1, glows: 1, flow: 1, sky: 1, grade: 1, sat: 1, patches: 1, shadows: 1, leaves: 1, lodPx: 7,  lodZoom: 0.5  }, // full
+  { dprCap: 1.5,  noise: 0, glows: 1, flow: 1, sky: 1, grade: 1, sat: 1, patches: 1, shadows: 1, leaves: 1, lodPx: 9,  lodZoom: 0.65 }, // drop the full-screen noise; cap retina
+  { dprCap: 1.25, noise: 0, glows: 0, flow: 0, sky: 1, grade: 1, sat: 0, patches: 1, shadows: 1, leaves: 0, lodPx: 16, lodZoom: 0.9  }, // drop glows/flow/litter + the sat-filter (a real GPU win)
+  { dprCap: 1,    noise: 0, glows: 0, flow: 0, sky: 0, grade: 0, sat: 0, patches: 0, shadows: 0, leaves: 0, lodPx: 28, lodZoom: 1.3  }, // bare: no sky/grade/patches/shadows, aggressive LOD even fairly zoomed in
 ];
 let qTier = 0, Q = QUALITY_TIERS[0];
 let frameMsEMA = 16.7, qLastChangeMs = 0, qHotFrames = 0, qCoolFrames = 0, qPrevNow = 0;
@@ -525,7 +528,7 @@ function drawObjectWorld(o) {
   // procedural tree is hundreds of wasted strokes — draw one colour blob instead. This
   // is the standard "when a tree is 5px, draw a dot" technique; only the zoomed-out view
   // is affected, close-up is untouched. Anomalies (luminous, rare) + fish always draw full.
-  if (rad * camera.z < Q.lodPx && o.family !== 'anomaly' && o.family !== 'fish' && o.family !== 'giant') { drawLOD(o, cx, cy, rad); return; }
+  if (camera.z < Q.lodZoom && rad * camera.z < Q.lodPx && o.family !== 'anomaly' && o.family !== 'fish' && o.family !== 'giant') { drawLOD(o, cx, cy, rad); return; }
   if (Q.shadows) paintGroundShadow(o, cx, cy, rad);
   if (ds === 1) { paintObject(o, cx, cy, ang); return; }
   ctx.save();
