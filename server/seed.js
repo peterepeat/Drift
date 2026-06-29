@@ -112,6 +112,17 @@ export const makeCreatureRecord = (id, seed, kind, x, y, now) => {
 // FORM of each object (id, position, seed) is fully deterministic; the starting
 // lifecycle mix makes the arrival world feel already in progress.
 const uniform = (rand, lo, hi) => lo + rand() * (hi - lo);
+// Soft-edged spread: a uniform CORE that smoothly tapers into an edgeless fringe, so the
+// world fades into the distance instead of stopping at a hard rectangle. The outer ~20%
+// of draws spread over a much wider, progressively-sparser band — no complete gap at the
+// edge. One rng draw (same as uniform), so the world stays deterministic + reproducible.
+function softEdge(u) {
+  const a = Math.abs(u), s = Math.sign(u);
+  if (a <= 0.8) return u;                          // uniform core (unchanged)
+  const t = (a - 0.8) / 0.2;                        // 0..1 across the fringe
+  return s * (0.8 + (t + t * t) * 0.35);            // accelerating stretch → density tapers toward nothing
+}
+const softUniform = (rand, scale) => scale * softEdge(rand() * 2 - 1);
 // Footprint of an object for spacing (world units): a stone's own radius, or a plant
 // scaled by its seeded maturity — so a mature tree reserves far more room than a seed.
 // Mirrors the client/server radii closely enough to keep seeded forms from overlapping.
@@ -174,7 +185,7 @@ export function generateWorld(now = Date.now(), count = N) {
   const heartSig = HEART_SIGMA * scale;
   const groves = [{ x: +uniform(rand, -60, 60).toFixed(2), y: +uniform(rand, -60, 60).toFixed(2), sig: heartSig }];
   for (let g = 1; g < GROVES; g++) {
-    groves.push({ x: +uniform(rand, -W, W).toFixed(2), y: +uniform(rand, -H, H).toFixed(2), sig: sigma });
+    groves.push({ x: +softUniform(rand, W).toFixed(2), y: +softUniform(rand, H).toFixed(2), sig: sigma });
   }
   const out = [];
   for (let i = 0; i < n; i++) {
@@ -184,7 +195,7 @@ export function generateWorld(now = Date.now(), count = N) {
     const id = detUuid(rand);
     let x, y;
     if (rand() < LONER_FRAC) {                                  // scattered in the open between groves
-      x = uniform(rand, -W, W); y = uniform(rand, -H, H);
+      x = softUniform(rand, W); y = softUniform(rand, H);
     } else {                                                    // gathered loosely into a grove
       const grove = groves[Math.floor(rand() * groves.length)];
       x = grove.x + gaussian(rand) * grove.sig;             // heart grove is tighter; the rest are loose
@@ -205,7 +216,7 @@ export function generateWorld(now = Date.now(), count = N) {
   // 2400): the relaxation is the one super-linear step, so a huge SEED_N skips it (the
   // scaled grove spread already distributes it) rather than stalling DO construction.
   // n<=3000 keeps prod + tests fully relaxed.
-  if (n <= 3000) relaxSpacing(out, RELAX_ITERS, SPACE_GAP, spacingRadius, rand, W + 600, H + 600);
+  if (n <= 3000) relaxSpacing(out, RELAX_ITERS, SPACE_GAP, spacingRadius, rand, W * 1.7, H * 1.7); // wide clamp so the soft fringe isn't clipped back into a hard edge
   for (const o of out) { o.x = +o.x.toFixed(2); o.y = +o.y.toFixed(2); }
   return out;
 }
@@ -218,7 +229,7 @@ export { N as SEED_COUNT };
 // route. 1 = the old single central clump; 2/3 = groves spread across a wide world;
 // 4 = wider, fuller, SIZE-AWARE spacing; 5 = looser groves + wider gaps + fewer
 // objects so clusters breathe (the "still too dense" fix).
-export const SEED_VERSION = 5;
+export const SEED_VERSION = 6;
 // Decide what a loading world needs: seed a fresh empty world, reseed a world left
 // by an older generator (one-time, version-gated), or nothing. Pure + unit-tested —
 // it carries the only loop-risk (a wrong "reseed" would wipe on every restart), so

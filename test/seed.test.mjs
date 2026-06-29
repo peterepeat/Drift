@@ -23,7 +23,11 @@ const CELL = 300, occ = new Set();
 a.forEach((r) => occ.add(Math.round(r.x / CELL) + ',' + Math.round(r.y / CELL)));
 check(occ.size > 90, `objects spread across the world, not clustered (${occ.size} occupied 300u cells)`);
 const maxR = Math.max(...a.map((r) => Math.hypot(r.x, r.y)));
-check(maxR > 1500 && maxR < 6000, `spread is wide but bounded (furthest ${maxR.toFixed(0)} wu)`);
+check(maxR > 1500 && maxR < 9000, `spread is wide but bounded, with a soft fringe (furthest ${maxR.toFixed(0)} wu)`);
+// the edge TAPERS: the outer ring is much sparser than the core (no hard rectangle)
+const R = a.map((r) => Math.hypot(r.x, r.y)).sort((p, q) => p - q);
+const rim = R[R.length - 1], core = R[Math.floor(R.length * 0.8)]; // furthest object vs the 80th-percentile radius
+check(rim > core * 1.25, `density tapers — a sparse fringe extends well past the dense core (core~${core.toFixed(0)} → rim ${rim.toFixed(0)})`);
 // relaxation: no two objects pile up on top of each other (kills the dense clump)
 const CS = 80, grid = new Map();
 a.forEach((r, i) => { const k = Math.round(r.x / CS) + ',' + Math.round(r.y / CS); (grid.get(k) || grid.set(k, []).get(k)).push(i); });
