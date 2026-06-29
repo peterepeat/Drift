@@ -37,6 +37,9 @@ const SHARED_RADIUS = 620;                   // world units within which two pre
 const SHARED_BOOST = 3.2;                     // strength of the extra between-them bloom (intensifies the shared patch)
 const SPROUT_C = 0.14;                        // maturity below this renders as a seed (mirrors server)
 const LOD_PX = 8;                             // below this on-screen radius (zoomed out), draw a cheap colour blob, not full procgen
+const GIANT_SEED = 0x6a11d7;                  // the gardener NPC's form (MUST match the server's GIANT_SEED)
+const GIANT_SCALE = 5;                        // how many times a normal creature the giant is drawn
+const GIANT_EASE = 0.4;                       // per-second retention for the giant's stride-glide (1-pow(this,dt); lower = quicker)
 const GLOW_PARALLAX = 0.04;                   // ambient glows drift this fraction of the camera (Wave H depth)
 const DEPTH_TOP = 0.2;                         // objects at the TOP of the screen draw this much smaller (Wave K recession — subtle)
 const ANOM_DISSOLVE_MS = 10000, ANOM_FADE_MS = 3000; // hold an anomaly 10s and it fades from your hands
@@ -206,6 +209,7 @@ const creatureEvts = [];       // brief birth-shimmer / death-puff cues { x, y, 
 const CREATURE_EVT_MS = 760;   // lifetime of a birth/death cue
 let pool = null;               // the central water pool { x, y, r } (flow + audio anchor)
 let pools = [];                // every pond the world carries (Wave P) — all rendered as water
+let giant = null;              // the gardener NPC { x, y, hx, hy, _tx, _ty } — server-authoritative, eased toward each broadcast spot
 let myPid = null;
 let seasonPhase = 0;           // monotonic season clock from the server (feels, never labelled)
 let lastSat = -1;              // last-applied canvas saturation (avoids per-frame style writes)
@@ -268,6 +272,7 @@ function objRadius(o) {
   if (o.family === 'stone') return stoneSize(o);
   if (o.family === 'anomaly') return anomalyR(o);
   if (o.family === 'crystal') return crystalR(o);
+  if (o.family === 'giant') return creatureR(GIANT_SEED, 'crawler') * GIANT_SCALE;
   if (o.family === 'creature') return creatureR(o.seed >>> 0, o.kind || 'crawler');
   if (o.family === 'fish') return fishR(o.seed >>> 0);
   const mat = shownMat(o);
@@ -381,6 +386,12 @@ function paintObject(o, cx, cy, ang = 0) {
   if (o.family === 'stone') { PG.drawStone(ctx, stoneGeom(o), cx, cy); return; }
   if (o.family === 'anomaly') { drawAnomalyForm(ctx, o, animT, cx, cy, anomalyR(o)); return; }
   if (o.family === 'crystal') { PG.drawCrystal(ctx, o.seed >>> 0, cx, cy, crystalR(o), animT); return; }
+  if (o.family === 'giant') { // the gardener — a big, gentle creature
+    const ga = Math.atan2(o.hy || 0, o.hx || 1);
+    ctx.save(); ctx.translate(cx, cy); ctx.scale(GIANT_SCALE, GIANT_SCALE);
+    drawCreature(ctx, GIANT_SEED, 'crawler', 0, 0, animT, ga, null, false);
+    ctx.restore(); return;
+  }
   if (o.family === 'creature') { drawCreature(ctx, o.seed >>> 0, o.kind || 'crawler', cx, cy, animT, ang, glowHueOf(o), isTamed(o)); return; }
   if (o.family === 'fish') { drawFish(ctx, o.seed >>> 0, cx, cy, animT, ang); return; }
   const mat = shownMat(o), aged = shownAged(o);
@@ -472,7 +483,7 @@ function drawObjectWorld(o) {
   // procedural tree is hundreds of wasted strokes — draw one colour blob instead. This
   // is the standard "when a tree is 5px, draw a dot" technique; only the zoomed-out view
   // is affected, close-up is untouched. Anomalies (luminous, rare) + fish always draw full.
-  if (rad * camera.z < LOD_PX && o.family !== 'anomaly' && o.family !== 'fish') { drawLOD(o, cx, cy, rad); return; }
+  if (rad * camera.z < LOD_PX && o.family !== 'anomaly' && o.family !== 'fish' && o.family !== 'giant') { drawLOD(o, cx, cy, rad); return; }
   paintGroundShadow(o, cx, cy, rad);
   if (ds === 1) { paintObject(o, cx, cy, ang); return; }
   ctx.save();
@@ -587,6 +598,11 @@ function updatePositions(now) {
     const r = o.family === 'creature' ? kc : k;
     o.x += (o._tx - o.x) * r;
     o.y += (o._ty - o.y) * r;
+  }
+  if (giant && giant._tx != null) { // the gardener glides toward its latest broadcast spot — a slow, deliberate stride
+    const kg = dt > 0 ? 1 - Math.pow(GIANT_EASE, dt) : 0;
+    giant.x += (giant._tx - giant.x) * kg;
+    giant.y += (giant._ty - giant.y) * kg;
   }
 }
 // Holding an anomaly for 10s dissolves it (it fades from your hands — never explained).
@@ -1228,6 +1244,7 @@ function onMessage(raw) {
       if (m.now != null) clockSkew = m.now - Date.now(); // lock the creature wander clock to the server's
       if (m.pool) pool = m.pool;
       if (Array.isArray(m.pools) && m.pools.length) pools = m.pools; else if (pool) pools = [pool]; // every pond (fallback: the central one)
+      if (m.giant && Number.isFinite(m.giant.x)) giant = { ...m.giant, _tx: m.giant.x, _ty: m.giant.y }; // the gardener (snap to its spot on (re)connect)
       if (m.bounds && Number.isFinite(m.bounds.x) && Number.isFinite(m.bounds.y)) worldBounds = m.bounds; // before the arrive, so a stranded home is pulled back in
       // Orient on the FIRST arrival only (a reconnect must not yank the camera back):
       // a returning visitor drifts toward their remembered home, a new one toward the cog.
@@ -1275,6 +1292,10 @@ function onMessage(raw) {
     case 'season': { // the world's slow clock advanced
       if (m.phase != null) seasonPhase = m.phase;
       if (m.bounds && Number.isFinite(m.bounds.x) && Number.isFinite(m.bounds.y)) worldBounds = m.bounds; // keep the camera bound fresh as the world grows
+      if (m.giant && Number.isFinite(m.giant.x)) { // the gardener stepped — glide toward its new spot
+        if (giant) { giant._tx = m.giant.x; giant._ty = m.giant.y; giant.hx = m.giant.hx; giant.hy = m.giant.hy; }
+        else giant = { ...m.giant, _tx: m.giant.x, _ty: m.giant.y };
+      }
       break;
     }
     case 'object_new': { // a shed seed (or other runtime-spawned object)
@@ -1402,6 +1423,16 @@ function frame(now) {
     list.push(o);
   }
   frameStones = nextStones; // creaturePos reads this next frame (a frame's lag is invisible)
+  // The gardener (Stage 1): a synthetic draw entry so it sorts + shadows + depth-scales
+  // with everything else. Not in `objects`, so it's never hit-tested or pickable.
+  if (giant) {
+    const gs = worldToScreen(giant.x, giant.y);
+    if (inViewport(gs.x, gs.y, vw, vh, CULL_MARGIN)) {
+      const ge = { family: 'giant', id: '__giant', x: giant.x, y: giant.y, seed: GIANT_SEED, hx: giant.hx || 1, hy: giant.hy || 0 };
+      ge._sortY = giant.y; ge._depthScale = depthScaleAt(gs.y);
+      list.push(ge);
+    }
+  }
   // painter's depth by ground line; ties broken by id for a stable, deterministic order
   list.sort((a, b) => (a._sortY - b._sortY) || (a.id < b.id ? -1 : 1));
   // attend (§5.2): ease the reveal in/out and bloom it behind the attended object

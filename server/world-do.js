@@ -206,6 +206,13 @@ const CREATURE_STEP = 46;                 // world units the home migrates towar
 const CREATURE_SEEK_R = 720;              // how far a creature looks for an attractor
 const CREATURE_ARRIVE = 42;               // stop this near the goal (graze/rest beside it, don't pile on)
 const CREATURE_DRIVE_TICKS = 5;           // a creature holds one drive ~this many ticks before it shifts
+// ---- the giant: a shared, world-tending NPC (the gardener, built in stages) -
+const GIANT_SEED = 0x6a11d7;              // fixed form — one big, gentle creature for everyone
+const GIANT_STEP = 90;                    // world units it strolls per tick (slow + dreamy; the client glides between)
+const GIANT_REACH = 64;                   // close enough to tend its goal
+const GIANT_SIGHT = 900;                  // how far it looks for something to tend
+const GIANT_ROAM = 1400;                  // when nothing needs tending, it strolls within this of the world's heart (the cog)
+const GIANT_FUSE_R = 78;                  // it presses two stones THIS close together into one (a small, eased nudge — a cairn)
 
 // ---- stones: erosion-to-grit, fuse & break (Family 1) ----------------------
 // Stones don't grow; they erode by handling (each place wears them smoother and
@@ -305,6 +312,7 @@ export class WorldRoom {
     this.seedCount = Number.isFinite(envSeedN) ? Math.max(20, Math.min(50000, envSeedN)) : undefined;
     this.objects = new Map();      // id -> record
     this.cog = { x: 0, y: 0, n: 0 };
+    this.giant = { x: 0, y: 0, hx: 1, hy: 0, goal: null }; // the gardener NPC — a shared creature that strolls + tends (in-memory; starts from the cog on load)
     this.lastSeen = new Map();     // pid -> ts (presence liveness)
     this.presencePos = new Map();  // pid -> { x, y, ts } (drives warmth)
     this.bcastMark = new Map();    // id -> { maturity, aged } last broadcast (chatter control)
@@ -336,6 +344,7 @@ export class WorldRoom {
     // last_touched=now on every cold load and never accumulate its fade clock.
     for (const [, rec] of list) { if (this.#migrate(rec)) this.dirty.add(rec.id); this.objects.set(rec.id, rec); }
     this.cog = (await this.state.storage.get('cog')) || { x: 0, y: 0, n: 0 };
+    this.giant.x = this.cog.x; this.giant.y = this.cog.y; // the gardener begins its stroll from the world's heart
     this.season = (await this.state.storage.get('meta:season')) || 0;
     this.heat = (await this.state.storage.get('field:heat')) || null; // rebuilt lazily if absent
     this.lastCheckpoint = (await this.state.storage.get('meta:checkpoint')) || 0;
@@ -503,6 +512,14 @@ export class WorldRoom {
       this.objects.set(cr.id, cr); this.#gridAdd(cr); await this.#persist(cr);
       this.#bcast({ t: 'object_new', o: this.#pub(cr) }, null);
       return Response.json({ ok: true, creature: { id: cr.id, kind: cr.kind, x: cr.x, y: cr.y } });
+    }
+
+    // Ops/testing only: read the giant, or set its position (?x=&y=) + clear its goal. Gated.
+    if (url.pathname === '/admin/giant') {
+      if (!this.#adminOk(request)) return Response.json({ ok: false, error: 'forbidden' }, { status: 403 });
+      const px = url.searchParams.get('x'), py = url.searchParams.get('y');
+      if (px != null && py != null) { this.giant.x = parseFloat(px); this.giant.y = parseFloat(py); this.giant.goal = null; }
+      return Response.json({ ok: true, giant: { x: this.giant.x, y: this.giant.y, goal: this.giant.goal } });
     }
 
     // Ops/testing only: spawn one fish in a pond (?pond= index, default central). Gated.
@@ -681,7 +698,7 @@ export class WorldRoom {
     // #inBox); the box-less full world stays a plain scan (old / test clients).
     const src = box ? this.#gridQueryBox(box) : this.objects.values();
     for (const o of src) { if (box && !this.#inBox(o, box)) continue; objects.push(this.#pub(o)); }
-    return { t: 'world_state', now: Date.now(), pid, season: this.season, pool: POOL, pools: POOLS, cog: { x: this.cog.x, y: this.cog.y }, bounds: this.bounds || this.#computeBounds(), objects };
+    return { t: 'world_state', now: Date.now(), pid, season: this.season, pool: POOL, pools: POOLS, cog: { x: this.cog.x, y: this.cog.y }, bounds: this.bounds || this.#computeBounds(), giant: this.#giantPub(), objects };
   }
   // Half-extents of the whole object field (every object, not just the box) — the
   // client clamps its camera here so it can never wander far into empty space. A
@@ -1285,8 +1302,9 @@ export class WorldRoom {
       checkpointWrote = await this.#checkpoint(now);
       checkpointed = true;
     }
+    await this.#giantStep(now); // the gardener strolls a step + tends what it reaches
     this.bounds = this.#computeBounds(); // refresh the camera bound (the world grows/shrinks)
-    this.#bcast({ t: 'season', phase: this.season, bounds: this.bounds }, null); // feel the clock turn + keep the camera bound fresh
+    this.#bcast({ t: 'season', phase: this.season, bounds: this.bounds, giant: this.#giantPub() }, null); // feel the clock turn + the giant's new spot (client glides to it)
 
     return { spawned: spawned.length, gone: gone.length, checkpointed, checkpointWrote };
   }
@@ -1733,6 +1751,67 @@ export class WorldRoom {
     }
     return best ? { x: best.x, y: best.y } : null;
   }
+
+  // ---- the giant (gardener NPC) ----------------------------------------------
+  // Each tick it strolls one step toward a goal; on arrival it TENDS (ripens a young
+  // plant, or presses two adjacent stones into one). Server-authoritative + broadcast
+  // on the tick; the client glides it between waypoints (no per-frame sync). Its own
+  // position is in-memory only (zero new writes); its tending mutates real objects.
+  async #giantStep(now) {
+    const g = this.giant;
+    if (!g.goal || !this.#giantGoalValid(g.goal)) g.goal = this.#giantPickGoal(g);
+    const dx = g.goal.x - g.x, dy = g.goal.y - g.y, d = Math.hypot(dx, dy) || 1;
+    if (d > GIANT_REACH) { const s = Math.min(GIANT_STEP, d); g.x += (dx / d) * s; g.y += (dy / d) * s; g.hx = dx / d; g.hy = dy / d; }
+    else { await this.#giantAct(g, now); g.goal = null; } // arrived — tend, then choose anew next tick
+  }
+  #giantGoalValid(goal) {
+    if (goal.kind === 'stroll') return true;
+    const o = this.objects.get(goal.id);
+    if (!o || o.held !== '') return false;
+    if (goal.kind === 'ripen') return o.family === 'seed' && (o.maturity || 0) > 0.02 && (o.maturity || 0) < 1;
+    if (goal.kind === 'tendstone') return o.family === 'stone' && !!this.#giantStonePartner(o);
+    return false;
+  }
+  #giantPickGoal(g) {
+    let best = null, bd = GIANT_SIGHT; // a young plant to ripen (nearest in sight)
+    for (const o of this.#gridNear(g.x, g.y, GIANT_SIGHT, (o) => o.family === 'seed' && o.held === '' && (o.maturity || 0) > 0.06 && (o.maturity || 0) < 1)) {
+      const d = Math.hypot(o.x - g.x, o.y - g.y); if (d < bd) { bd = d; best = o; }
+    }
+    if (best) return { kind: 'ripen', id: best.id, x: best.x, y: best.y };
+    let stone = null, sd = GIANT_SIGHT; // else two stones close enough to press into a cairn
+    for (const o of this.#gridNear(g.x, g.y, GIANT_SIGHT, (o) => o.family === 'stone' && o.held === '')) {
+      const d = Math.hypot(o.x - g.x, o.y - g.y);
+      if (d < sd && this.#giantStonePartner(o)) { sd = d; stone = o; }
+    }
+    if (stone) return { kind: 'tendstone', id: stone.id, x: stone.x, y: stone.y };
+    const a = Math.random() * Math.PI * 2, r = Math.random() * GIANT_ROAM; // nothing to tend — stroll near the world's heart
+    return { kind: 'stroll', x: this.cog.x + Math.cos(a) * r, y: this.cog.y + Math.sin(a) * r };
+  }
+  #giantStonePartner(stone) { // a different free stone within fuse-gather range
+    for (const o of this.#gridNear(stone.x, stone.y, GIANT_FUSE_R, (o) => o.family === 'stone' && o.held === '')) {
+      if (o.id !== stone.id && Math.hypot(o.x - stone.x, o.y - stone.y) <= GIANT_FUSE_R) return o;
+    }
+    return null;
+  }
+  async #giantAct(g, now) {
+    const goal = g.goal;
+    if (goal.kind === 'ripen') {
+      const o = this.objects.get(goal.id);
+      if (o && o.family === 'seed' && (o.maturity || 0) < 1) { o.maturity = 1; o.aged = 0; o.heat = 0; o.last_touched = now; await this.#persist(o); this.#bcast(this.#stateMsg(o, now), null); }
+    } else if (goal.kind === 'tendstone') {
+      const o = this.objects.get(goal.id); if (!o || o.held !== '') return;
+      const partner = this.#giantStonePartner(o); if (!partner) return;
+      o.x = partner.x; o.y = partner.y; o.last_touched = now; this.#gridUpdate(o); // nudge the stray onto its partner → fuse into a larger stone
+      const fused = this.#tryFuse(o, now);
+      if (fused) {
+        this.#gridRemove(o); this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id); this.dirty.delete(o.id);
+        await this.state.storage.delete('obj:' + o.id); this.objWrites++;
+        this.#bcast({ t: 'object_gone', id: o.id, fused: fused.id }, null);
+        await this.#persist(fused); this.#bcast(this.#stateMsg(fused, now), null);
+      } else { this.#gridUpdate(o); await this.#persist(o); this.#bcast(this.#stateMsg(o, now), null); }
+    }
+  }
+  #giantPub() { const g = this.giant; return { x: g.x, y: g.y, hx: g.hx, hy: g.hy }; }
 
   // A creature's "strength" = its drawn size (mirrors public/creatures.js creatureR):
   // in a clash the smaller one is the loser. Server-only (it decides + broadcasts the
