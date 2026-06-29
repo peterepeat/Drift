@@ -198,6 +198,9 @@ const presences = new Map();   // pid -> { x, y, born, last, gone }
 const lifts = new Map();       // id -> lift animation state
 const flashes = [];            // brief crystal-dissolution flashes { x, y, start }
 const ripples = [];            // brief water ripples — a bug dropped in a pond becomes fish food { x, y, start }
+const feedRushes = [];         // a pond's fish DART toward dropped food then ease back { x, y, start, pond } — local/cosmetic
+const FEED_RUSH_MS = 1700;     // how long the feeding dart lasts
+const FEED_RUSH_STR = 0.82;    // how far toward the food the fish rush (1 = right onto it)
 const grits = [];              // brief stone-to-grit scatters { x, y, seed, r, start }
 const creatureEvts = [];       // brief birth-shimmer / death-puff cues { x, y, start, birth } — the ecosystem made legible
 const CREATURE_EVT_MS = 760;   // lifetime of a birth/death cue
@@ -333,6 +336,20 @@ function creaturePos(o) {
       x = nx; y = ny;
     }
   }
+  // A pond's fish RUSH toward food just dropped in (a bug → fish food), darting in fast
+  // then easing back to their wander — a brief feeding frenzy. Purely local & cosmetic
+  // (the splash event drives it on every client); the fish's home/wander is untouched.
+  if (kind === 'fish' && feedRushes.length) {
+    let target = null, bestF = 0;
+    for (const fr of feedRushes) {
+      if (Math.hypot(x - fr.pond.x, y - fr.pond.y) > fr.pond.r + 40) continue; // only the food's own pond
+      const tt = (animT * 1000 - fr.start) / FEED_RUSH_MS;
+      if (tt < 0 || tt > 1) continue;
+      const f = (tt < 0.3 ? tt / 0.3 : 1 - (tt - 0.3) / 0.7) * FEED_RUSH_STR; // dart in fast, ease out slow
+      if (f > bestF) { bestF = f; target = fr; }
+    }
+    if (target) { ang = Math.atan2(target.y - y, target.x - x); x += (target.x - x) * bestF; y += (target.y - y) * bestF; }
+  }
   // Unit ⑥: a ground creature steers AROUND rock footprints instead of walking over
   // them — solids read as solid. Purely local & cosmetic: the creature's server-side
   // home/wander is untouched, only where it's drawn (so two viewports can fence it
@@ -435,9 +452,13 @@ function drawMark(o, life) {
     if (i === 0) ctx.moveTo(mx, my); else ctx.quadraticCurveTo(b0.x, b0.y, mx, my);
   }
   ctx.closePath();
-  const rg = ctx.createRadialGradient(o.x, o.y, 0, o.x, o.y, g.radius * 1.05); // soft toward the rim
+  // Feather the fill FULLY to nothing at the rim (was 0.35·a) so the rock's hard edge
+  // vanishes — overlapping digs then melt into one soft stain instead of stacking into
+  // crisp lens-shaped overlaps. The dug centre stays as visible as before.
+  const rg = ctx.createRadialGradient(o.x, o.y, 0, o.x, o.y, g.radius * 1.18);
   rg.addColorStop(0, PG.rgba(MARK_TINT, a));
-  rg.addColorStop(1, PG.rgba(MARK_TINT, a * 0.35));
+  rg.addColorStop(0.5, PG.rgba(MARK_TINT, a * 0.5));
+  rg.addColorStop(1, PG.rgba(MARK_TINT, 0));
   ctx.fillStyle = rg; ctx.fill();
   ctx.restore();
 }
@@ -1272,7 +1293,11 @@ function onMessage(raw) {
     }
     case 'object_gone': {
       const og = objects.get(m.id);
-      if (m.splash) ripples.push({ x: m.x, y: m.y, start: performance.now() }); // a bug dropped in a pond → fish food
+      if (m.splash) { // a bug dropped in a pond → fish food: a ripple + the pond's fish rush over to eat
+        ripples.push({ x: m.x, y: m.y, start: performance.now() });
+        const pond = pools.find((p) => Math.hypot(m.x - p.x, m.y - p.y) <= p.r + 30);
+        if (pond) feedRushes.push({ x: m.x, y: m.y, start: performance.now(), pond });
+      }
       else if (m.burst) ripples.push({ x: m.x, y: m.y, start: performance.now(), burst: true }); // an anomaly burst a tree into saplings
       else if (og && og.family === 'crystal') flashes.push({ x: og.x, y: og.y, start: performance.now() }); // brief flash
       else if (og && (og.family === 'stone' || m.grit)) // worn to grit — a brief scatter of dust
@@ -1475,6 +1500,7 @@ function frame(now) {
     }
     ctx.restore();
   }
+  for (let i = feedRushes.length - 1; i >= 0; i--) if (now - feedRushes[i].start > FEED_RUSH_MS) feedRushes.splice(i, 1); // expire the feeding darts
 
   paintSeasonGrade(ctx, vw, vh, seasonPhase); // season composite (crossfaded), last
 
