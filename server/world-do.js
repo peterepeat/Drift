@@ -214,6 +214,8 @@ const GIANT_REACH = 64;                   // close enough to tend its goal
 const GIANT_SIGHT = 900;                  // how far it looks for something to tend
 const GIANT_ROAM = 1400;                  // when nothing needs tending, it strolls within this of the world's heart (the cog)
 const GIANT_FUSE_R = 78;                  // it presses two stones THIS close together into one (a small, eased nudge — a cairn)
+const GIANT_THIN_R = 160;                 // it THINS a plant standing in a patch this crowded (same-family count within this radius)
+const GIANT_THIN_N = 12;                  // ...crowded means at least this many neighbours (a patient force against runaway thickets)
 
 // ---- stones: erosion-to-grit, fuse & break (Family 1) ----------------------
 // Stones don't grow; they erode by handling (each place wears them smoother and
@@ -1782,23 +1784,44 @@ export class WorldRoom {
     const o = this.objects.get(goal.id);
     if (!o || o.held !== '') return false;
     if (goal.kind === 'ripen') return o.family === 'seed' && (o.maturity || 0) > 0.02 && (o.maturity || 0) < 1;
+    if (goal.kind === 'thin') return o.family === 'seed' && this.#giantOvercrowded(o);
+    if (goal.kind === 'fillhole') return o.family === 'mark';
     if (goal.kind === 'tendstone') return o.family === 'stone' && !!this.#giantStonePartner(o);
     return false;
   }
+  // A patient force toward balance: it CYCLES its attention so over time it does a variety
+  // of work — ripen the young, THIN the over-crowded, FILL dug holes, build cairns —
+  // rather than only ever the first thing it sees. (Breeding-where-sparse is handled by
+  // the density-throttled shedding; the giant actively reduces the surplus.)
   #giantPickGoal(g) {
-    let best = null, bd = GIANT_SIGHT; // a young plant to ripen (nearest in sight)
-    for (const o of this.#gridNear(g.x, g.y, GIANT_SIGHT, (o) => o.family === 'seed' && o.held === '' && (o.maturity || 0) > 0.06 && (o.maturity || 0) < 1)) {
-      const d = Math.hypot(o.x - g.x, o.y - g.y); if (d < bd) { bd = d; best = o; }
-    }
-    if (best) return { kind: 'ripen', id: best.id, x: best.x, y: best.y };
-    let stone = null, sd = GIANT_SIGHT; // else two stones close enough to press into a cairn
-    for (const o of this.#gridNear(g.x, g.y, GIANT_SIGHT, (o) => o.family === 'stone' && o.held === '')) {
-      const d = Math.hypot(o.x - g.x, o.y - g.y);
-      if (d < sd && this.#giantStonePartner(o)) { sd = d; stone = o; }
-    }
-    if (stone) return { kind: 'tendstone', id: stone.id, x: stone.x, y: stone.y };
-    const a = Math.random() * Math.PI * 2, r = Math.random() * GIANT_ROAM; // nothing to tend — stroll near the world's heart
+    g.cycle = (g.cycle || 0) + 1;
+    const finders = [() => this.#giantFindRipen(g), () => this.#giantFindThin(g), () => this.#giantFindFillhole(g), () => this.#giantFindStone(g)];
+    const start = g.cycle % finders.length;
+    for (let i = 0; i < finders.length; i++) { const goal = finders[(start + i) % finders.length](); if (goal) return goal; }
+    const a = Math.random() * Math.PI * 2, r = Math.random() * GIANT_ROAM; // nothing needs tending — stroll near the world's heart
     return { kind: 'stroll', x: this.cog.x + Math.cos(a) * r, y: this.cog.y + Math.sin(a) * r };
+  }
+  #giantNearest(g, kind, filter, extra) {
+    let best = null, bd = GIANT_SIGHT;
+    for (const o of this.#gridNear(g.x, g.y, GIANT_SIGHT, filter)) {
+      const d = Math.hypot(o.x - g.x, o.y - g.y);
+      if (d < bd && (!extra || extra(o))) { bd = d; best = o; }
+    }
+    return best ? { kind, id: best.id, x: best.x, y: best.y } : null;
+  }
+  #giantFindRipen(g) { return this.#giantNearest(g, 'ripen', (o) => o.family === 'seed' && o.held === '' && (o.maturity || 0) > 0.06 && (o.maturity || 0) < 1); }
+  #giantFindThin(g) { return this.#giantNearest(g, 'thin', (o) => o.family === 'seed' && o.held === '', (o) => this.#giantOvercrowded(o)); }
+  #giantFindFillhole(g) { return this.#giantNearest(g, 'fillhole', (o) => o.family === 'mark'); }
+  #giantFindStone(g) { return this.#giantNearest(g, 'tendstone', (o) => o.family === 'stone' && o.held === '', (o) => !!this.#giantStonePartner(o)); }
+  // Is this plant standing in an over-crowded patch (≥ GIANT_THIN_N same-family neighbours)?
+  #giantOvercrowded(o) {
+    let n = 0; const r2 = GIANT_THIN_R * GIANT_THIN_R;
+    for (const s of this.#gridNear(o.x, o.y, GIANT_THIN_R, (s) => s.family === 'seed')) {
+      if (s.id === o.id) continue;
+      const dx = s.x - o.x, dy = s.y - o.y;
+      if (dx * dx + dy * dy <= r2 && ++n >= GIANT_THIN_N) return true;
+    }
+    return false;
   }
   #giantStonePartner(stone) { // a different free stone within fuse-gather range
     for (const o of this.#gridNear(stone.x, stone.y, GIANT_FUSE_R, (o) => o.family === 'stone' && o.held === '')) {
@@ -1822,6 +1845,13 @@ export class WorldRoom {
         this.#bcast({ t: 'object_gone', id: o.id, fused: fused.id }, null);
         await this.#persist(fused); this.#bcast(this.#stateMsg(fused, now), null);
       } else { this.#gridUpdate(o); await this.#persist(o); this.#bcast(this.#stateMsg(o, now), null); }
+    } else if (goal.kind === 'thin' || goal.kind === 'fillhole') {
+      // thin a surplus plant from an over-crowded patch, or fill in a dug hole — either
+      // way the thing it reached is gently removed (a patient force toward balance).
+      const o = this.objects.get(goal.id); if (!o || o.held !== '') return;
+      this.#gridRemove(o); this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id); this.dirty.delete(o.id);
+      await this.state.storage.delete('obj:' + o.id); this.objWrites++;
+      this.#bcast({ t: 'object_gone', id: o.id }, null);
     }
   }
   #giantPub() { const g = this.giant; return { x: g.x, y: g.y, hx: g.hx, hy: g.hy, walk: g.walk || 0 }; }

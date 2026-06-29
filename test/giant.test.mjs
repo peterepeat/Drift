@@ -43,5 +43,25 @@ const moved = Math.hypot(g1.x - g0.x, g1.y - g0.y);
 check(moved > 50, `the gardener strolls when there's nothing to tend (moved ${moved.toFixed(0)}u over 3 ticks)`);
 check(Number.isFinite(g1.hx) && Number.isFinite(g1.hy) && Math.hypot(g1.hx, g1.hy) > 0.5, 'it carries a heading (which way it faces) as it moves');
 
+// 4. EQUILIBRIUM — it THINS an over-crowded patch (a patient force against thickets)
+const THIN = { x: -8000, y: 8000 };
+const cluster = (await snap()).objects.filter((o) => o.family === 'seed' && o.maturity < 0.86).slice(0, 18).map((o) => o.id);
+for (const id of cluster) { await place(id, THIN.x + (Math.random() * 80 - 40), THIN.y + (Math.random() * 80 - 40)); await lifecycle(id, 1, 0); } // 18 mature plants packed tight
+await setGiant(THIN.x, THIN.y);
+const cBefore = (await snap()).objects.filter((o) => o.family === 'seed' && Math.hypot(o.x - THIN.x, o.y - THIN.y) < 200).length;
+await tickG(6);
+const cAfter = (await snap()).objects.filter((o) => o.family === 'seed' && Math.hypot(o.x - THIN.x, o.y - THIN.y) < 200).length;
+check(cAfter < cBefore, `the giant thins an over-crowded patch toward balance (${cBefore} -> ${cAfter})`);
+
+// 5. EQUILIBRIUM — it FILLS a dug hole it reaches (no heal-timer needed)
+const HOLE = { x: 9000, y: -9000 };
+const hws = await open(); await hws.world;
+hws.send(JSON.stringify({ t: 'mark', x: HOLE.x, y: HOLE.y, ts: Date.now() })); await new Promise((r) => setTimeout(r, 200)); hws.close();
+const hBefore = (await snap()).objects.filter((o) => o.family === 'mark' && Math.hypot(o.x - HOLE.x, o.y - HOLE.y) < 50).length;
+await setGiant(HOLE.x, HOLE.y);
+await tickG(5);
+const hAfter = (await snap()).objects.filter((o) => o.family === 'mark' && Math.hypot(o.x - HOLE.x, o.y - HOLE.y) < 50).length;
+check(hBefore === 1 && hAfter === 0, `the giant fills a dug hole it reaches (${hBefore} -> ${hAfter})`);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
