@@ -9,6 +9,7 @@ import { inViewport, CULL_MARGIN } from './cull.js';
 import { Audio } from './audio.js';
 import { flingStep, ema, nudge, spring, deflectCircles } from './physics.js';
 import { wanderAt, drawCreature, creatureR, drawFish, fishR } from './creatures.js';
+import { drawGiant } from './giant.js';
 
 // ---- tuning constants -------------------------------------------------------
 const Z0 = 1.0, ZMIN = 0.2, ZMAX = 4.0;     // zoom = CSS px per world unit
@@ -37,9 +38,11 @@ const SHARED_RADIUS = 620;                   // world units within which two pre
 const SHARED_BOOST = 3.2;                     // strength of the extra between-them bloom (intensifies the shared patch)
 const SPROUT_C = 0.14;                        // maturity below this renders as a seed (mirrors server)
 const LOD_PX = 8;                             // below this on-screen radius (zoomed out), draw a cheap colour blob, not full procgen
-const GIANT_SEED = 0x6a11d7;                  // the gardener NPC's form (MUST match the server's GIANT_SEED)
-const GIANT_SCALE = 5;                        // how many times a normal creature the giant is drawn
-const GIANT_EASE = 0.4;                       // per-second retention for the giant's stride-glide (1-pow(this,dt); lower = quicker)
+const GIANT_R = 150;                          // the journeyer's overall height in world units (~the old 5× creature mass)
+const GIANT_EASE = 0.4;                       // per-second retention for the giant's correction toward each broadcast spot
+const GIANT_VIS_SPEED = 6;                    // world u/s it WALKS along its heading between ticks (≈ GIANT_STEP/tick) — continuous motion, not parked
+const FOOT_FADE_MS = 4200;                    // a footprint fades this fast (so the giant doesn't track prints all over the world)
+const FOOT_STEP = 52;                         // drop a print every this-many world units walked
 const GLOW_PARALLAX = 0.04;                   // ambient glows drift this fraction of the camera (Wave H depth)
 const DEPTH_TOP = 0.2;                         // objects at the TOP of the screen draw this much smaller (Wave K recession — subtle)
 const ANOM_DISSOLVE_MS = 10000, ANOM_FADE_MS = 3000; // hold an anomaly 10s and it fades from your hands
@@ -209,7 +212,8 @@ const creatureEvts = [];       // brief birth-shimmer / death-puff cues { x, y, 
 const CREATURE_EVT_MS = 760;   // lifetime of a birth/death cue
 let pool = null;               // the central water pool { x, y, r } (flow + audio anchor)
 let pools = [];                // every pond the world carries (Wave P) — all rendered as water
-let giant = null;              // the gardener NPC { x, y, hx, hy, _tx, _ty } — server-authoritative, eased toward each broadcast spot
+let giant = null;              // the gardener NPC { x, y, hx, hy, walk, _tx, _ty } — server-authoritative; walked continuously client-side
+const giantFootprints = [];    // fading prints the journeyer leaves as it walks { x, y, start } — cosmetic, local
 let myPid = null;
 let seasonPhase = 0;           // monotonic season clock from the server (feels, never labelled)
 let lastSat = -1;              // last-applied canvas saturation (avoids per-frame style writes)
@@ -272,7 +276,7 @@ function objRadius(o) {
   if (o.family === 'stone') return stoneSize(o);
   if (o.family === 'anomaly') return anomalyR(o);
   if (o.family === 'crystal') return crystalR(o);
-  if (o.family === 'giant') return creatureR(GIANT_SEED, 'crawler') * GIANT_SCALE;
+  if (o.family === 'giant') return GIANT_R * 0.5; // footprint for depth-sort (it draws its own shadow; never hit-tested)
   if (o.family === 'creature') return creatureR(o.seed >>> 0, o.kind || 'crawler');
   if (o.family === 'fish') return fishR(o.seed >>> 0);
   const mat = shownMat(o);
@@ -308,6 +312,14 @@ function tameFactor(o) {
   return Math.max(0, Math.min(1, Math.min(elapsed / 2500, remain / 2500)));
 }
 function isTamed(o) { return tameFactor(o) > 0.02; }
+// A friendly little 3-note flourish when you greet the giant — all on the season
+// pentatonic (so it's consonant + musical), silent unless sound is on.
+function giantChime() {
+  const x = giant ? giant.x : 0;
+  Audio.event('pickup', { seed: 0x51b1, family: 'anomaly', x });
+  setTimeout(() => Audio.event('pickup', { seed: 0x7c33, family: 'anomaly', x }), 120);
+  setTimeout(() => Audio.event('place', { seed: 0x2e9f, family: 'anomaly', x }), 250);
+}
 // The nearest PERSON to (x,y) within FOLLOW_RANGE — the local viewer (camera centre, the
 // same point we broadcast as our presence) plus every remote presence. null if none near.
 function nearestPresence(x, y) {
@@ -386,11 +398,9 @@ function paintObject(o, cx, cy, ang = 0) {
   if (o.family === 'stone') { PG.drawStone(ctx, stoneGeom(o), cx, cy); return; }
   if (o.family === 'anomaly') { drawAnomalyForm(ctx, o, animT, cx, cy, anomalyR(o)); return; }
   if (o.family === 'crystal') { PG.drawCrystal(ctx, o.seed >>> 0, cx, cy, crystalR(o), animT); return; }
-  if (o.family === 'giant') { // the gardener — a big, gentle creature
-    const ga = Math.atan2(o.hy || 0, o.hx || 1);
-    ctx.save(); ctx.translate(cx, cy); ctx.scale(GIANT_SCALE, GIANT_SCALE);
-    drawCreature(ctx, GIANT_SEED, 'crawler', 0, 0, animT, ga, null, false);
-    ctx.restore(); return;
+  if (o.family === 'giant') { // the journeyer (a being apart) — see giant.js
+    drawGiant(ctx, cx, cy, GIANT_R, animT, Math.atan2(o.hy || 0, o.hx || 1), o.walk != null ? o.walk : 1);
+    return;
   }
   if (o.family === 'creature') { drawCreature(ctx, o.seed >>> 0, o.kind || 'crawler', cx, cy, animT, ang, glowHueOf(o), isTamed(o)); return; }
   if (o.family === 'fish') { drawFish(ctx, o.seed >>> 0, cx, cy, animT, ang); return; }
@@ -409,7 +419,7 @@ function paintObject(o, cx, cy, ang = 0) {
 // for a high upper-left light; plants root at their base, compact things sit below
 // centre. Anomalies (luminous, floating) and fliers (airborne) cast none/less.
 function paintGroundShadow(o, cx, cy, rad) {
-  if (o.family === 'anomaly' || o.family === 'fish') return; // fish are under the water — no ground shadow
+  if (o.family === 'anomaly' || o.family === 'fish' || o.family === 'giant') return; // fish are under the water; the giant draws its own foot shadow
   const rooted = o.family === 'seed' && shownMat(o) >= SPROUT_C;   // a plant roots at cy; everything else sits below centre
   const flier = o.family === 'creature' && (o.kind === 'flier');
   const baseY = rooted ? cy + rad * 0.12 : cy + rad * 0.42;
@@ -495,9 +505,19 @@ function drawObjectWorld(o) {
 // global season grade tints it to match), at the foliage height for plants (which rise
 // from their base). No shadow, no procgen — this is the whole point of the LOD.
 function drawLOD(o, cx, cy, rad) {
-  const plant = o.family === 'seed' && shownMat(o) >= SPROUT_C;
-  const y = plant ? cy - rad * 0.55 : cy;          // a tree's mass sits above its base point
-  ctx.beginPath(); ctx.arc(cx, y, rad * 0.85, 0, Math.PI * 2);
+  if (o.family === 'seed') {
+    const mat = shownMat(o), col = lodColor(o);
+    if (mat >= SPROUT_C) { // a sprouted plant reads as a thin vertical LINE approximating its height (not a dot) + a small crown
+      const h = rad * (1.5 + mat * 2.3);
+      ctx.strokeStyle = col; ctx.lineWidth = Math.max(0.5, rad * 0.14); ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx, cy - h); ctx.stroke();
+      ctx.beginPath(); ctx.arc(cx, cy - h, rad * 0.5, 0, Math.PI * 2); ctx.fillStyle = col; ctx.fill();
+      return;
+    }
+    ctx.beginPath(); ctx.arc(cx, cy, rad * 0.42, 0, Math.PI * 2); ctx.fillStyle = col; ctx.fill(); // a loose seed/leaf → a small green dab (half the old size)
+    return;
+  }
+  ctx.beginPath(); ctx.arc(cx, cy, rad * 0.85, 0, Math.PI * 2);
   ctx.fillStyle = lodColor(o); ctx.fill();
 }
 // The representative base colour of an object for its LOD blob — matched to the full
@@ -507,7 +527,7 @@ function lodColor(o) {
   if (o.family === 'crystal') return '#9ec3d6';
   if (o.family === 'creature') return o.kind === 'flier' ? '#5c564e' : '#2f2c28';
   const mat = shownMat(o);
-  if (mat < SPROUT_C) return '#7a6e4c'; // a dormant seed — earthy
+  if (mat < SPROUT_C) return PG.mix(PG.PALETTE.growthDeep, PG.PALETTE.growthLight, 0.5); // a loose seed/leaf — green, matching drawSeed (was wrongly brown)
   return mat < 0.5 ? PG.mix(PG.PALETTE.growthYoung, PG.PALETTE.growthLight, mat / 0.5)
                    : PG.mix(PG.PALETTE.growthLight, PG.PALETTE.growthDeep, (mat - 0.5) / 0.5);
 }
@@ -599,10 +619,25 @@ function updatePositions(now) {
     o.x += (o._tx - o.x) * r;
     o.y += (o._ty - o.y) * r;
   }
-  if (giant && giant._tx != null) { // the gardener glides toward its latest broadcast spot — a slow, deliberate stride
+  if (giant && giant._tx != null) {
+    // It WALKS continuously along its heading between the (slow) broadcasts, only gently
+    // correcting toward the latest broadcast spot — so it always looks like it's going
+    // somewhere instead of teleport-then-wait. When tending (walk 0) it just settles.
+    const moving = (giant.walk || 0) > 0.1;
+    if (moving) { giant.x += (giant.hx || 0) * GIANT_VIS_SPEED * dt; giant.y += (giant.hy || 0) * GIANT_VIS_SPEED * dt; }
     const kg = dt > 0 ? 1 - Math.pow(GIANT_EASE, dt) : 0;
-    giant.x += (giant._tx - giant.x) * kg;
-    giant.y += (giant._ty - giant.y) * kg;
+    const corr = moving ? 0.5 : 1;
+    giant.x += (giant._tx - giant.x) * kg * corr;
+    giant.y += (giant._ty - giant.y) * kg * corr;
+    // leave a fading footprint every so many units walked (perpendicular L/R of the heading)
+    if (giant._fx == null) { giant._fx = giant.x; giant._fy = giant.y; giant._fside = 1; }
+    if (moving && Math.hypot(giant.x - giant._fx, giant.y - giant._fy) >= FOOT_STEP) {
+      const px = -(giant.hy || 0), py = (giant.hx || 0); // perpendicular to heading
+      giant._fside = -giant._fside;
+      giantFootprints.push({ x: giant.x + px * GIANT_R * 0.1 * giant._fside, y: giant.y + py * GIANT_R * 0.1 * giant._fside, start: now });
+      giant._fx = giant.x; giant._fy = giant.y;
+      if (giantFootprints.length > 60) giantFootprints.shift();
+    }
   }
 }
 // Holding an anomaly for 10s dissolves it (it fades from your hands — never explained).
@@ -874,7 +909,13 @@ let attendId = null, attendT = 0;
 let lpTimer = null, lpFired = false;   // long-press arming (touch)
 function clearLongPress() { if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; } }
 // Topmost free object under world point w (shared by tap-to-pick and attend).
-function hitRadius(o) { return Math.max(objRadius(o) * (o._depthScale || 1) * HIT_GROW + HIT_PAD, HIT_MIN / camera.z); } // depth-scaled (Wave K), but never below the accessible min
+function hitRadius(o) {
+  const base = objRadius(o) * (o._depthScale || 1) * HIT_GROW + HIT_PAD; // depth-scaled (Wave K)
+  // Loose seeds/leaves skip the accessible-min floor, so they're only an easy grab when
+  // you're zoomed IN (their tiny true size) — picking up litter no longer hijacks a pan.
+  if (o.family === 'seed' && shownMat(o) < SPROUT_C) return base;
+  return Math.max(base, HIT_MIN / camera.z); // everything else keeps the accessible min tap target
+}
 function hitTest(w) {
   let pick = null, best = -Infinity;
   for (const o of objects.values()) {
@@ -1069,8 +1110,12 @@ function endPointer(e) {
     else placeHold();
   } else if (!moved && !wasLong && !multiTouched) {       // a still, deliberate tap
     const tnow = performance.now();
+    const wpt = p ? screenToWorld(p.sx, p.sy) : null;
     const o = grab ? objects.get(grab.id) : null;
-    if (o && (o.family === 'stone' || (o.family === 'anomaly' && o.kinds && o.kinds.length > 1))) { // double-tap a stone → smaller stones; a fused anomaly → split back into its kinds
+    if (wpt && giant && Math.hypot(wpt.x - giant.x, wpt.y - giant.y) < GIANT_R * 0.55) { // a friendly tap on the journeyer
+      giantChime();                                       // a warm little chime...
+      send({ t: 'giant_skip', token, ts: Date.now() });   // ...and it lets go of this task and ambles to the next
+    } else if (o && (o.family === 'stone' || (o.family === 'anomaly' && o.kinds && o.kinds.length > 1))) { // double-tap a stone → smaller stones; a fused anomaly → split back into its kinds
       if (lastTapId === o.id && tnow - lastTapT < DBLTAP_MS) { send({ t: 'break', id: o.id, token, ts: Date.now() }); lastTapId = null; }
       else { lastTapId = o.id; lastTapT = tnow; }
     } else if (!grab && p) {                               // a tap on BARE ground → double-tap leaves a mark (Wave S)
@@ -1404,6 +1449,14 @@ function frame(now) {
     if (!inViewport(s.x, s.y, vw, vh, CULL_MARGIN)) continue;
     drawMark(o, life);
   }
+  // the journeyer's footprints — soft, quick-fading dabs on the ground (beneath objects)
+  for (let i = giantFootprints.length - 1; i >= 0; i--) {
+    const fp = giantFootprints[i], age = now - fp.start;
+    if (age > FOOT_FADE_MS) { giantFootprints.splice(i, 1); continue; }
+    const a = (1 - age / FOOT_FADE_MS) * 0.22;
+    ctx.fillStyle = PG.rgba('#2a2620', a);
+    ctx.beginPath(); ctx.ellipse(fp.x, fp.y, GIANT_R * 0.06, GIANT_R * 0.035, 0, 0, Math.PI * 2); ctx.fill();
+  }
   const list = [];
   const nextStones = []; // visible rocks → next frame's creature-fencing footprints (Unit ⑥)
   // Viewport culling: only the objects on (or just off) screen are sorted/drawn.
@@ -1428,7 +1481,7 @@ function frame(now) {
   if (giant) {
     const gs = worldToScreen(giant.x, giant.y);
     if (inViewport(gs.x, gs.y, vw, vh, CULL_MARGIN)) {
-      const ge = { family: 'giant', id: '__giant', x: giant.x, y: giant.y, seed: GIANT_SEED, hx: giant.hx || 1, hy: giant.hy || 0 };
+      const ge = { family: 'giant', id: '__giant', x: giant.x, y: giant.y, hx: giant.hx || 1, hy: giant.hy || 0, walk: giant.walk };
       ge._sortY = giant.y; ge._depthScale = depthScaleAt(gs.y);
       list.push(ge);
     }

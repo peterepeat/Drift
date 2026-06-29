@@ -208,7 +208,8 @@ const CREATURE_ARRIVE = 42;               // stop this near the goal (graze/rest
 const CREATURE_DRIVE_TICKS = 5;           // a creature holds one drive ~this many ticks before it shifts
 // ---- the giant: a shared, world-tending NPC (the gardener, built in stages) -
 const GIANT_SEED = 0x6a11d7;              // fixed form — one big, gentle creature for everyone
-const GIANT_STEP = 90;                    // world units it strolls per tick (slow + dreamy; the client glides between)
+const GIANT_STEP = 360;                   // world units it covers per tick — the client walks it CONTINUOUSLY along its heading between ticks (no longer looks parked)
+const GIANT_STUCK_TICKS = 2;              // no real progress this many ticks (e.g. a pond in the way) → give up the goal and wander on
 const GIANT_REACH = 64;                   // close enough to tend its goal
 const GIANT_SIGHT = 900;                  // how far it looks for something to tend
 const GIANT_ROAM = 1400;                  // when nothing needs tending, it strolls within this of the world's heart (the cog)
@@ -980,6 +981,10 @@ export class WorldRoom {
       const mk = makeMarkRecord(crypto.randomUUID(), (Math.random() * 4294967296) >>> 0, m.x, m.y, now);
       this.objects.set(mk.id, mk); this.#gridAdd(mk); await this.#persist(mk);
       this.#bcast({ t: 'object_new', o: this.#pub(mk) }, null);
+
+    } else if (m.t === 'giant_skip') {
+      // a friendly tap on the giant — it lets go of what it was about to do and ambles on
+      this.giant.goal = null; this.giant.stuck = 0;
 
     } else if (m.t === 'presence_move') {
       this.lastSeen.set(pid, now);
@@ -1759,10 +1764,18 @@ export class WorldRoom {
   // position is in-memory only (zero new writes); its tending mutates real objects.
   async #giantStep(now) {
     const g = this.giant;
-    if (!g.goal || !this.#giantGoalValid(g.goal)) g.goal = this.#giantPickGoal(g);
+    if (!g.goal || !this.#giantGoalValid(g.goal)) { g.goal = this.#giantPickGoal(g); g.stuck = 0; }
     const dx = g.goal.x - g.x, dy = g.goal.y - g.y, d = Math.hypot(dx, dy) || 1;
-    if (d > GIANT_REACH) { const s = Math.min(GIANT_STEP, d); g.x += (dx / d) * s; g.y += (dy / d) * s; g.hx = dx / d; g.hy = dy / d; }
-    else { await this.#giantAct(g, now); g.goal = null; } // arrived — tend, then choose anew next tick
+    if (d > GIANT_REACH) {
+      const s = Math.min(GIANT_STEP, d);
+      let nx = g.x + (dx / d) * s, ny = g.y + (dy / d) * s;
+      const pond = poolContaining(nx, ny);              // a land creature — it rounds ponds, never wades
+      if (pond) { const b = bankPoint(pond, nx, ny, 0); nx = b.x; ny = b.y; }
+      const moved = Math.hypot(nx - g.x, ny - g.y);
+      g.x = nx; g.y = ny; g.hx = dx / d; g.hy = dy / d; g.walk = 1;
+      if (moved < GIANT_STEP * 0.3) { g.stuck = (g.stuck || 0) + 1; if (g.stuck >= GIANT_STUCK_TICKS) { g.goal = null; g.stuck = 0; } } // blocked (a pond) → give up + reroute
+      else g.stuck = 0;
+    } else { await this.#giantAct(g, now); g.goal = null; g.walk = 0; } // arrived — tend, stand still this tick
   }
   #giantGoalValid(goal) {
     if (goal.kind === 'stroll') return true;
@@ -1811,7 +1824,7 @@ export class WorldRoom {
       } else { this.#gridUpdate(o); await this.#persist(o); this.#bcast(this.#stateMsg(o, now), null); }
     }
   }
-  #giantPub() { const g = this.giant; return { x: g.x, y: g.y, hx: g.hx, hy: g.hy }; }
+  #giantPub() { const g = this.giant; return { x: g.x, y: g.y, hx: g.hx, hy: g.hy, walk: g.walk || 0 }; }
 
   // A creature's "strength" = its drawn size (mirrors public/creatures.js creatureR):
   // in a clash the smaller one is the loser. Server-only (it decides + broadcasts the
