@@ -20,8 +20,8 @@ export function drawGiant(ctx, cx, cy, R, t, ang = 0, opts = {}) {
   const gait = clamp01(opts.gait != null ? opts.gait : 1);
   const tend = clamp01(opts.tend || 0);
   const face = Math.cos(ang) >= 0 ? 1 : -1;                 // face the way it travels (flip horizontally)
-  const breath = Math.sin(t * 1.3);                         // a slow always-on breath
-  const bob = breath * R * 0.012 + Math.sin(t * 2.4) * R * 0.02 * gait; // gentle bob, livelier afoot
+  const breath = Math.sin(t * 1.6);                         // an always-on breath (a touch quicker — clearly alive)
+  const bob = breath * R * 0.012 + Math.sin(t * 3.0) * R * 0.02 * gait; // gentle bob, livelier afoot
 
   // soft contact shadow at the feet (on the ground, doesn't bob)
   ctx.save();
@@ -42,7 +42,7 @@ export function drawGiant(ctx, cx, cy, R, t, ang = 0, opts = {}) {
   // The foot swings AGAINST the body's travel (it plants as the body advances over it),
   // so a walking giant reads as walking, not sliding. Amplitude/speed scale with gait.
   const swingAmp = R * (0.02 + 0.11 * gait);               // a little even at rest, full afoot
-  const legSpeed = 2.0 + 1.6 * gait;
+  const legSpeed = 2.8 + 2.6 * gait;                        // a quicker, more purposeful stride (livelier afoot, never a frozen slide)
   const legX = [-R * 0.17, -R * 0.1, R * 0.1, R * 0.17];   // hind pair, fore pair
   for (let i = 0; i < 4; i++) {
     const ph = t * legSpeed + (i % 2 ? Math.PI : 0);
@@ -76,7 +76,7 @@ export function drawGiant(ctx, cx, cy, R, t, ang = 0, opts = {}) {
   //      with an active working dip; mouth ends up at the ground where it's tending ----
   const upX = R * 0.34, upY = bodyY - R * 0.34;
   const downX = R * 0.3, downY = -R * 0.06;                 // reaching the ground just in front (the work)
-  const workDip = Math.sin(t * 4.2) * R * 0.05 * tend;     // it dips as it works — never frozen
+  const workDip = Math.sin(t * 6.2) * R * 0.06 * tend;     // it dips busily as it works — clearly DOING something, never frozen
   const headX = upX + (downX - upX) * tend;
   const headY = upY + (downY - upY) * tend + workDip + breath * R * 0.012;
   ctx.strokeStyle = BODY; ctx.lineWidth = R * 0.11; ctx.lineCap = 'round';
@@ -86,15 +86,26 @@ export function drawGiant(ctx, cx, cy, R, t, ang = 0, opts = {}) {
   ctx.stroke();
   ctx.fillStyle = BODY; ctx.beginPath(); ctx.ellipse(headX + R * 0.02, headY, R * 0.1, R * 0.075, 0, 0, Math.PI * 2); ctx.fill();
 
-  // ---- eye: follows a world target if given (the other giant), else looks ahead / at the work
-  let edx = 1, edy = tend * 1.6;
+  // ---- eye: a real, readable eye whose PUPIL clearly points where the giant is looking
+  //      — at a world target if given (its companion, wherever it is in the world), else
+  //      ahead / down at its work. The big sclera + a pupil that rides near the rim makes
+  //      the gaze legible at a glance (the two giants visibly hold each other's eye).
+  let edx = 1, edy = 0.12 + tend * 1.4;
   if (opts.lookX != null) {
     const lx = (opts.lookX - cx) * face, ly = opts.lookY - (cy + bob); // the target in this local, face-flipped frame
     edx = lx - headX; edy = ly - headY;
   }
   const el = Math.hypot(edx, edy) || 1; edx /= el; edy /= el;
-  ctx.fillStyle = rgba('#554e42', 0.9);
-  ctx.beginPath(); ctx.arc(headX + R * 0.045 + edx * R * 0.018, headY - R * 0.005 + edy * R * 0.018, R * 0.015, 0, Math.PI * 2); ctx.fill();
+  const ex = headX + R * 0.05, ey = headY - R * 0.012, eR = R * 0.046; // eye centre + sclera radius
+  ctx.fillStyle = rgba('#f7f1e2', 0.97);                               // pale eye-white (an almond)
+  ctx.beginPath(); ctx.ellipse(ex, ey, eR, eR * 0.86, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = rgba(BODY_DK, 0.5); ctx.lineWidth = R * 0.006;     // a faint rim so it sits on the cream face
+  ctx.beginPath(); ctx.ellipse(ex, ey, eR, eR * 0.86, 0, 0, Math.PI * 2); ctx.stroke();
+  const px = ex + edx * eR * 0.5, py = ey + edy * eR * 0.46, pR = eR * 0.56; // pupil rides toward the gaze
+  ctx.fillStyle = rgba('#322d25', 0.96);
+  ctx.beginPath(); ctx.arc(px, py, pR, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = rgba('#ffffff', 0.85);                               // a tiny catchlight — a spark of life
+  ctx.beginPath(); ctx.arc(px - pR * 0.34, py - pR * 0.4, pR * 0.33, 0, Math.PI * 2); ctx.fill();
 
   ctx.restore();
 }

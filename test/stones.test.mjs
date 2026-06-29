@@ -97,17 +97,31 @@ const sd = wS.objects.find((o) => o.id === seedId), rk2 = byId(wS, Rk);
 const gapSR = Math.hypot(sd.x - rk2.x, sd.y - rk2.y);
 check(gapSR >= rRk + PLANT_BASE_R - 1.5, `a plant dropped on a rock settles beside it, not through it (gap ${gapSR.toFixed(1)} >= ${(rRk + PLANT_BASE_R).toFixed(1)})`);
 
-// 6. UNCAPPED growth: rocks keep getting bigger the more you merge (a soothing build).
-// Pile many stones onto one spot — the result grows PAST the old MAX_STONE_R=88 cap, and
-// a stone dropped at its far edge still fuses (the grid-query bound tracks the big rock).
+// 6. EQUILIBRIUM: hand-fusing builds a CHUNKY rock but CAPS — it never grows into an
+// unbounded monolith. (The giant breaks down anything bigger; see giant.test.mjs.)
+const STONE_CAP_R = 62;                                            // mirrors the server const
 const BIG = pool[20], SPOT = { x: 14000, y: -14000 };
 await move(BIG, SPOT.x, SPOT.y);
 for (let i = 21; i <= 34; i++) await move(pool[i], SPOT.x, SPOT.y); // pile 14 more onto it
 const bigR = radOf(byId(await snap(), BIG));
-check(bigR > 88, `a much-merged rock grows past the old cap (r ${bigR.toFixed(0)} > 88)`);
-await move(pool[35], SPOT.x + bigR - 6, SPOT.y);                    // drop one at the far edge (>88u from centre)
+check(bigR > 46 && bigR <= STONE_CAP_R + 0.5, `a much-merged rock grows chunky but holds at the cap (r ${bigR.toFixed(0)} ≈ ${STONE_CAP_R})`);
+await move(pool[35], SPOT.x, SPOT.y);                              // pile one more onto the capped rock
 const wEdge = await snap();
-check(!byId(wEdge, pool[35]) && radOf(byId(wEdge, BIG)) > bigR, `a stone dropped at the big rock's far edge still fuses (r ${radOf(byId(wEdge, BIG)).toFixed(0)})`);
+check(!byId(wEdge, pool[35]) && radOf(byId(wEdge, BIG)) <= STONE_CAP_R + 0.5, `more stones still merge in, but the rock won't grow past the cap (r ${radOf(byId(wEdge, BIG)).toFixed(0)})`);
+
+// 7. NO ROCKS IN WATER: a stone dropped in a pool rolls out — the world keeps no free
+// stone sitting in any pool (place-time roll + the per-tick relocation pass).
+const waterPool = (await snap()).pool;                             // central pool {x,y,r}
+const ROCK = pool[6];
+await move(ROCK, waterPool.x, waterPool.y);                        // drop it dead in the water
+await tickG(1);                                                    // settle it on the bank
+const w7 = await snap();
+const poolsArr = w7.pools || [w7.pool];
+const inWater = (o) => poolsArr.some((p) => Math.hypot(o.x - p.x, o.y - p.y) <= p.r);
+const drowned = stones(w7).filter((o) => !o.held && inWater(o));
+check(drowned.length === 0, `no rocks sit in any pool after a drop + tick (${drowned.length} in water)`);
+const r6 = byId(w7, ROCK);
+check(!r6 || !inWater(r6), 'the rock dropped in the pool rolled out to the bank');
 
 ctl.close();
 console.log(`\n${pass} passed, ${fail} failed`);

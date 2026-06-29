@@ -208,7 +208,8 @@ const CREATURE_ARRIVE = 42;               // stop this near the goal (graze/rest
 const CREATURE_DRIVE_TICKS = 5;           // a creature holds one drive ~this many ticks before it shifts
 // ---- the giant: a shared, world-tending NPC (the gardener, built in stages) -
 const GIANT_SEED = 0x6a11d7;              // fixed form — one big, gentle creature for everyone
-const GIANT_STEP = 360;                   // world units it covers per tick — the client walks it CONTINUOUSLY along its heading between ticks (no longer looks parked)
+const GIANT_STEP = 800;                   // world units it covers per tick — the client walks it CONTINUOUSLY along its heading between ticks (no longer looks parked). Brisk (not rushed) so it's always visibly going somewhere
+const GIANT_MAX_HOPS = 4;                  // a tick resolves up to this many NON-tending waypoints (drink/watch/stroll) before settling — so a giant never burns a whole 60s tick standing still doing nothing; it just walks on
 const GIANT_STUCK_TICKS = 2;              // no real progress this many ticks (e.g. a pond in the way) → give up the goal and wander on
 const GIANT_REACH = 64;                   // close enough to tend its goal
 const GIANT_SIGHT = 900;                  // how far it looks for something to tend
@@ -226,8 +227,14 @@ const GIANT_SOW_CLEAR = 220;             // it SOWS a seed where there's no plan
 // are too small and crumble to grit. A fused/split stone carries a stored radius `r`
 // (absent ⇒ the seed-derived base size); the SHAPE is still regenerated from the seed.
 const GRIT_HANDLING = 26;                 // handled this many times, a stone is worn to grit and gone
-const MAX_STONE_R = 88;                   // floor for the fuse/settle grid-query bound (this.maxStoneR); rocks fuse UNCAPPED past it
+const MAX_STONE_R = 88;                   // floor for the fuse/settle grid-query bound (this.maxStoneR)
 const MIN_STONE_R = 9;                    // break a stone below this and it crumbles to grit instead
+// EQUILIBRIUM: stones drift toward a middling size rather than merging without bound.
+// The giant merges PEBBLES (r < EQ) it finds paired up, and breaks down BOULDERS
+// (r > CAP) it finds — a patient two-way force toward the middle. Hand-fusing still
+// builds a chunky rock, but only up to CAP; past that the world won't let it grow.
+const STONE_EQ_R = 40;                     // "a decent stone" — at/above this the giant leaves it be (won't fuse it bigger)
+const STONE_CAP_R = 62;                    // the ceiling: hand-fusing caps here, and the giant breaks down anything larger back toward the middle
 // Stone footprint in world units — base size from seed; `o.r` overrides once fused/split.
 function stoneRadius(seed) { return 12 + rng(seed >>> 0)() * 34; }      // MUST match the client's seed-derived base
 function stoneRadiusOf(o) { return o.r != null ? o.r : stoneRadius(o.seed); }
@@ -560,11 +567,13 @@ export class WorldRoom {
       if (!Number.isFinite(x) || !Number.isFinite(y)) return Response.json({ ok: false, error: 'bad coords' }, { status: 400 });
       const now = Date.now();
       o.x = x; o.y = y; o.last_touched = now;
+      const rr = parseFloat(url.searchParams.get('r')); // optional: set a stone's stored radius (e.g. build a boulder for the equilibrium test, now that hand-fusing caps)
+      if (Number.isFinite(rr) && o.family === 'stone') { o.r = rr; this.maxStoneR = Math.max(this.maxStoneR, rr); }
       this.#gridUpdate(o);
       this.driftMark.delete(o.id);
       await this.#persist(o);
       this.#bcast(this.#stateMsg(o, now), null);
-      return Response.json({ ok: true, id: o.id, x: o.x, y: o.y });
+      return Response.json({ ok: true, id: o.id, x: o.x, y: o.y, r: o.r });
     }
 
     // Ops/testing only: read the heat field at (?x=&y=), or ?set= a cell's heat. Gated.
@@ -761,7 +770,7 @@ export class WorldRoom {
   }
   #gridRebuild() {
     this.grid.clear(); this.cellOf.clear();
-    this.maxStoneR = MAX_STONE_R; // largest stone footprint in the world — the upper bound for fuse/settle grid queries (rocks grow without cap, so this tracks them)
+    this.maxStoneR = MAX_STONE_R; // largest stone footprint in the world — the upper bound for fuse/settle grid queries (tracks legacy boulders the giant hasn't broken down yet)
     for (const o of this.objects.values()) {
       this.#gridAdd(o);
       if (o.family === 'stone') this.maxStoneR = Math.max(this.maxStoneR, stoneRadiusOf(o));
@@ -942,9 +951,14 @@ export class WorldRoom {
           return;
         }
       }
-      this.#gridUpdate(o); // index the final position (after any settle-clear)
+      // No rocks in water: a stone left in a pool rolls to the nearest bank. We set its
+      // authoritative resting spot now and flag the broadcast so the client eases it
+      // there as a roll (rather than snapping). Land objects are unaffected.
+      const rollFrom = o.family === 'stone' ? this.#rollStoneFromWater(o) : null;
+      this.#gridUpdate(o); // index the final position (after any settle-clear / roll)
       await this.#persist(o);
-      this.#bcast(this.#stateMsg(o, now), null);
+      const sm = this.#stateMsg(o, now); if (rollFrom) sm.roll = 1;
+      this.#bcast(sm, null);
       this.#updateCog(o.x, o.y);
 
     } else if (m.t === 'break') {
@@ -1272,14 +1286,22 @@ export class WorldRoom {
     let relocated = 0;
     for (const o of this.objects.values()) {
       if (relocated >= POND_RELOCATE_MAX) break;
-      if (o.family !== 'seed' || o.held !== '') continue;
+      if (o.held !== '' || (o.family !== 'seed' && o.family !== 'stone')) continue;
       const p = poolContaining(o.x, o.y);
       if (!p) continue;
-      const b = bankPoint(p, o.x, o.y, o.seed);
-      o.x = b.x; o.y = b.y;
-      this.#gridUpdate(o);
       this.driftMark.delete(o.id);
-      if (!changed.includes(o)) changed.push(o);
+      if (o.family === 'stone') {
+        // A rock that drifted (or was caught) in a pool rolls to the bank too — broadcast
+        // with the roll flag so the client eases it out, and dirty it for the checkpoint.
+        this.#rollStoneFromWater(o);
+        this.#gridUpdate(o); this.dirty.add(o.id);
+        const sm = this.#stateMsg(o, now); sm.roll = 1; this.#bcast(sm, null);
+      } else {
+        const b = bankPoint(p, o.x, o.y, o.seed);
+        o.x = b.x; o.y = b.y;
+        this.#gridUpdate(o);
+        if (!changed.includes(o)) changed.push(o);
+      }
       relocated++;
     }
 
@@ -1355,7 +1377,11 @@ export class WorldRoom {
       if (d < stoneRadiusOf(s) && d < bestD) { bestD = d; target = s; } // dropped onto its footprint → fuse
     }
     if (!target) { this.#settleStoneClear(o); return null; }
-    target.r = Math.hypot(ro, stoneRadiusOf(target)); // area-combine, UNCAPPED — rocks keep getting bigger the more you merge (a soothing build)
+    // area-combine, but CAPPED at the equilibrium ceiling — you can build a chunky rock,
+    // not an ever-growing monolith. Never shrinks an already-large (legacy) boulder; the
+    // giant is what walks those back down toward the middle.
+    const grown = Math.hypot(ro, stoneRadiusOf(target));
+    target.r = Math.max(stoneRadiusOf(target), Math.min(STONE_CAP_R, grown));
     this.maxStoneR = Math.max(this.maxStoneR, target.r); // keep the fuse/settle query bound covering the biggest rock
     target.last_touched = now;
     this.#gridUpdate(target);
@@ -1509,6 +1535,19 @@ export class WorldRoom {
       const ul = Math.hypot(ux, uy) || 1;
       o.x += (ux / ul) * (min - d); o.y += (uy / ul) * (min - d);
     }
+  }
+  // If stone `o` is sitting in a pool, move it to rest fully on the nearest bank (pushed
+  // out past the rim by its OWN radius, so no part is over water) and return where it was
+  // (so the caller can flag the roll); else return null. Mutates o.x/o.y only.
+  #rollStoneFromWater(o) {
+    const pond = poolContaining(o.x, o.y);
+    if (!pond) return null;
+    const from = { x: o.x, y: o.y };
+    const b = bankPoint(pond, o.x, o.y, o.seed);
+    let dx = b.x - pond.x, dy = b.y - pond.y; const dd = Math.hypot(dx, dy) || 1;
+    o.x = b.x + (dx / dd) * stoneRadiusOf(o);  // clear the rim by the stone's own radius
+    o.y = b.y + (dy / dd) * stoneRadiusOf(o);
+    return from;
   }
 
   // ---- water flow ------------------------------------------------------------
@@ -1774,22 +1813,34 @@ export class WorldRoom {
   // position is in-memory only (zero new writes); its tending mutates real objects.
   async #giantStep(g, now) {
     if (g.off) return; // disabled (tests that isolate write-economy turn the giants off)
-    if (!g.goal || !this.#giantGoalValid(g.goal)) { g.goal = this.#giantPickGoal(g); g.stuck = 0; }
-    const dx = g.goal.x - g.x, dy = g.goal.y - g.y, d = Math.hypot(dx, dy) || 1;
-    if (d > GIANT_REACH) {
-      const s = Math.min(GIANT_STEP, d);
-      let nx = g.x + (dx / d) * s, ny = g.y + (dy / d) * s;
-      const pond = poolContaining(nx, ny);              // a land creature — it rounds ponds, never wades
-      if (pond) { const b = bankPoint(pond, nx, ny, 0); nx = b.x; ny = b.y; }
-      const moved = Math.hypot(nx - g.x, ny - g.y);
-      g.x = nx; g.y = ny; g.hx = dx / d; g.hy = dy / d; g.walk = 1; g.tending = 0;
-      if (moved < GIANT_STEP * 0.3) { g.stuck = (g.stuck || 0) + 1; if (g.stuck >= GIANT_STUCK_TICKS) { g.goal = null; g.stuck = 0; } } // blocked (a pond) → give up + reroute
-      else g.stuck = 0;
-    } else { // arrived — tend, stand still this tick; flag real work so the client dips its mouth to the spot
+    // A tick ends in exactly one of two states: WALKING toward something (the client
+    // glides it there), or doing a beat of visible WORK (mouth dipped to the spot). It
+    // never ends "standing still doing nothing": a non-tending waypoint (drink/watch/
+    // stroll) is resolved and the giant walks straight on within the same tick, so the
+    // pair always reads as busy — and the brisk GIANT_STEP makes that motion quick.
+    for (let hop = 0; hop < GIANT_MAX_HOPS; hop++) {
+      if (!g.goal || !this.#giantGoalValid(g.goal)) { g.goal = this.#giantPickGoal(g); g.stuck = 0; }
+      const dx = g.goal.x - g.x, dy = g.goal.y - g.y, d = Math.hypot(dx, dy) || 1;
+      if (d > GIANT_REACH) {
+        const s = Math.min(GIANT_STEP, d);
+        let nx = g.x + (dx / d) * s, ny = g.y + (dy / d) * s;
+        const pond = poolContaining(nx, ny);              // a land creature — it rounds ponds, never wades
+        if (pond) { const b = bankPoint(pond, nx, ny, 0); nx = b.x; ny = b.y; }
+        const moved = Math.hypot(nx - g.x, ny - g.y);
+        g.x = nx; g.y = ny; g.hx = dx / d; g.hy = dy / d; g.walk = 1; g.tending = 0;
+        if (moved < GIANT_STEP * 0.3) { g.stuck = (g.stuck || 0) + 1; if (g.stuck >= GIANT_STUCK_TICKS) { g.goal = null; g.stuck = 0; } } // blocked (a pond) → give up + reroute
+        else g.stuck = 0;
+        return; // walking this tick
+      }
+      // arrived
       const k = g.goal.kind;
-      await this.#giantAct(g, now); g.goal = null; g.walk = 0;
-      g.tending = (k === 'ripen' || k === 'thin' || k === 'fillhole' || k === 'tendstone' || k === 'sow') ? 1 : 0;
+      await this.#giantAct(g, now); g.goal = null;
+      if (k === 'ripen' || k === 'thin' || k === 'fillhole' || k === 'tendstone' || k === 'breakstone' || k === 'sow') {
+        g.walk = 0; g.tending = 1; return; // a beat of visible work — the client dips its mouth to the spot
+      }
+      // a non-tending arrival (drink/watch/stroll): don't freeze — loop and walk on
     }
+    g.walk = 0; g.tending = 0; // every hop was a non-tending arrival (rare) — a brief pause
   }
   #giantGoalValid(goal) {
     if (goal.kind === 'stroll' || goal.kind === 'sow' || goal.kind === 'drink' || goal.kind === 'watch') return true; // point goals — re-checked on arrival
@@ -1798,7 +1849,8 @@ export class WorldRoom {
     if (goal.kind === 'ripen') return o.family === 'seed' && (o.maturity || 0) > 0.02 && (o.maturity || 0) < 1;
     if (goal.kind === 'thin') return o.family === 'seed' && this.#giantOvercrowded(o);
     if (goal.kind === 'fillhole') return o.family === 'mark';
-    if (goal.kind === 'tendstone') return o.family === 'stone' && !!this.#giantStonePartner(o);
+    if (goal.kind === 'tendstone') return o.family === 'stone' && stoneRadiusOf(o) < STONE_EQ_R && !!this.#giantStonePartner(o);
+    if (goal.kind === 'breakstone') return o.family === 'stone' && stoneRadiusOf(o) > STONE_CAP_R;
     return false;
   }
   // A patient force toward balance: it CYCLES its attention so over time it does a variety
@@ -1810,7 +1862,7 @@ export class WorldRoom {
     // FIRST, specific tending right here (rotated for variety so it isn't always the same):
     // ripen a sapling, thin a thicket, fill a hole, build a cairn.
     const rot = (arr) => { const s = g.cycle % arr.length; for (let i = 0; i < arr.length; i++) { const goal = arr[(s + i) % arr.length](); if (goal) return goal; } return null; };
-    const tend = rot([() => this.#giantFindRipen(g), () => this.#giantFindThin(g), () => this.#giantFindFillhole(g), () => this.#giantFindStone(g)]);
+    const tend = rot([() => this.#giantFindRipen(g), () => this.#giantFindThin(g), () => this.#giantFindFillhole(g), () => this.#giantFindStone(g), () => this.#giantFindBoulder(g)]);
     if (tend) return tend;
     // THEN, with nothing pressing nearby: sow life into a barren patch, or pause by the
     // water / beside a creature. (So in a dense grove it tends; out in the open it seeds.)
@@ -1830,7 +1882,12 @@ export class WorldRoom {
   #giantFindRipen(g) { return this.#giantNearest(g, 'ripen', (o) => o.family === 'seed' && o.held === '' && (o.maturity || 0) > 0.06 && (o.maturity || 0) < 1); }
   #giantFindThin(g) { return this.#giantNearest(g, 'thin', (o) => o.family === 'seed' && o.held === '', (o) => this.#giantOvercrowded(o)); }
   #giantFindFillhole(g) { return this.#giantNearest(g, 'fillhole', (o) => o.family === 'mark'); }
-  #giantFindStone(g) { return this.#giantNearest(g, 'tendstone', (o) => o.family === 'stone' && o.held === '', (o) => !!this.#giantStonePartner(o)); }
+  // EQUILIBRIUM (stones, the merge half): nudge a PEBBLE onto a nearby pebble so two
+  // tiny stones become one middling one — never fusing decent stones into a boulder.
+  #giantFindStone(g) { return this.#giantNearest(g, 'tendstone', (o) => o.family === 'stone' && o.held === '' && stoneRadiusOf(o) < STONE_EQ_R, (o) => !!this.#giantStonePartner(o)); }
+  // EQUILIBRIUM (stones, the break half): find a BOULDER (grown past the cap — e.g. a
+  // legacy uncapped pile) and break it back down toward the middle.
+  #giantFindBoulder(g) { return this.#giantNearest(g, 'breakstone', (o) => o.family === 'stone' && o.held === '' && stoneRadiusOf(o) > STONE_CAP_R); }
   // SOW: breed life back where it's scarce — find a nearby SPARSE spot (no plant within
   // GIANT_SOW_CLEAR) and seed it. With THIN (cull the dense), this is the giant moving
   // life from where there's too much to where there's too little — a sway toward balance.
@@ -1869,9 +1926,11 @@ export class WorldRoom {
     }
     return false;
   }
-  #giantStonePartner(stone) { // a different free stone within fuse-gather range
+  #giantStonePartner(stone) { // another small free stone within fuse-gather range (pebble + pebble → one middling stone, never a boulder)
+    const rs = stoneRadiusOf(stone);
     for (const o of this.#gridNear(stone.x, stone.y, GIANT_FUSE_R, (o) => o.family === 'stone' && o.held === '')) {
-      if (o.id !== stone.id && Math.hypot(o.x - stone.x, o.y - stone.y) <= GIANT_FUSE_R) return o;
+      if (o.id === stone.id || stoneRadiusOf(o) >= STONE_EQ_R) continue; // only merge two pebbles
+      if (Math.hypot(o.x - stone.x, o.y - stone.y) <= GIANT_FUSE_R && Math.hypot(rs, stoneRadiusOf(o)) <= STONE_CAP_R) return o;
     }
     return null;
   }
@@ -1898,6 +1957,14 @@ export class WorldRoom {
       this.#gridRemove(o); this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id); this.dirty.delete(o.id);
       await this.state.storage.delete('obj:' + o.id); this.objWrites++;
       this.#bcast({ t: 'object_gone', id: o.id }, null);
+    } else if (goal.kind === 'breakstone') {
+      // EQUILIBRIUM: break a boulder back down into middling pieces (mirrors a hand-break).
+      const o = this.objects.get(goal.id); if (!o || o.held !== '' || o.family !== 'stone' || stoneRadiusOf(o) <= STONE_CAP_R) return;
+      const pieces = this.#breakStone(o, now); if (!pieces.length) return;
+      this.#gridRemove(o); this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id); this.dirty.delete(o.id);
+      await this.state.storage.delete('obj:' + o.id); this.objWrites++;
+      this.#bcast({ t: 'object_gone', id: o.id, grit: true }, null); // a soft dust puff, like a hand-break
+      for (const c of pieces) { this.objects.set(c.id, c); this.#gridAdd(c); await this.#persist(c); this.#bcast({ t: 'object_new', o: this.#pub(c) }, null); }
     } else if (goal.kind === 'sow') {
       // breed life where it's scarce — a young sprout at this still-empty spot
       if (this.objects.size < this.maxObjects && !poolContaining(g.x, g.y) && this.#giantSparse(g.x, g.y)) {

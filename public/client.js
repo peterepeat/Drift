@@ -37,10 +37,9 @@ const P_IN = 1500, P_OUT = 2500, P_IDLE = 2000; // bloom fade-in / fade-out / id
 const SHARED_RADIUS = 620;                   // world units within which two presences share warmth
 const SHARED_BOOST = 3.2;                     // strength of the extra between-them bloom (intensifies the shared patch)
 const SPROUT_C = 0.14;                        // maturity below this renders as a seed (mirrors server)
-const LOD_PX = 8;                             // below this on-screen radius (zoomed out), draw a cheap colour blob, not full procgen
 const GIANT_R = 150;                          // the journeyer's overall height in world units (~the old 5× creature mass)
 const GIANT_EASE = 0.4;                       // per-second retention for the giant's correction toward each broadcast spot
-const GIANT_VIS_SPEED = 6;                    // world u/s it WALKS along its heading between ticks (≈ GIANT_STEP/tick) — continuous motion, not parked
+const GIANT_VIS_SPEED = 13;                   // world u/s it WALKS along its heading between ticks (≈ GIANT_STEP/tick) — brisk, continuous motion (not rushed, never parked)
 const FOOT_FADE_MS = 4200;                    // a footprint fades this fast (so the giant doesn't track prints all over the world)
 const FOOT_STEP = 52;                         // drop a print every this-many world units walked
 const GLOW_PARALLAX = 0.04;                   // ambient glows drift this fraction of the camera (Wave H depth)
@@ -95,13 +94,46 @@ const EASE_SETTLE = cubicBezier(0.40, 0, 0.20, 1);   // place settle, no oversho
 let token = localStorage.getItem('drift_session');
 if (!token) { token = crypto.randomUUID(); localStorage.setItem('drift_session', token); }
 
+// ---- adaptive quality (graceful degradation — no config) -------------------
+// An old/weak machine silently sheds the costliest work to stay smooth: we measure
+// smoothed frame time and step DOWN through quality tiers when it can't keep up (and
+// back UP, slowly, when it has headroom). Each tier dials the heavy levers — canvas
+// resolution (dpr), the full-screen passes (noise/glows/flow/grade/sat-filter), per-
+// object shadows, the LOD pixel threshold, and drifting litter. Hysteresis + a cooldown
+// keep it from flapping. No UI, no toggle: it just adapts. Tier 0 = full, higher = leaner.
+const QUALITY_TIERS = [
+  { dprCap: 2,    noise: 1, glows: 1, flow: 1, sky: 1, grade: 1, sat: 1, patches: 1, shadows: 1, leaves: 1, lodPx: 8  }, // full
+  { dprCap: 1.5,  noise: 0, glows: 1, flow: 1, sky: 1, grade: 1, sat: 1, patches: 1, shadows: 1, leaves: 1, lodPx: 10 }, // drop the full-screen noise; cap retina
+  { dprCap: 1.25, noise: 0, glows: 0, flow: 0, sky: 1, grade: 1, sat: 0, patches: 1, shadows: 1, leaves: 0, lodPx: 16 }, // drop glows/flow/litter + the sat-filter (a real GPU win)
+  { dprCap: 1,    noise: 0, glows: 0, flow: 0, sky: 0, grade: 0, sat: 0, patches: 0, shadows: 0, leaves: 0, lodPx: 28 }, // bare: no sky/grade/patches/shadows, aggressive LOD
+];
+let qTier = 0, Q = QUALITY_TIERS[0];
+let frameMsEMA = 16.7, qLastChangeMs = 0, qHotFrames = 0, qCoolFrames = 0, qPrevNow = 0;
+const Q_COOLDOWN_MS = 4000;  // min ms between tier changes (don't thrash)
+const Q_DOWN_MS = 27;        // smoothed frame time worse than this (~<37fps) for a sustained spell → go leaner
+const Q_UP_MS = 14;          // ...better than this (~>71fps) for a longer spell → go richer
+function adaptQuality(dtMs, nowMs) {
+  if (dtMs > 0 && dtMs < 400) frameMsEMA += (dtMs - frameMsEMA) * 0.08; // ignore tab-hidden / GC outliers
+  if (frameMsEMA > Q_DOWN_MS) { qHotFrames++; qCoolFrames = 0; }
+  else if (frameMsEMA < Q_UP_MS) { qCoolFrames++; qHotFrames = 0; }
+  else { qHotFrames = 0; qCoolFrames = 0; }
+  if (nowMs - qLastChangeMs < Q_COOLDOWN_MS) return;
+  if (qHotFrames > 40 && qTier < QUALITY_TIERS.length - 1) setQTier(qTier + 1, nowMs);        // struggling now → shed quickly
+  else if (qCoolFrames > 240 && qTier > 0) setQTier(qTier - 1, nowMs);                        // sustained headroom → climb back gently
+}
+function setQTier(t, nowMs) {
+  const prevDpr = Q.dprCap;
+  qTier = t; Q = QUALITY_TIERS[t]; qLastChangeMs = nowMs; qHotFrames = 0; qCoolFrames = 0;
+  if (Q.dprCap !== prevDpr) resize(); // the canvas backing store changes with the dpr cap
+}
+
 // ---- canvas + viewport sizing ----------------------------------------------
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
 let dpr = 1, vw = 0, vh = 0;
 
 function resize() {
-  dpr = Math.min(window.devicePixelRatio || 1, 2);
+  dpr = Math.min(window.devicePixelRatio || 1, Q.dprCap);
   const vv = window.visualViewport;
   vw = Math.round(vv ? vv.width : window.innerWidth);
   vh = Math.round(vv ? vv.height : window.innerHeight);
@@ -493,8 +525,8 @@ function drawObjectWorld(o) {
   // procedural tree is hundreds of wasted strokes — draw one colour blob instead. This
   // is the standard "when a tree is 5px, draw a dot" technique; only the zoomed-out view
   // is affected, close-up is untouched. Anomalies (luminous, rare) + fish always draw full.
-  if (rad * camera.z < LOD_PX && o.family !== 'anomaly' && o.family !== 'fish' && o.family !== 'giant') { drawLOD(o, cx, cy, rad); return; }
-  paintGroundShadow(o, cx, cy, rad);
+  if (rad * camera.z < Q.lodPx && o.family !== 'anomaly' && o.family !== 'fish' && o.family !== 'giant') { drawLOD(o, cx, cy, rad); return; }
+  if (Q.shadows) paintGroundShadow(o, cx, cy, rad);
   if (ds === 1) { paintObject(o, cx, cy, ang); return; }
   ctx.save();
   ctx.translate(cx, cy); ctx.scale(ds, ds); ctx.translate(-cx, -cy); // scale about the object's base point
@@ -612,12 +644,14 @@ function updatePositions(now) {
   _lastPosFrame = now;
   const k = dt > 0 ? 1 - Math.pow(0.0002, dt) : 0;  // most objects: settle in ~1s
   const kc = dt > 0 ? 1 - Math.pow(0.15, dt) : 0;    // creatures: a gentle ~2-3s glide for the migrating home
+  const kr = dt > 0 ? 1 - Math.pow(0.06, dt) : 0;    // a rock rolling out of water: a slower, visible ~1.2s roll to the bank
   for (const o of objects.values()) {
     if (o._tx == null) { o._tx = o.x; o._ty = o.y; continue; }
     if (o.id === heldId) { o._tx = o.x; o._ty = o.y; continue; } // locally carried — follows the finger
-    const r = o.family === 'creature' ? kc : k;
+    const r = o._roll ? kr : (o.family === 'creature' ? kc : k);
     o.x += (o._tx - o.x) * r;
     o.y += (o._ty - o.y) * r;
+    if (o._roll && Math.hypot(o._tx - o.x, o._ty - o.y) < 0.6) o._roll = 0; // arrived at the bank — back to normal easing
   }
   for (const giant of giants) {
     if (giant._tx == null) continue;
@@ -1321,8 +1355,12 @@ function onMessage(raw) {
       // it (never snap), so it drifts smoothly. Others ease a small water-drift hop and
       // snap larger jumps (place, initial).
       const easeCreature = o.family === 'creature' && !m.held && m.id !== heldId;
-      if (easeCreature || (!m.held && m.id !== heldId && dx * dx + dy * dy <= POS_EASE_MAX * POS_EASE_MAX)) {
+      // A stone the server rolled out of water (m.roll) ALWAYS eases to the bank — a
+      // smooth roll, never a snap, however far it has to travel.
+      const roll = m.roll && m.id !== heldId;
+      if (roll || easeCreature || (!m.held && m.id !== heldId && dx * dx + dy * dy <= POS_EASE_MAX * POS_EASE_MAX)) {
         o._tx = m.x; o._ty = m.y; // leave o.x/o.y to glide toward the target
+        if (roll) o._roll = 1;    // a slower, deliberate ease until it settles (updatePositions)
       } else {
         o.x = m.x; o.y = m.y; o._tx = m.x; o._ty = m.y;
       }
@@ -1422,6 +1460,7 @@ setInterval(() => {
 // ---- render loop ------------------------------------------------------------
 const bgSeed = PG.seedFrom('drift-ground');
 function frame(now) {
+  adaptQuality(qPrevNow ? now - qPrevNow : 16.7, now); qPrevNow = now; // measure + maybe shed/restore detail
   animT = now / 1000;
   updateLifts(now);
   updateGrowth(now);
@@ -1430,7 +1469,7 @@ function frame(now) {
   updateCollision(now);
   updateNudge(now);
   updateSway(now);
-  updateLeaves(now);
+  if (Q.leaves) updateLeaves(now);
   updateDissolve(now);
   updateArrive(now);
   clampCam(); // backstop: keep the camera in bounds across resize / a shrinking world bound
@@ -1440,15 +1479,15 @@ function frame(now) {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, vw, vh);
   paintGround(ctx, vw, vh, seasonGround(seasonPhase));
-  paintGlows(ctx, vw, vh, bgSeed, -camera.x * camera.z * GLOW_PARALLAX, -camera.y * camera.z * GLOW_PARALLAX); // parallax drift
-  paintNoise(ctx, vw, vh, bgSeed + 1);
+  if (Q.glows) paintGlows(ctx, vw, vh, bgSeed, -camera.x * camera.z * GLOW_PARALLAX, -camera.y * camera.z * GLOW_PARALLAX); // parallax drift
+  if (Q.noise) paintNoise(ctx, vw, vh, bgSeed + 1);
 
   // objects (world space) — single matrix folds dpr + zoom + pan
   ctx.setTransform(dpr * camera.z, 0, 0, dpr * camera.z,
     dpr * (vw / 2 - camera.x * camera.z), dpr * (vh / 2 - camera.y * camera.z));
-  paintGroundPatches(ctx); // world-anchored terrain tint (precomputed buffer, one blit), beneath water + objects
+  if (Q.patches) paintGroundPatches(ctx); // world-anchored terrain tint (precomputed buffer, one blit), beneath water + objects
   for (const pd of pools) paintWaterWorld(ctx, pd, animT); // every pond, beneath the objects
-  if (poolOnScreen()) paintFlow(ctx, pool, animT); // faint flow streaks — only the central pool's drift band
+  if (Q.flow && poolOnScreen()) paintFlow(ctx, pool, animT); // faint flow streaks — only the central pool's drift band
   // ground marks (Wave S): flat rock-shaped stains, beneath objects, healing over ~10 min
   const markNow = Date.now() + clockSkew; // server clock for the heal age
   for (const o of objects.values()) {
@@ -1512,7 +1551,7 @@ function frame(now) {
     const p = age / GRIT_MS;
     PG.drawGrit(ctx, g.seed >>> 0, g.x, g.y, g.r * (0.4 + p * 1.5), 0.8 * (1 - p));
   }
-  drawLeaves(); // cosmetic drifting litter, above the objects (Wave F)
+  if (Q.leaves) drawLeaves(); // cosmetic drifting litter, above the objects (Wave F)
   drawCreatureEvts(now); // brief birth/death cues (world space)
 
   aDensity = list.length; // objects on screen — feeds the ambient sound's richness
@@ -1560,7 +1599,7 @@ function frame(now) {
     aWater = poolOnScreen() ? 0.5 + 0.5 * Math.sin(animT * 0.4) : 0; // matches the visible sheen's shimmer
     Audio.setState(audioState());
   }
-  paintSky(ctx, vw, vh, seasonPhase); // atmospheric horizon — hazes the up-screen world (depth), beneath held objects
+  if (Q.sky) paintSky(ctx, vw, vh, seasonPhase); // atmospheric horizon — hazes the up-screen world (depth), beneath held objects
 
   for (const o of objects.values()) {
     if (!isLifted(o.id)) continue;
@@ -1599,10 +1638,12 @@ function frame(now) {
   }
   for (let i = feedRushes.length - 1; i >= 0; i--) if (now - feedRushes[i].start > FEED_RUSH_MS) feedRushes.splice(i, 1); // expire the feeding darts
 
-  paintSeasonGrade(ctx, vw, vh, seasonPhase); // season composite (crossfaded), last
+  if (Q.grade) paintSeasonGrade(ctx, vw, vh, seasonPhase); // season composite (crossfaded), last
 
-  // season saturation as a GPU CSS filter on the canvas (set only on change)
-  const sat = seasonSat(seasonPhase);
+  // season saturation as a GPU CSS filter on the canvas (set only on change). A struggling
+  // machine drops it (Q.sat 0 → filter off): re-filtering the whole canvas every frame is
+  // one of the costliest things on a weak GPU.
+  const sat = Q.sat ? seasonSat(seasonPhase) : 1;
   if (Math.abs(sat - lastSat) > 0.001) { canvas.style.filter = sat < 0.999 ? `saturate(${sat.toFixed(3)})` : 'none'; lastSat = sat; }
 
   requestAnimationFrame(frame);

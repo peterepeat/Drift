@@ -72,5 +72,18 @@ await tickG(10);                               // it cycles its finders → with
 const sAfter = (await snap()).objects.filter((o) => near(o, SOW, 1600)).length;
 check(sAfter > sBefore, `the giant sows life where it's scarce (${sBefore} -> ${sAfter})`);
 
+// 7. EQUILIBRIUM (stones) — it BREAKS DOWN a boulder back toward the middle. Hand-fusing
+// now caps below boulder size, so we forge one directly (admin place ?r=) past the cap.
+const BOULDER = { x: -11000, y: -11000 };
+const st = (await snap()).objects.find((o) => o.family === 'stone' && !o.held);
+await fetch(`${base}/admin/place?id=${st.id}&x=${BOULDER.x}&y=${BOULDER.y}&r=86`, { method: 'POST', headers: key }).then((r) => r.json());
+await setGiant(BOULDER.x, BOULDER.y);
+const nearB = (w) => w.objects.filter((o) => o.family === 'stone' && Math.hypot(o.x - BOULDER.x, o.y - BOULDER.y) < 400);
+const hadBoulder = nearB(await snap()).some((o) => (o.r || 0) > 62);
+await tickG(2);                                    // it reaches the boulder and breaks it down
+const afterB = nearB(await snap());
+const stillBoulder = afterB.some((o) => (o.r || 0) > 62);
+check(hadBoulder && !stillBoulder && afterB.length >= 2, `the giant breaks a boulder back toward the middle (1 boulder -> ${afterB.length} smaller stones, none over the cap)`);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
