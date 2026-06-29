@@ -272,12 +272,52 @@ function creatureWarpT(o, t) {
 }
 // Is this creature currently glowing? → its rainbow hue, else null.
 function glowHueOf(o) { return (o.glowUntil && (Date.now() + clockSkew) < o.glowUntil) ? (o.glowHue || 0) : null; }
+const TAME_SEC = 150;          // mirror server TAME_MS
+const TAME_GAP = 64;           // a tamed creature hovers this far from its person
+const FOLLOW_RANGE = 1600;     // ...and only follows a person within this
+// How tamed this creature is right now: 0..1, eased in at the start and out at the end
+// (a pure function of time, so creaturePos stays consistent across its per-frame calls).
+function tameFactor(o) {
+  if (!o.tameUntil) return 0;
+  const remain = o.tameUntil - (Date.now() + clockSkew);
+  if (remain <= 0) return 0;
+  const elapsed = TAME_SEC * 1000 - remain;
+  return Math.max(0, Math.min(1, Math.min(elapsed / 2500, remain / 2500)));
+}
+function isTamed(o) { return tameFactor(o) > 0.02; }
+// The nearest PERSON to (x,y) within FOLLOW_RANGE — the local viewer (camera centre, the
+// same point we broadcast as our presence) plus every remote presence. null if none near.
+function nearestPresence(x, y) {
+  let best = null, bd = FOLLOW_RANGE;
+  const dl = Math.hypot(camera.x - x, camera.y - y);
+  if (dl < bd) { bd = dl; best = { x: camera.x, y: camera.y }; }
+  for (const p of presences.values()) {
+    if (p.gone) continue;
+    const d = Math.hypot(p.x - x, p.y - y);
+    if (d < bd) { bd = d; best = { x: p.x, y: p.y }; }
+  }
+  return best;
+}
 function creaturePos(o) {
   const t = syncedT(), seed = o.seed >>> 0, kind = o.family === 'fish' ? 'fish' : (o.kind || 'crawler');
   const t0 = (o.wanderT0 || 0) / 1000;
   const tg = creatureWarpT(o, t), tg2 = creatureWarpT(o, t + 0.2);
   const w = wanderAt(seed, kind, tg), a = wanderAt(seed, kind, t0), w2 = wanderAt(seed, kind, tg2);
-  return { x: o.x + (w.x - a.x), y: o.y + (w.y - a.y), ang: Math.atan2(w2.y - w.y, w2.x - w.x) };
+  const wx = o.x + (w.x - a.x), wy = o.y + (w.y - a.y);
+  const wAng = Math.atan2(w2.y - w.y, w2.x - w.x);
+  // Tamed (Wave U): ease from the wander toward a spot near the nearest person, who it trails.
+  const tf = o.family === 'creature' ? tameFactor(o) : 0;
+  if (tf > 0) {
+    const pr = nearestPresence(o.x, o.y);
+    if (pr) {
+      const dx = o.x - pr.x, dy = o.y - pr.y, d = Math.hypot(dx, dy) || 1;
+      const fx = pr.x + (dx / d) * TAME_GAP + (w.x - a.x) * 0.4; // hover near them, with a gentle bob
+      const fy = pr.y + (dy / d) * TAME_GAP + (w.y - a.y) * 0.4;
+      const x = wx + (fx - wx) * tf, y = wy + (fy - wy) * tf;
+      return { x, y, ang: tf > 0.4 ? Math.atan2(pr.y - y, pr.x - x) : wAng };
+    }
+  }
+  return { x: wx, y: wy, ang: wAng };
 }
 // Where an object is drawn / tested THIS frame: a free creature wanders; everything
 // else sits at its true position plus any local cursor-displacement offset.
@@ -302,7 +342,7 @@ function paintObject(o, cx, cy, ang = 0) {
   if (o.family === 'stone') { PG.drawStone(ctx, stoneGeom(o), cx, cy); return; }
   if (o.family === 'anomaly') { PG.drawAnomaly(ctx, o.kind || 'breath', animT, cx, cy, anomalyR(o)); return; }
   if (o.family === 'crystal') { PG.drawCrystal(ctx, o.seed >>> 0, cx, cy, crystalR(o), animT); return; }
-  if (o.family === 'creature') { drawCreature(ctx, o.seed >>> 0, o.kind || 'crawler', cx, cy, animT, ang, glowHueOf(o)); return; }
+  if (o.family === 'creature') { drawCreature(ctx, o.seed >>> 0, o.kind || 'crawler', cx, cy, animT, ang, glowHueOf(o), isTamed(o)); return; }
   if (o.family === 'fish') { drawFish(ctx, o.seed >>> 0, cx, cy, animT, ang); return; }
   const mat = shownMat(o), aged = shownAged(o);
   if (mat < SPROUT_C) { PG.drawSeed(ctx, o.seed >>> 0, cx, cy, seedScale(o.seed) * (1 + mat * 1.4)); return; }
@@ -1152,6 +1192,7 @@ function onMessage(raw) {
       if (m.aged != null) o.aged = m.aged;
       if (m.wanderT0 != null) o.wanderT0 = m.wanderT0; // a placed creature re-anchored its wander
       if (m.glowUntil != null) { o.glowUntil = m.glowUntil; o.glowHue = m.glowHue; } // anomaly glow buff
+      if (m.tameUntil != null) o.tameUntil = m.tameUntil; // tamed (follows the nearest person)
       if (m.r != null) o.r = m.r; // a fused stone grew (regens its geometry via stoneGeom)
       o.heldBy = m.heldBy || ''; // who's carrying it (ephemeral pid) — drives the felt-presence tether
       if (m.id !== heldId) {

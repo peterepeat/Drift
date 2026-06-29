@@ -345,6 +345,24 @@ export function drawAnomaly(ctx, kind, t, cx, cy, R) {
     g.addColorStop(0, rgba('#c8f0e0', 0.5)); g.addColorStop(1, rgba('#7fd0b8', 0.05));
     ctx.fillStyle = g; ctx.fill();
     ctx.strokeStyle = rgba('#e0fff4', 0.55); ctx.lineWidth = 1; ctx.stroke();
+  } else if (kind === 'heart') {                           // a soft, beating love-heart — it TAMES (Wave U)
+    const beat = 0.84 + 0.16 * Math.abs(Math.sin(t * 2.4));
+    const h = R * 1.5 * beat;
+    const halo = ctx.createRadialGradient(0, 0, 0, 0, 0, R * 1.7); // warm glow behind it
+    halo.addColorStop(0, rgba('#ff7a98', 0.4)); halo.addColorStop(1, rgba('#ff7a98', 0));
+    ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.fillStyle = halo;
+    ctx.beginPath(); ctx.arc(0, 0, R * 1.7, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+    ctx.beginPath();
+    ctx.moveTo(0, -h * 0.2);
+    ctx.bezierCurveTo(0, -h * 0.5, -h * 0.5, -h * 0.5, -h * 0.5, -h * 0.12);
+    ctx.bezierCurveTo(-h * 0.5, h * 0.18, 0, h * 0.36, 0, h * 0.5);
+    ctx.bezierCurveTo(0, h * 0.36, h * 0.5, h * 0.18, h * 0.5, -h * 0.12);
+    ctx.bezierCurveTo(h * 0.5, -h * 0.5, 0, -h * 0.5, 0, -h * 0.2);
+    ctx.closePath();
+    const g = ctx.createLinearGradient(0, -h * 0.5, 0, h * 0.5);
+    g.addColorStop(0, rgba('#ffd0dc', 0.95)); g.addColorStop(1, rgba('#e85a7a', 0.9));
+    ctx.fillStyle = g; ctx.fill();
+    ctx.strokeStyle = rgba('#fff0f4', 0.6); ctx.lineWidth = 1; ctx.stroke();
   }
   ctx.restore();
 }

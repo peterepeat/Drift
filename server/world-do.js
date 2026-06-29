@@ -116,9 +116,12 @@ const ANOM_TOUCH_R = 76;                   // a drop within this of the other ob
 const ANOM_BURST_MIN = 3, ANOM_BURST_MAX = 5; // saplings a burst scatters
 // kind → PLANT power. point/breath (light/breath = life) ripen; prism/rotor (geometry/spin) burst.
 const ANOMALY_POWER = { point: 'ripen', breath: 'ripen', prism: 'burst', rotor: 'burst' };
-// Drop an anomaly on a CREATURE (or a creature on an anomaly) and it gets a buff: a
-// rainbow GLOW + 2× speed for a few minutes. (A heart kind will TAME instead — later.)
+// Drop an anomaly on a CREATURE (or a creature on an anomaly) and it gets a buff —
+// NON-uniform by kind: a 'heart' anomaly TAMES it (follows the nearest person for a
+// while); any other glows it (rainbow + 2× speed). Both are timed and wear off.
 const GLOW_MS = 180000;                    // a glow buff lasts ~3 min
+const TAME_MS = 150000;                    // a tamed creature follows the nearest person ~2.5 min
+const ANOMALY_CREATURE_POWER = { heart: 'tame' }; // default (any other kind) → 'glow'
 
 // ---- water, ponds & crystals (Family 3) ------------------------------------
 // Water gathers in pools. The CENTRAL pool sits at the world's low centre (where
@@ -645,6 +648,7 @@ export class WorldRoom {
     if (o.kind) p.kind = o.kind; // anomalies + creatures carry their form/kind
     if (o.wanderT0 != null) p.wanderT0 = o.wanderT0; // the shared wander anchor (creatures + fish)
     if (o.glowUntil) { p.glowUntil = o.glowUntil; p.glowHue = o.glowHue; } // anomaly glow buff (rainbow + 2× speed)
+    if (o.tameUntil) p.tameUntil = o.tameUntil; // tamed (follows the nearest person)
     if (o.family === 'stone' && o.r != null) p.r = o.r; // a fused/split stone's stored radius (shape still from seed)
     if (o.held !== '') p.heldBy = o.heldConn; // the holder's EPHEMERAL pid (same id presence carries) — links a carried thing to its carrier; never the token
     return p;
@@ -657,6 +661,7 @@ export class WorldRoom {
     };
     if (o.wanderT0 != null) m.wanderT0 = o.wanderT0; // re-anchor on the wire so a placed creature/fish continues smoothly for everyone
     if (o.glowUntil) { m.glowUntil = o.glowUntil; m.glowHue = o.glowHue; } // anomaly glow buff
+    if (o.tameUntil) m.tameUntil = o.tameUntil; // tamed (follows the nearest person)
     if (o.family === 'stone' && o.r != null) m.r = o.r;   // a fused stone broadcasts its grown radius
     return m;
   }
@@ -1328,9 +1333,12 @@ export class WorldRoom {
     }
     return target;
   }
-  // Apply a creature buff by anomaly kind: a rainbow GLOW + 2× speed for a while.
-  // (Sets fields only — caller persists/broadcasts.) Returns the buff applied.
+  // Apply a creature buff by anomaly kind: a 'heart' TAMES it (follow the nearest
+  // person); any other GLOWS it (rainbow + 2× speed). Sets fields only — the caller
+  // persists/broadcasts. Returns the buff applied.
   #buffCreature(c, kind, now) {
+    const power = ANOMALY_CREATURE_POWER[kind] || 'glow';
+    if (power === 'tame') { c.tameUntil = now + TAME_MS; return 'tame'; }
     c.glowUntil = now + GLOW_MS; c.glowHue = Math.floor(Math.random() * 360);
     return 'glow';
   }

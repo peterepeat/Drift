@@ -4,7 +4,7 @@ const WS = `ws://127.0.0.1:${PORT}/ws`;
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 let pass = 0, fail = 0;
 const check = (c, label) => { console.log((c ? '  PASS ' : '  FAIL ') + label); c ? pass++ : fail++; };
-const KINDS = ['rotor', 'point', 'prism', 'breath'];
+const KINDS = ['rotor', 'point', 'prism', 'breath', 'heart'];
 const tickG = (n) => fetch(`${base}/admin/tick?n=${n}&season=0.0`, { method: 'POST', headers: { 'x-admin-key': 'local-dev-key' } }).then((r) => r.json());
 const spawn = (x, y) => fetch(`${base}/admin/anomaly${x != null ? `?x=${x}&y=${y}` : ''}`, { method: 'POST', headers: { 'x-admin-key': 'local-dev-key' } }).then((r) => r.json());
 function open() {
@@ -100,6 +100,15 @@ await drop(anG.anomaly.id, 5000, 5000);                        // carry the anom
 const afterC = (await snap()).objects.find((o) => o.id === cr.creature.id);
 check(!!(afterC && typeof afterC.glowUntil === 'number' && afterC.glowUntil > Date.now() && typeof afterC.glowHue === 'number'),
   `an anomaly on a creature glows it (glowing=${!!afterC?.glowUntil}, hue=${afterC?.glowHue})`);
+
+// 11. TAME: a 'heart' anomaly dropped on a creature tames it (follows the nearest person)
+const cr2 = await spawnCreature(5200, 5200, 'crawler');
+const anH = await spawnK(8200, 5200, 'heart');
+await drop(anH.anomaly.id, 5200, 5200);                       // carry the heart onto the creature
+const afterT = (await snap()).objects.find((o) => o.id === cr2.creature.id);
+check(!!(afterT && typeof afterT.tameUntil === 'number' && afterT.tameUntil > Date.now()),
+  `a 'heart' anomaly tames a creature (tamed=${!!afterT?.tameUntil})`);
+check(!afterT?.glowUntil, 'taming does not also glow it (heart = tame, not glow)');
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
