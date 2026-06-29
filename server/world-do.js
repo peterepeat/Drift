@@ -646,6 +646,7 @@ export class WorldRoom {
       maturity: o.maturity, aged: o.aged, created_at: o.created_at,
     };
     if (o.kind) p.kind = o.kind; // anomalies + creatures carry their form/kind
+    if (o.kinds && o.kinds.length > 1) p.kinds = o.kinds; // a fused anomaly's hybrid kinds (form blend + combined powers + breakability)
     if (o.wanderT0 != null) p.wanderT0 = o.wanderT0; // the shared wander anchor (creatures + fish)
     if (o.glowUntil) { p.glowUntil = o.glowUntil; p.glowHue = o.glowHue; } // anomaly glow buff (rainbow + 2× speed)
     if (o.tameUntil) p.tameUntil = o.tameUntil; // tamed (follows the nearest person)
@@ -663,6 +664,7 @@ export class WorldRoom {
     if (o.glowUntil) { m.glowUntil = o.glowUntil; m.glowHue = o.glowHue; } // anomaly glow buff
     if (o.tameUntil) m.tameUntil = o.tameUntil; // tamed (follows the nearest person)
     if (o.family === 'stone' && o.r != null) m.r = o.r;   // a fused stone broadcasts its grown radius
+    if (o.kinds && o.kinds.length > 1) m.kinds = o.kinds;  // a fused anomaly broadcasts its hybrid kinds (live form change)
     return m;
   }
   #worldState(pid, box) {
@@ -832,10 +834,11 @@ export class WorldRoom {
           }
           return;
         }
-        // Dropped onto an anomaly → a buff (glow + 2× speed). o falls through to the
-        // generic persist/broadcast below, which carries the buff fields to everyone.
+        // Dropped onto an anomaly → its creature power(s): a heart TAMES, any other GLOWS
+        // (a hybrid can do both). o falls through to the generic persist/broadcast below,
+        // which carries the buff fields to everyone.
         const an = this.#anomalyNear(o.x, o.y);
-        if (an) this.#buffCreature(o, an.kind, now);
+        if (an) this.#anomalyWorkCreature(this.#anomalyKindsOf(an), o, now);
       }
       // Disturbing a pre-sprout seed resets its growth — it must be left be to take.
       if (o.family === 'seed' && o.maturity < SPROUT) { o.maturity = 0; o.heat = 0; }
@@ -843,23 +846,30 @@ export class WorldRoom {
       // anomaly, and the anomaly's power works on the plant (by kind). The anomaly
       // itself is never consumed — it persists, a reusable wonder.
       if (o.family === 'anomaly') {
+        // Dropped onto another anomaly → FUSE into one hybrid: kinds unioned, form
+        // blended, powers combined. Mirrors stone fusing; the dropped one is consumed.
+        const fused = this.#tryFuseAnomaly(o, now);
+        if (fused) {
+          this.#gridRemove(o);
+          this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id); this.dirty.delete(o.id);
+          await this.state.storage.delete('obj:' + o.id); this.objWrites++;
+          this.#bcast({ t: 'object_gone', id: o.id, fused: fused.id }, null);
+          await this.#persist(fused);
+          this.#bcast(this.#stateMsg(fused, now), null);
+          return;
+        }
+        const kinds = this.#anomalyKindsOf(o);
         const target = this.#anomalyTargetNear(o.x, o.y, o);
         if (target && target.family === 'seed') {
-          const power = ANOMALY_POWER[o.kind] || 'ripen';
-          if (power === 'burst') { if ((target.maturity || 0) >= SPROUT) await this.#burstPlant(target, now); }
-          else if ((target.maturity || 0) < 1 || (target.aged || 0) > 0) await this.#ripenPlant(target, now);
-        } else if (target && target.family === 'creature') { // a creature beneath it → buff (glow + 2× speed)
-          this.#buffCreature(target, o.kind, now);
+          await this.#anomalyWorkSeed(kinds, target, now, false); // ripen and/or burst by the anomaly's combined powers
+        } else if (target && target.family === 'creature') { // a creature beneath it → tame and/or glow
+          this.#anomalyWorkCreature(kinds, target, now);
           await this.#persist(target); this.#bcast(this.#stateMsg(target, now), null);
         }
         // the anomaly settles at its spot — falls through to the persist/broadcast below
       } else if (o.family === 'seed') {
         const an = this.#anomalyNear(o.x, o.y);
-        if (an) {
-          const power = ANOMALY_POWER[an.kind] || 'ripen';
-          if (power === 'burst') { if ((o.maturity || 0) >= SPROUT) { await this.#burstPlant(o, now); return; } } // o is consumed
-          else { o.maturity = 1; o.aged = 0; o.heat = 0; } // ripen in place — falls through to persist o
-        }
+        if (an && await this.#anomalyWorkSeed(this.#anomalyKindsOf(an), o, now, true)) return; // o was burst (consumed); else it ripened in place and falls through
       }
       if (o.family === 'stone') {
         // Worn to grit by too much handling — a brief scatter, then gone (§4.3).
@@ -889,15 +899,19 @@ export class WorldRoom {
       this.#updateCog(o.x, o.y);
 
     } else if (m.t === 'break') {
-      // Double-click a stone → split it into smaller stones (or grit if already tiny).
-      // No ownership needed (anyone can break a free stone), but not while it's held.
+      // Double-click a stone → split it into smaller stones (or grit if already tiny);
+      // double-click a FUSED anomaly → split it back into its constituent kinds. No
+      // ownership needed (anyone can break a free one), but not while it's held.
       const o = this.objects.get(m.id);
-      if (!o || o.family !== 'stone' || o.held !== '') return;
-      const pieces = this.#breakStone(o, now);
+      if (!o || o.held !== '') return;
+      let pieces = null, puff = null;
+      if (o.family === 'stone') { pieces = this.#breakStone(o, now); puff = { grit: true }; } // a dust puff
+      else if (o.family === 'anomaly' && this.#anomalyKindsOf(o).length > 1) { pieces = this.#breakAnomaly(o, now); puff = { burst: true, x: o.x, y: o.y }; } // a soft ripple
+      if (!pieces) return; // nothing breakable here
       this.#gridRemove(o);
       this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id); this.dirty.delete(o.id);
       await this.state.storage.delete('obj:' + o.id); this.objWrites++;
-      this.#bcast({ t: 'object_gone', id: o.id, grit: true }, null); // a dust puff as it breaks
+      this.#bcast({ t: 'object_gone', id: o.id, ...puff }, null);
       for (const c of pieces) {
         this.objects.set(c.id, c); this.#gridAdd(c); await this.#persist(c);
         this.#bcast({ t: 'object_new', o: this.#pub(c) }, null);
@@ -1311,16 +1325,44 @@ export class WorldRoom {
     return out;
   }
 
-  // ---- anomaly powers (Wave R) -----------------------------------------------
-  // The nearest free PLANT (seed family) within ANOM_TOUCH_R of (x,y), excluding `self`.
-  #plantNear(x, y, self) {
+  // ---- anomaly fusing & powers (Wave R + hybrids) ----------------------------
+  // The kinds an anomaly embodies: a fused hybrid carries an explicit list; a plain one
+  // is just its single `kind`. Always ≥1 entry (back-compat with pre-hybrid records).
+  #anomalyKindsOf(o) { return (o.kinds && o.kinds.length) ? o.kinds : (o.kind ? [o.kind] : []); }
+
+  // Place-time: an anomaly dropped within ANOM_TOUCH_R of another free anomaly that
+  // brings at least one NEW kind FUSES into it — the target gains the dropped one's
+  // kinds (form blends, powers combine) and the dropped anomaly is consumed. Returns
+  // the grown target, or null (merging the same kinds would destroy a wonder for
+  // nothing, so we leave both standing).
+  #tryFuseAnomaly(o, now) {
     let target = null, best = Infinity;
-    for (const o of this.#gridNear(x, y, ANOM_TOUCH_R, (o) => o.family === 'seed' && o.held === '')) {
-      if (o === self) continue;
-      const d = Math.hypot(o.x - x, o.y - y);
-      if (d <= ANOM_TOUCH_R && d < best) { best = d; target = o; }
+    for (const a of this.#gridNear(o.x, o.y, ANOM_TOUCH_R, (a) => a.family === 'anomaly' && a.held === '')) {
+      if (a.id === o.id) continue;
+      const d = Math.hypot(a.x - o.x, a.y - o.y);
+      if (d <= ANOM_TOUCH_R && d < best) { best = d; target = a; }
     }
+    if (!target) return null;
+    const uniq = [];
+    for (const k of [...this.#anomalyKindsOf(target), ...this.#anomalyKindsOf(o)]) if (!uniq.includes(k)) uniq.push(k);
+    if (uniq.length <= this.#anomalyKindsOf(target).length) return null; // no new kind — leave both be
+    target.kinds = uniq.slice(0, ANOMALY_KINDS.length);
+    target.kind = target.kinds[0]; // primary kind = the draw fallback for pre-hybrid clients
+    target.last_touched = now;
+    this.#gridUpdate(target);
     return target;
+  }
+
+  // Break a fused anomaly back into one single-kind anomaly per constituent kind,
+  // scattered with fresh seeds. Returns the children (for broadcast).
+  #breakAnomaly(o, now) {
+    const kinds = this.#anomalyKindsOf(o), n = kinds.length, out = [];
+    for (let k = 0; k < n; k++) {
+      const ang = (k / n) * Math.PI * 2 + Math.random() * 0.7, dist = 26 + Math.random() * 28;
+      const seed = (Math.random() * 4294967296) >>> 0;
+      out.push(makeAnomalyRecord(crypto.randomUUID(), seed, kinds[k], o.x + Math.cos(ang) * dist, o.y + Math.sin(ang) * dist, now));
+    }
+    return out;
   }
   // The nearest free PLANT or CREATURE within ANOM_TOUCH_R of (x,y) — what an anomaly
   // dropped here would work its power on (ripen/burst a plant; glow/tame a creature).
@@ -1333,14 +1375,32 @@ export class WorldRoom {
     }
     return target;
   }
-  // Apply a creature buff by anomaly kind: a 'heart' TAMES it (follow the nearest
-  // person); any other GLOWS it (rainbow + 2× speed). Sets fields only — the caller
-  // persists/broadcasts. Returns the buff applied.
-  #buffCreature(c, kind, now) {
-    const power = ANOMALY_CREATURE_POWER[kind] || 'glow';
-    if (power === 'tame') { c.tameUntil = now + TAME_MS; return 'tame'; }
-    c.glowUntil = now + GLOW_MS; c.glowHue = Math.floor(Math.random() * 360);
-    return 'glow';
+  // The plant powers (ripen/burst) a kinds-list confers — a heart contributes none.
+  #plantPowers(kinds) { const s = new Set(); for (const k of kinds) { const p = ANOMALY_POWER[k]; if (p) s.add(p); } return s; }
+
+  // Apply an anomaly's combined plant powers to a seed: RIPEN (young→fresh mature) then,
+  // if it also bursts and the seed is now mature, BURST it into saplings (consuming it).
+  // When the seed is the placed object (seedIsPlaced), the caller's fall-through persist
+  // captures a ripen; otherwise we persist+broadcast it here. Returns true if consumed.
+  async #anomalyWorkSeed(kinds, seed, now, seedIsPlaced) {
+    const powers = this.#plantPowers(kinds);
+    let ripened = false;
+    if (powers.has('ripen') && ((seed.maturity || 0) < 1 || (seed.aged || 0) > 0)) {
+      seed.maturity = 1; seed.aged = 0; seed.heat = 0; seed.last_touched = now; ripened = true;
+    }
+    if (powers.has('burst') && (seed.maturity || 0) >= SPROUT) { await this.#burstPlant(seed, now); return true; }
+    if (ripened && !seedIsPlaced) { await this.#persist(seed); this.#bcast(this.#stateMsg(seed, now), null); }
+    return false;
+  }
+
+  // Apply an anomaly's combined creature powers: a 'heart' TAMES (follow the nearest
+  // person), any other kind GLOWS (rainbow + 2× speed) — a hybrid can do both. Sets
+  // fields only; the caller persists/broadcasts.
+  #anomalyWorkCreature(kinds, c, now) {
+    let tamed = false, glowed = false;
+    for (const k of kinds) { if ((ANOMALY_CREATURE_POWER[k] || 'glow') === 'tame') tamed = true; else glowed = true; }
+    if (tamed) c.tameUntil = now + TAME_MS;
+    if (glowed) { c.glowUntil = now + GLOW_MS; c.glowHue = Math.floor(Math.random() * 360); }
   }
   // The nearest free ANOMALY within ANOM_TOUCH_R of (x,y).
   #anomalyNear(x, y) {
@@ -1350,14 +1410,6 @@ export class WorldRoom {
       if (d <= ANOM_TOUCH_R && d < best) { best = d; an = a; }
     }
     return an;
-  }
-  // RIPEN: a seed/leaf leaps to a fresh, fully-mature tree. Returns true if it changed.
-  async #ripenPlant(target, now) {
-    if ((target.maturity || 0) >= 1 && (target.aged || 0) <= 0) return false; // already a fresh mature tree
-    target.maturity = 1; target.aged = 0; target.heat = 0; target.last_touched = now;
-    await this.#persist(target);
-    this.#bcast(this.#stateMsg(target, now), null);
-    return true;
   }
   // BURST: a grown tree shatters into a scatter of fresh saplings (kept out of water).
   async #burstPlant(target, now) {

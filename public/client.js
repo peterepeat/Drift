@@ -240,7 +240,21 @@ function isLifted(id) { return id === heldId || liftValue(id) > 0.002; }
 // ---- deterministic-from-seed sizing (never stored) --------------------------
 function stoneSize(o) { return o.r != null ? o.r : (12 + PG.rng(o.seed >>> 0)() * 34); } // base from seed; `r` once fused/split
 function seedScale(seed) { return 0.9 + PG.rng((seed ^ 0x9e3779b9) >>> 0)() * 0.9; }
-function anomalyR(o) { return 18 + PG.rng(o.seed >>> 0)() * 14; } // luminous, ~18-32 wu
+function anomalyR(o) { // luminous, ~18-32 wu; a fused hybrid grows with each kind it carries
+  const base = 18 + PG.rng(o.seed >>> 0)() * 14;
+  const n = (o.kinds && o.kinds.length) || 1;
+  return base * Math.min(1.7, 1 + 0.17 * (n - 1));
+}
+// A plain anomaly draws its one kind; a fused hybrid layers each constituent kind
+// (offset in time + slightly shrunk, translucent) so its form reads as a luminous blend.
+function drawAnomalyForm(ctx, o, t, cx, cy, R) {
+  const kinds = (o.kinds && o.kinds.length) ? o.kinds : [o.kind || 'breath'];
+  if (kinds.length === 1) { PG.drawAnomaly(ctx, kinds[0], t, cx, cy, R); return; }
+  ctx.save();
+  ctx.globalAlpha = 0.55 + 0.4 / kinds.length; // translucent layers merge instead of occluding
+  for (let i = 0; i < kinds.length; i++) PG.drawAnomaly(ctx, kinds[i], t + i * 1.7, cx, cy, R * (1 - i * 0.06));
+  ctx.restore();
+}
 function crystalR(o) { return 6 + PG.rng(o.seed >>> 0)() * 7; }   // small, ~6-13 wu
 // Smoothly-tweened lifecycle the renderer reads (eased toward server values so
 // the 60s growth steps don't pop). Falls back to the raw value before first tween.
@@ -340,7 +354,7 @@ function stoneGeom(o) {
 // FORM is always regenerated from seed (+ maturity/aged for growth) — never stored.
 function paintObject(o, cx, cy, ang = 0) {
   if (o.family === 'stone') { PG.drawStone(ctx, stoneGeom(o), cx, cy); return; }
-  if (o.family === 'anomaly') { PG.drawAnomaly(ctx, o.kind || 'breath', animT, cx, cy, anomalyR(o)); return; }
+  if (o.family === 'anomaly') { drawAnomalyForm(ctx, o, animT, cx, cy, anomalyR(o)); return; }
   if (o.family === 'crystal') { PG.drawCrystal(ctx, o.seed >>> 0, cx, cy, crystalR(o), animT); return; }
   if (o.family === 'creature') { drawCreature(ctx, o.seed >>> 0, o.kind || 'crawler', cx, cy, animT, ang, glowHueOf(o), isTamed(o)); return; }
   if (o.family === 'fish') { drawFish(ctx, o.seed >>> 0, cx, cy, animT, ang); return; }
@@ -984,7 +998,7 @@ function endPointer(e) {
   } else if (!moved && !wasLong && !multiTouched) {       // a still, deliberate tap
     const tnow = performance.now();
     const o = grab ? objects.get(grab.id) : null;
-    if (o && o.family === 'stone') {                       // double-tap a stone → break it into smaller stones
+    if (o && (o.family === 'stone' || (o.family === 'anomaly' && o.kinds && o.kinds.length > 1))) { // double-tap a stone → smaller stones; a fused anomaly → split back into its kinds
       if (lastTapId === o.id && tnow - lastTapT < DBLTAP_MS) { send({ t: 'break', id: o.id, token, ts: Date.now() }); lastTapId = null; }
       else { lastTapId = o.id; lastTapT = tnow; }
     } else if (!grab && p) {                               // a tap on BARE ground → double-tap leaves a mark (Wave S)
@@ -1194,6 +1208,7 @@ function onMessage(raw) {
       if (m.glowUntil != null) { o.glowUntil = m.glowUntil; o.glowHue = m.glowHue; } // anomaly glow buff
       if (m.tameUntil != null) o.tameUntil = m.tameUntil; // tamed (follows the nearest person)
       if (m.r != null) o.r = m.r; // a fused stone grew (regens its geometry via stoneGeom)
+      if (m.kinds) o.kinds = m.kinds; // a fused anomaly's hybrid kinds (blended form + breakability)
       o.heldBy = m.heldBy || ''; // who's carrying it (ephemeral pid) — drives the felt-presence tether
       if (m.id !== heldId) {
         if (o.held && !wasHeld) setLift(o.id, 1, LIFT_MS, EASE_RISE);
