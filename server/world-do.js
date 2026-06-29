@@ -206,6 +206,15 @@ const CREATURE_STEP = 46;                 // world units the home migrates towar
 const CREATURE_SEEK_R = 720;              // how far a creature looks for an attractor
 const CREATURE_ARRIVE = 42;               // stop this near the goal (graze/rest beside it, don't pile on)
 const CREATURE_DRIVE_TICKS = 5;           // a creature holds one drive ~this many ticks before it shifts
+// ANTI-CROWD (Wave: declustering): a creature is pushed off its neighbours each tick so
+// the population spreads into a living scatter instead of piling into one dense blob.
+// Radius < MATE_DIST so two CAN still close enough to breed — it only stops the pile-up.
+const CREATURE_SEP_R = 46;                // creature homes closer than this push apart
+const CREATURE_SEP_STEP = 24;             // max world units the anti-crowd push moves a home per tick
+// CURIOSITY (Wave: the world notices you): during a free-wander phase a creature ambles
+// toward a nearby person and mills a little way off — so lingering draws life to you.
+const CURIOSITY_R = 760;                  // a creature this near a presence may amble over (during its roam phase)
+const CURIOSITY_STANDOFF = 95;            // it stops this far off (curious, not crowding — the wander + anti-crowd keep it loose)
 // ---- the giant: a shared, world-tending NPC (the gardener, built in stages) -
 const GIANT_SEED = 0x6a11d7;              // fixed form — one big, gentle creature for everyone
 const GIANT_STEP = 800;                   // world units it covers per tick — the client walks it CONTINUOUSLY along its heading between ticks (no longer looks parked). Brisk (not rushed) so it's always visibly going somewhere
@@ -216,6 +225,7 @@ const GIANT_SIGHT = 900;                  // how far it looks for something to t
 const GIANT_ROAM = 2600;                  // when nothing needs tending it strolls this far around its biased centre — out toward the boundary, sowing the sparse fringe
 const GIANT_YIELD = 0.8;                   // a giant LEAVES a job to its companion if the companion is within this fraction of its own distance to it — so the closer one takes it and the pair spread out (no two-on-one pile-ups)
 const GIANT_PERSONAL = 500;                // if the two come within this, the one farther from its own territory peels off home — they keep room between them (no standing on top of each other)
+const GIANT_NEED_SCALE = 520;              // distance falloff for need-scoring: a job's pull = need ÷ (1 + dist/this), so an EGREGIOUS need (a big boulder, a packed thicket) wins even from across the field
 const GIANT_FUSE_R = 78;                  // it presses two stones THIS close together into one (a small, eased nudge — a cairn)
 const GIANT_THIN_R = 160;                 // it THINS a plant standing in a patch this crowded (same-family count within this radius)
 const GIANT_THIN_N = 12;                  // ...crowded means at least this many neighbours (a patient force against runaway thickets)
@@ -1268,12 +1278,16 @@ export class WorldRoom {
     // Marked dirty via `changed` below — rides the checkpoint, no per-tick write.
     for (const o of this.objects.values()) {
       if (o.family !== 'creature' || o.held !== '') continue;
+      let mx = 0, my = 0;
       const goal = this.#creatureGoal(o);
-      if (!goal) continue;
-      const dx = goal.x - o.x, dy = goal.y - o.y, d = Math.hypot(dx, dy);
-      if (d <= CREATURE_ARRIVE) continue;            // arrived — graze/rest in place (the wander keeps it alive)
-      const step = Math.min(CREATURE_STEP, d - CREATURE_ARRIVE);
-      o.x += (dx / d) * step; o.y += (dy / d) * step;
+      if (goal) {                                    // step toward what it needs this cycle
+        const dx = goal.x - o.x, dy = goal.y - o.y, d = Math.hypot(dx, dy);
+        if (d > CREATURE_ARRIVE) { const step = Math.min(CREATURE_STEP, d - CREATURE_ARRIVE); mx += (dx / d) * step; my += (dy / d) * step; }
+      }
+      const sep = this.#creatureSeparation(o);        // ALWAYS shove off the crowd (even while grazing) — no pile-ups
+      if (sep.x || sep.y) { const sl = Math.hypot(sep.x, sep.y); const push = Math.min(CREATURE_SEP_STEP, sl * CREATURE_SEP_STEP); mx += (sep.x / sl) * push; my += (sep.y / sl) * push; }
+      if (!mx && !my) continue;                       // settled — the wander keeps it alive in place
+      o.x += mx; o.y += my;
       this.#gridUpdate(o);
       if (!changed.includes(o)) changed.push(o);     // broadcast the new home (clients ease it smoothly)
     }
@@ -1790,9 +1804,43 @@ export class WorldRoom {
     const phase = Math.floor(ticks / CREATURE_DRIVE_TICKS + (c.seed % 1000) / 250);
     return CREATURE_DRIVES[((phase % 4) + 4) % 4];
   }
+  // A push off every too-close creature home (summed, falls to zero at CREATURE_SEP_R) —
+  // the anti-crowd force that keeps the population a living scatter, never a dense blob.
+  #creatureSeparation(c) {
+    let px = 0, py = 0;
+    for (const o of this.#gridNear(c.x, c.y, CREATURE_SEP_R, (o) => o.family === 'creature' && o.held === '')) {
+      if (o.id === c.id) continue;
+      const dx = c.x - o.x, dy = c.y - o.y, d = Math.hypot(dx, dy);
+      if (d >= CREATURE_SEP_R) continue;
+      let ux, uy;
+      if (d > 0.01) { ux = dx / d; uy = dy / d; }
+      else { // exactly coincident → split along a deterministic axis, OPPOSITE for the two
+        const a = rng(((c.seed ^ o.seed) >>> 0) || 1)() * Math.PI * 2, s = c.id < o.id ? 1 : -1;
+        ux = Math.cos(a) * s; uy = Math.sin(a) * s;
+      }
+      const w = (CREATURE_SEP_R - Math.max(d, 0.01)) / CREATURE_SEP_R;
+      px += ux * w; py += uy * w;
+    }
+    return { x: px, y: py };
+  }
+  // The nearest LIVE presence within maxR (or null) — drives creature curiosity.
+  #nearestPresence(x, y, maxR) {
+    let best = null, bd = maxR, now = Date.now();
+    for (const p of this.presencePos.values()) {
+      if (now - p.ts > PRESENCE_STALE_MS) continue;
+      const d = Math.hypot(p.x - x, p.y - y);
+      if (d < bd) { bd = d; best = p; }
+    }
+    return best;
+  }
   #creatureGoal(c) {
     const drive = this.#creatureDrive(c);
-    if (drive === 'roam') return null;                // a stretch of free wandering, no pull
+    if (drive === 'roam') {                            // a free-wander phase — but if someone is lingering nearby, amble over to them
+      const p = this.#nearestPresence(c.x, c.y, CURIOSITY_R);
+      if (!p) return null;                             // no one near → truly free wander
+      const dx = c.x - p.x, dy = c.y - p.y, d = Math.hypot(dx, dy) || 1;
+      return { x: p.x + (dx / d) * CURIOSITY_STANDOFF, y: p.y + (dy / d) * CURIOSITY_STANDOFF }; // mill a little way off, curious
+    }
     if (drive === 'drink') {                          // head to the nearest point on the NEAREST pond's rim
       let p = null, pd = Infinity;                    // (was hardcoded to the central POOL — so every thirsty bug in a huge radius streamed to 0,0)
       for (const q of POOLS) { const e = Math.hypot(c.x - q.x, c.y - q.y) - q.r; if (e < pd) { pd = e; p = q; } }
@@ -1872,13 +1920,22 @@ export class WorldRoom {
       const dSibHome = Math.hypot(sib.x - (this.cog.x + sib.bias.x), sib.y - (this.cog.y + sib.bias.y));
       if (dHome >= dSibHome) return { kind: 'stroll', x: hx, y: hy };      // I'm the visitor here → head home, leave this patch to my companion
     }
-    // FIRST, specific tending right here (rotated for variety so it isn't always the same):
-    // ripen a sapling, thin a thicket, fill a hole, build a cairn.
-    const rot = (arr) => { const s = g.cycle % arr.length; for (let i = 0; i < arr.length; i++) { const goal = arr[(s + i) % arr.length](); if (goal) return goal; } return null; };
-    const tend = rot([() => this.#giantFindRipen(g), () => this.#giantFindThin(g), () => this.#giantFindFillhole(g), () => this.#giantFindStone(g), () => this.#giantFindBoulder(g)]);
-    if (tend) return tend;
+    // FIRST, pick the most PRESSING tending job — not just the nearest. Each candidate
+    // scores by NEED (how egregious the imbalance) ÷ distance, so a big boulder or a packed
+    // thicket pulls a gardener from across the field while a lone sapling waits its turn. A
+    // little jitter keeps the pair from being robotic / always picking the identical thing.
+    const cands = [];
+    const add = (goal, need) => { if (goal) { const d = Math.hypot(goal.x - g.x, goal.y - g.y); cands.push({ goal, score: need * (0.85 + Math.random() * 0.3) / (1 + d / GIANT_NEED_SCALE) }); } };
+    add(this.#giantFindRipen(g), 1.0);
+    add(this.#giantFindThin(g), 1.7);                          // a thicket is a real imbalance
+    add(this.#giantFindFillhole(g), 1.1);
+    add(this.#giantFindStone(g), 0.6);                         // merging pebbles is low-stakes
+    const boulder = this.#giantFindBoulder(g);
+    if (boulder) { const bo = this.objects.get(boulder.id); const br = bo ? stoneRadiusOf(bo) : STONE_CAP_R; add(boulder, 2.4 + (br - STONE_CAP_R) / 18); } // egregiousness scales with how far past the cap
+    if (cands.length) { cands.sort((p, q) => q.score - p.score); return cands[0].goal; }
     // THEN, with nothing pressing nearby: sow life into a barren patch, or pause by the
     // water / beside a creature. (So in a dense grove it tends; out in the open it seeds.)
+    const rot = (arr) => { const s = g.cycle % arr.length; for (let i = 0; i < arr.length; i++) { const goal = arr[(s + i) % arr.length](); if (goal) return goal; } return null; };
     const idle = rot([() => this.#giantFindSow(g), () => this.#giantFindDrink(g), () => this.#giantFindWatch(g)]);
     if (idle) return idle;
     const a = Math.random() * Math.PI * 2, r = Math.random() * GIANT_ROAM; // truly nothing — stroll its biased side of the world (incl. out toward the fringe, where it sows)
@@ -2016,8 +2073,11 @@ export class WorldRoom {
   // inherited, seed BLENDED (low bits from one parent, high from the other) plus a
   // small mutation — so it reads as related to both, never identical.
   #breed(a, b, now) {
-    const mx = (a.x + b.x) / 2 + (Math.random() * 2 - 1) * 22;
-    const my = (a.y + b.y) / 2 + (Math.random() * 2 - 1) * 22;
+    // spawn the offspring with ROOM (a random direction, well clear of the parents) so a
+    // new birth doesn't instantly pile onto them — the anti-crowd force then keeps it loose.
+    const ang = Math.random() * Math.PI * 2, dist = 80 + Math.random() * 70;
+    const mx = (a.x + b.x) / 2 + Math.cos(ang) * dist;
+    const my = (a.y + b.y) / 2 + Math.sin(ang) * dist;
     const mask = 0xffff;
     const seed = ((((a.seed & mask) | (b.seed & ~mask)) >>> 0) ^ Math.floor(Math.random() * 0x10000)) >>> 0;
     return makeCreatureRecord(crypto.randomUUID(), seed, a.kind, mx, my, now);

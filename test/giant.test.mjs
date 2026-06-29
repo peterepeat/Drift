@@ -100,5 +100,17 @@ const after8 = (await snap()).giants;
 const apart = Math.hypot(after8[0].x - after8[1].x, after8[0].y - after8[1].y);
 check(apart > 300, `stacked gardeners spread apart instead of piling up (${apart.toFixed(0)}u apart after 5 ticks)`);
 
+// 9. PRIORITY BY NEED — an egregious FAR boulder outranks a minor NEAR task (the gardener
+// no longer just grabs whatever's nearest; severity ÷ distance decides).
+const NX = 24000, NY = 24000;                               // empty far field, away from the other gardener
+const minorPlant = (await snap()).objects.find((o) => o.family === 'seed' && !o.held);
+await place(minorPlant.id, NX + 60, NY); await lifecycle(minorPlant.id, 0.3, 0); // a small ripen job right beside the giant
+const bigStone = (await snap()).objects.find((o) => o.family === 'stone' && !o.held);
+await fetch(`${base}/admin/place?id=${bigStone.id}&x=${NX + 780}&y=${NY}&r=88`, { method: 'POST', headers: key }).then((r) => r.json()); // a big boulder 780u off (within sight)
+await setGiant(NX, NY);
+await tickG(1);                                             // it scores the jobs and heads for the worse one
+const goal9 = (await fetch(`${base}/admin/giant`, { method: 'POST', headers: key }).then((r) => r.json())).giant.goal;
+check(goal9 && goal9.kind === 'breakstone', `the gardener prioritises an egregious far boulder over a near minor task (chose '${goal9 ? goal9.kind : 'none'}')`);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

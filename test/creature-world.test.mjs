@@ -107,5 +107,20 @@ const dk1 = creatures(await snap()).find((o) => o.id === dc.creature.id);
 const drinkAfter = rimDist(dk1);
 check(drinkAfter < drinkBefore - 100, `a creature drinks at its NEAREST pond, not the distant central one (${drinkBefore.toFixed(0)}u -> ${drinkAfter.toFixed(0)}u from the outer pond)`);
 
+// 9. ANTI-CROWD: a tight pile of creatures spreads into a scatter (no dense blob). Far
+// out (-9000) so the only creatures here are ours; same-species so no clashes scatter them.
+const PILE = { x: -9000, y: -9000 }, NPILE = 16, pileIds = [];
+for (let i = 0; i < NPILE; i++) { const r = await spawn('crawler', PILE.x + (i % 4) * 6, PILE.y + Math.floor(i / 4) * 6); pileIds.push(r.creature.id); }
+const minSpacing = (w) => {
+  const cs = creatures(w).filter((o) => pileIds.includes(o.id));
+  let m = Infinity;
+  for (let i = 0; i < cs.length; i++) for (let j = i + 1; j < cs.length; j++) { const dd = Math.hypot(cs[i].x - cs[j].x, cs[i].y - cs[j].y); if (dd < m) m = dd; }
+  return { m, n: cs.length };
+};
+const pre = minSpacing(await snap());
+await tickG(30);
+const post = minSpacing(await snap());
+check(post.n >= 2 && post.m > pre.m && post.m > 25, `a pile of ${NPILE} creatures spreads out (closest pair ${pre.m.toFixed(0)}u -> ${post.m.toFixed(0)}u)`);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
