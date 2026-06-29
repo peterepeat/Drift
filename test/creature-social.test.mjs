@@ -21,6 +21,10 @@ async function snap() { const ws = await open(); const w = await ws.world; ws.cl
 const creatures = (w) => w.objects.filter((o) => o.family === 'creature');
 const near = (w, x, y, r) => creatures(w).filter((o) => Math.abs(o.x - x) < r && Math.abs(o.y - y) < r);
 
+// Isolate creature social life from the gardeners: they're irrelevant here, and their
+// per-tick Math.random() calls would perturb the shared PRNG that breeding draws from.
+await fetch(`${base}/admin/giant?off=1`, { method: 'POST', headers: key });
+
 await tickG(1); // ramp to the baseline so there's headroom to MAX for breeding
 
 // 1. MATING — three crawlers clustered far from anything breed offspring nearby

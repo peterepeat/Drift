@@ -212,7 +212,7 @@ const creatureEvts = [];       // brief birth-shimmer / death-puff cues { x, y, 
 const CREATURE_EVT_MS = 760;   // lifetime of a birth/death cue
 let pool = null;               // the central water pool { x, y, r } (flow + audio anchor)
 let pools = [];                // every pond the world carries (Wave P) — all rendered as water
-let giant = null;              // the gardener NPC { x, y, hx, hy, walk, _tx, _ty } — server-authoritative; walked continuously client-side
+let giants = [];               // the TWO gardener NPCs { x, y, hx, hy, walk, tending, _tx, _ty } — server-authoritative; walked continuously client-side
 const giantFootprints = [];    // fading prints the journeyer leaves as it walks { x, y, start } — cosmetic, local
 let myPid = null;
 let seasonPhase = 0;           // monotonic season clock from the server (feels, never labelled)
@@ -315,7 +315,7 @@ function isTamed(o) { return tameFactor(o) > 0.02; }
 // A friendly little 3-note flourish when you greet the giant — all on the season
 // pentatonic (so it's consonant + musical), silent unless sound is on.
 function giantChime() {
-  const x = giant ? giant.x : 0;
+  const x = giants[0] ? giants[0].x : 0;
   Audio.event('pickup', { seed: 0x51b1, family: 'anomaly', x });
   setTimeout(() => Audio.event('pickup', { seed: 0x7c33, family: 'anomaly', x }), 120);
   setTimeout(() => Audio.event('place', { seed: 0x2e9f, family: 'anomaly', x }), 250);
@@ -619,7 +619,8 @@ function updatePositions(now) {
     o.x += (o._tx - o.x) * r;
     o.y += (o._ty - o.y) * r;
   }
-  if (giant && giant._tx != null) {
+  for (const giant of giants) {
+    if (giant._tx == null) continue;
     // It WALKS continuously along its heading between the (slow) broadcasts, only gently
     // correcting toward the latest broadcast spot — so it always looks like it's going
     // somewhere instead of teleport-then-wait. When tending (walk 0) it just settles.
@@ -1118,7 +1119,7 @@ function endPointer(e) {
     const tnow = performance.now();
     const wpt = p ? screenToWorld(p.sx, p.sy) : null;
     const o = grab ? objects.get(grab.id) : null;
-    if (wpt && giant && Math.hypot(wpt.x - giant.x, wpt.y - giant.y) < GIANT_R * 0.55) { // a friendly tap on the journeyer
+    if (wpt && giants.some((g) => Math.hypot(wpt.x - g.x, wpt.y - g.y) < GIANT_R * 0.55)) { // a friendly tap on a journeyer
       giantChime();                                       // a warm little chime...
       send({ t: 'giant_skip', token, ts: Date.now() });   // ...and it lets go of this task and ambles to the next
     } else if (o && (o.family === 'stone' || (o.family === 'anomaly' && o.kinds && o.kinds.length > 1))) { // double-tap a stone → smaller stones; a fused anomaly → split back into its kinds
@@ -1295,7 +1296,7 @@ function onMessage(raw) {
       if (m.now != null) clockSkew = m.now - Date.now(); // lock the creature wander clock to the server's
       if (m.pool) pool = m.pool;
       if (Array.isArray(m.pools) && m.pools.length) pools = m.pools; else if (pool) pools = [pool]; // every pond (fallback: the central one)
-      if (m.giant && Number.isFinite(m.giant.x)) giant = { ...m.giant, _tx: m.giant.x, _ty: m.giant.y }; // the gardener (snap to its spot on (re)connect)
+      if (Array.isArray(m.giants)) giants = m.giants.map((g) => ({ ...g, _tx: g.x, _ty: g.y })); // the gardeners (snap to their spots on (re)connect)
       if (m.bounds && Number.isFinite(m.bounds.x) && Number.isFinite(m.bounds.y)) worldBounds = m.bounds; // before the arrive, so a stranded home is pulled back in
       // Orient on the FIRST arrival only (a reconnect must not yank the camera back):
       // a returning visitor drifts toward their remembered home, a new one toward the cog.
@@ -1343,9 +1344,12 @@ function onMessage(raw) {
     case 'season': { // the world's slow clock advanced
       if (m.phase != null) seasonPhase = m.phase;
       if (m.bounds && Number.isFinite(m.bounds.x) && Number.isFinite(m.bounds.y)) worldBounds = m.bounds; // keep the camera bound fresh as the world grows
-      if (m.giant && Number.isFinite(m.giant.x)) { // the gardener stepped — glide toward its new spot
-        if (giant) { giant._tx = m.giant.x; giant._ty = m.giant.y; giant.hx = m.giant.hx; giant.hy = m.giant.hy; giant.walk = m.giant.walk; giant.tending = m.giant.tending; }
-        else giant = { ...m.giant, _tx: m.giant.x, _ty: m.giant.y };
+      if (Array.isArray(m.giants)) { // the gardeners stepped — glide toward their new spots
+        for (let i = 0; i < m.giants.length; i++) {
+          const mg = m.giants[i];
+          if (giants[i]) { const g = giants[i]; g._tx = mg.x; g._ty = mg.y; g.hx = mg.hx; g.hy = mg.hy; g.walk = mg.walk; g.tending = mg.tending; }
+          else giants[i] = { ...mg, _tx: mg.x, _ty: mg.y };
+        }
       }
       break;
     }
@@ -1482,15 +1486,18 @@ function frame(now) {
     list.push(o);
   }
   frameStones = nextStones; // creaturePos reads this next frame (a frame's lag is invisible)
-  // The gardener (Stage 1): a synthetic draw entry so it sorts + shadows + depth-scales
-  // with everything else. Not in `objects`, so it's never hit-tested or pickable.
-  if (giant) {
-    const gs = worldToScreen(giant.x, giant.y);
-    if (inViewport(gs.x, gs.y, vw, vh, CULL_MARGIN)) {
-      const ge = { family: 'giant', id: '__giant', x: giant.x, y: giant.y, hx: giant.hx || 1, hy: giant.hy || 0, gait: Math.min(1, (giant._spd || 0) / GIANT_VIS_SPEED), tend: giant._tend || 0 };
-      ge._sortY = giant.y; ge._depthScale = depthScaleAt(gs.y);
-      list.push(ge);
-    }
+  // The gardeners: a synthetic draw entry each so they sort + shadow + depth-scale with
+  // everything else (not in `objects`, so never hit-tested or pickable). Each one's eye
+  // follows the OTHER, wherever it is in the world.
+  for (let gi = 0; gi < giants.length; gi++) {
+    const G = giants[gi]; if (G._tx == null) continue;
+    const gs = worldToScreen(G.x, G.y);
+    if (!inViewport(gs.x, gs.y, vw, vh, CULL_MARGIN)) continue;
+    const other = giants[(gi + 1) % giants.length];
+    const ge = { family: 'giant', id: '__giant' + gi, x: G.x, y: G.y, hx: G.hx || 1, hy: G.hy || 0, gait: Math.min(1, (G._spd || 0) / GIANT_VIS_SPEED), tend: G._tend || 0 };
+    if (other && other !== G) { ge.lookX = other.x; ge.lookY = other.y; } // its gaze tracks its companion
+    ge._sortY = G.y; ge._depthScale = depthScaleAt(gs.y);
+    list.push(ge);
   }
   // painter's depth by ground line; ties broken by id for a stable, deterministic order
   list.sort((a, b) => (a._sortY - b._sortY) || (a.id < b.id ? -1 : 1));

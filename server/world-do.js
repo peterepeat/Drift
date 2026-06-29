@@ -212,7 +212,7 @@ const GIANT_STEP = 360;                   // world units it covers per tick — 
 const GIANT_STUCK_TICKS = 2;              // no real progress this many ticks (e.g. a pond in the way) → give up the goal and wander on
 const GIANT_REACH = 64;                   // close enough to tend its goal
 const GIANT_SIGHT = 900;                  // how far it looks for something to tend
-const GIANT_ROAM = 1400;                  // when nothing needs tending, it strolls within this of the world's heart (the cog)
+const GIANT_ROAM = 2600;                  // when nothing needs tending it strolls this far around its biased centre — out toward the boundary, sowing the sparse fringe
 const GIANT_FUSE_R = 78;                  // it presses two stones THIS close together into one (a small, eased nudge — a cairn)
 const GIANT_THIN_R = 160;                 // it THINS a plant standing in a patch this crowded (same-family count within this radius)
 const GIANT_THIN_N = 12;                  // ...crowded means at least this many neighbours (a patient force against runaway thickets)
@@ -316,7 +316,12 @@ export class WorldRoom {
     this.seedCount = Number.isFinite(envSeedN) ? Math.max(20, Math.min(50000, envSeedN)) : undefined;
     this.objects = new Map();      // id -> record
     this.cog = { x: 0, y: 0, n: 0 };
-    this.giant = { x: 0, y: 0, hx: 1, hy: 0, goal: null }; // the gardener NPC — a shared creature that strolls + tends (in-memory; starts from the cog on load)
+    // TWO gardeners — a pair of journeyers tending the world's balance, biased to roam
+    // opposite sides so they spread their care. (In-memory; start from the cog on load.)
+    this.giants = [
+      { x: 0, y: 0, hx: 1, hy: 0, goal: null, bias: { x: 1000, y: 560 } },
+      { x: 0, y: 0, hx: -1, hy: 0, goal: null, bias: { x: -1000, y: -560 } },
+    ];
     this.lastSeen = new Map();     // pid -> ts (presence liveness)
     this.presencePos = new Map();  // pid -> { x, y, ts } (drives warmth)
     this.bcastMark = new Map();    // id -> { maturity, aged } last broadcast (chatter control)
@@ -348,7 +353,7 @@ export class WorldRoom {
     // last_touched=now on every cold load and never accumulate its fade clock.
     for (const [, rec] of list) { if (this.#migrate(rec)) this.dirty.add(rec.id); this.objects.set(rec.id, rec); }
     this.cog = (await this.state.storage.get('cog')) || { x: 0, y: 0, n: 0 };
-    this.giant.x = this.cog.x; this.giant.y = this.cog.y; // the gardener begins its stroll from the world's heart
+    for (const g of this.giants) { g.x = this.cog.x + g.bias.x * 0.3; g.y = this.cog.y + g.bias.y * 0.3; } // the gardeners begin near the world's heart, a little apart
     this.season = (await this.state.storage.get('meta:season')) || 0;
     this.heat = (await this.state.storage.get('field:heat')) || null; // rebuilt lazily if absent
     this.lastCheckpoint = (await this.state.storage.get('meta:checkpoint')) || 0;
@@ -522,9 +527,10 @@ export class WorldRoom {
     if (url.pathname === '/admin/giant') {
       if (!this.#adminOk(request)) return Response.json({ ok: false, error: 'forbidden' }, { status: 403 });
       const px = url.searchParams.get('x'), py = url.searchParams.get('y'), off = url.searchParams.get('off');
-      if (px != null && py != null) { this.giant.x = parseFloat(px); this.giant.y = parseFloat(py); this.giant.goal = null; }
-      if (off != null) this.giant.off = off === '1';
-      return Response.json({ ok: true, giant: { x: this.giant.x, y: this.giant.y, goal: this.giant.goal, off: !!this.giant.off } });
+      const g0 = this.giants[0];
+      if (px != null && py != null) { g0.x = parseFloat(px); g0.y = parseFloat(py); g0.goal = null; } // place the FIRST gardener (tests drive it)
+      if (off != null) for (const g of this.giants) g.off = off === '1';                                // off toggles BOTH
+      return Response.json({ ok: true, giant: { x: g0.x, y: g0.y, goal: g0.goal, off: !!g0.off }, giants: this.giants.map((g) => ({ x: g.x, y: g.y })) });
     }
 
     // Ops/testing only: spawn one fish in a pond (?pond= index, default central). Gated.
@@ -703,7 +709,7 @@ export class WorldRoom {
     // #inBox); the box-less full world stays a plain scan (old / test clients).
     const src = box ? this.#gridQueryBox(box) : this.objects.values();
     for (const o of src) { if (box && !this.#inBox(o, box)) continue; objects.push(this.#pub(o)); }
-    return { t: 'world_state', now: Date.now(), pid, season: this.season, pool: POOL, pools: POOLS, cog: { x: this.cog.x, y: this.cog.y }, bounds: this.bounds || this.#computeBounds(), giant: this.#giantPub(), objects };
+    return { t: 'world_state', now: Date.now(), pid, season: this.season, pool: POOL, pools: POOLS, cog: { x: this.cog.x, y: this.cog.y }, bounds: this.bounds || this.#computeBounds(), giants: this.giants.map((g) => this.#giantPub(g)), objects };
   }
   // Half-extents of the whole object field (every object, not just the box) — the
   // client clamps its camera here so it can never wander far into empty space. A
@@ -988,7 +994,7 @@ export class WorldRoom {
 
     } else if (m.t === 'giant_skip') {
       // a friendly tap on the giant — it lets go of what it was about to do and ambles on
-      this.giant.goal = null; this.giant.stuck = 0;
+      for (const g of this.giants) { g.goal = null; g.stuck = 0; } // a friendly tap lets the gardeners amble on
 
     } else if (m.t === 'presence_move') {
       this.lastSeen.set(pid, now);
@@ -1311,9 +1317,9 @@ export class WorldRoom {
       checkpointWrote = await this.#checkpoint(now);
       checkpointed = true;
     }
-    await this.#giantStep(now); // the gardener strolls a step + tends what it reaches
+    for (const g of this.giants) await this.#giantStep(g, now); // each gardener strolls a step + tends what it reaches
     this.bounds = this.#computeBounds(); // refresh the camera bound (the world grows/shrinks)
-    this.#bcast({ t: 'season', phase: this.season, bounds: this.bounds, giant: this.#giantPub() }, null); // feel the clock turn + the giant's new spot (client glides to it)
+    this.#bcast({ t: 'season', phase: this.season, bounds: this.bounds, giants: this.giants.map((g) => this.#giantPub(g)) }, null); // feel the clock turn + the gardeners' new spots (clients glide to them)
 
     return { spawned: spawned.length, gone: gone.length, checkpointed, checkpointWrote };
   }
@@ -1766,9 +1772,8 @@ export class WorldRoom {
   // plant, or presses two adjacent stones into one). Server-authoritative + broadcast
   // on the tick; the client glides it between waypoints (no per-frame sync). Its own
   // position is in-memory only (zero new writes); its tending mutates real objects.
-  async #giantStep(now) {
-    const g = this.giant;
-    if (g.off) return; // disabled (tests that isolate write-economy turn the giant off)
+  async #giantStep(g, now) {
+    if (g.off) return; // disabled (tests that isolate write-economy turn the giants off)
     if (!g.goal || !this.#giantGoalValid(g.goal)) { g.goal = this.#giantPickGoal(g); g.stuck = 0; }
     const dx = g.goal.x - g.x, dy = g.goal.y - g.y, d = Math.hypot(dx, dy) || 1;
     if (d > GIANT_REACH) {
@@ -1811,8 +1816,8 @@ export class WorldRoom {
     // water / beside a creature. (So in a dense grove it tends; out in the open it seeds.)
     const idle = rot([() => this.#giantFindSow(g), () => this.#giantFindDrink(g), () => this.#giantFindWatch(g)]);
     if (idle) return idle;
-    const a = Math.random() * Math.PI * 2, r = Math.random() * GIANT_ROAM; // truly nothing — stroll near the world's heart
-    return { kind: 'stroll', x: this.cog.x + Math.cos(a) * r, y: this.cog.y + Math.sin(a) * r };
+    const a = Math.random() * Math.PI * 2, r = Math.random() * GIANT_ROAM; // truly nothing — stroll its biased side of the world (incl. out toward the fringe, where it sows)
+    return { kind: 'stroll', x: this.cog.x + g.bias.x + Math.cos(a) * r, y: this.cog.y + g.bias.y + Math.sin(a) * r };
   }
   #giantNearest(g, kind, filter, extra) {
     let best = null, bd = GIANT_SIGHT;
@@ -1905,7 +1910,7 @@ export class WorldRoom {
     // drink + watch: no mutation — the giant simply pauses a beat (walk=0); the visual is
     // the journeyer at the water's edge / standing beside a creature, watching.
   }
-  #giantPub() { const g = this.giant; return { x: g.x, y: g.y, hx: g.hx, hy: g.hy, walk: g.walk || 0, tending: g.tending || 0 }; }
+  #giantPub(g) { return { x: g.x, y: g.y, hx: g.hx, hy: g.hy, walk: g.walk || 0, tending: g.tending || 0 }; }
 
   // A creature's "strength" = its drawn size (mirrors public/creatures.js creatureR):
   // in a clash the smaller one is the loser. Server-only (it decides + broadcasts the

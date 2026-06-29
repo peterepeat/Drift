@@ -23,7 +23,7 @@ async function snap() { const ws = await open(); const w = await ws.world; ws.cl
 
 // 1. world_state carries the gardener's position
 const w0 = await snap();
-check(w0.giant && Number.isFinite(w0.giant.x) && Number.isFinite(w0.giant.y), `world_state carries the gardener (${w0.giant ? `${w0.giant.x.toFixed(0)},${w0.giant.y.toFixed(0)}` : 'missing'})`);
+check(Array.isArray(w0.giants) && w0.giants.length === 2 && w0.giants.every((g) => Number.isFinite(g.x) && Number.isFinite(g.y)), `world_state carries TWO gardeners (${(w0.giants || []).map((g) => `${g.x.toFixed(0)},${g.y.toFixed(0)}`).join(' / ') || 'missing'})`);
 
 // 2. it RIPENS a young plant it reaches — out in the empty far field so it has only this to tend
 const seed = w0.objects.find((o) => o.family === 'seed' && !o.held);
@@ -36,9 +36,9 @@ check(after && after.maturity >= 0.99, `the gardener ripens a young plant it rea
 
 // 3. it STROLLS when nothing nearby needs tending (far from any plant/stone)
 await setGiant(20000, 20000);
-const g0 = (await snap()).giant;
+const g0 = (await snap()).giants[0];
 await tickG(3);
-const g1 = (await snap()).giant;
+const g1 = (await snap()).giants[0];
 const moved = Math.hypot(g1.x - g0.x, g1.y - g0.y);
 check(moved > 50, `the gardener strolls when there's nothing to tend (moved ${moved.toFixed(0)}u over 3 ticks)`);
 check(Number.isFinite(g1.hx) && Number.isFinite(g1.hy) && Math.hypot(g1.hx, g1.hy) > 0.5, 'it carries a heading (which way it faces) as it moves');
