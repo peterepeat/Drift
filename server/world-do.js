@@ -215,12 +215,11 @@ const CREATURE_DRIVE_TICKS = 5;           // a creature holds one drive ~this ma
 // are too small and crumble to grit. A fused/split stone carries a stored radius `r`
 // (absent ⇒ the seed-derived base size); the SHAPE is still regenerated from the seed.
 const GRIT_HANDLING = 26;                 // handled this many times, a stone is worn to grit and gone
-const MAX_STONE_R = 88;                   // a fused stone caps here (world units)
+const MAX_STONE_R = 88;                   // floor for the fuse/settle grid-query bound (this.maxStoneR); rocks fuse UNCAPPED past it
 const MIN_STONE_R = 9;                    // break a stone below this and it crumbles to grit instead
 // Stone footprint in world units — base size from seed; `o.r` overrides once fused/split.
 function stoneRadius(seed) { return 12 + rng(seed >>> 0)() * 34; }      // MUST match the client's seed-derived base
 function stoneRadiusOf(o) { return o.r != null ? o.r : stoneRadius(o.seed); }
-const MAX_STONE_RADIUS = MAX_STONE_R;     // grid-query radius (a fused stone can be this big)
 const PLANT_BASE_R = 9;                    // a plant's trunk-base clearance — set down on a rock, it settles beside (Unit ⑥)
 
 // ---- water: flow, drift & stone-channelling (Family 3, Phase 3) -------------
@@ -314,6 +313,7 @@ export class WorldRoom {
     this.known = new Map();        // pid -> Set(id) objects already sent to this connection (interest streaming)
     this.grid = new Map();         // "cx,cy" -> Set(record): in-memory spatial hash (never persisted)
     this.cellOf = new Map();       // id -> "cx,cy": each object's current grid cell (for move/remove)
+    this.maxStoneR = MAX_STONE_R;  // largest stone footprint present — fuse/settle query bound (recomputed in #gridRebuild; bumped on fuse)
     this.dirty = new Set();        // ids whose in-memory state diverged from disk since last #persist (checkpoint flushes these)
     this.objWrites = 0;            // discrete per-object row writes+deletes (NOT the batched checkpoint) — the rows_written lever, exposed for ops/tests
     this.flowNoise = null;         // lazily-built makeNoise(FLOW_SEED); shared with the client visual
@@ -733,7 +733,11 @@ export class WorldRoom {
   }
   #gridRebuild() {
     this.grid.clear(); this.cellOf.clear();
-    for (const o of this.objects.values()) this.#gridAdd(o);
+    this.maxStoneR = MAX_STONE_R; // largest stone footprint in the world — the upper bound for fuse/settle grid queries (rocks grow without cap, so this tracks them)
+    for (const o of this.objects.values()) {
+      this.#gridAdd(o);
+      if (o.family === 'stone') this.maxStoneR = Math.max(this.maxStoneR, stoneRadiusOf(o));
+    }
   }
   // Records within radius r of (x,y), as a cell-aligned SUPERSET — the caller
   // applies the exact distance test. `filter` trims per record while scanning.
@@ -1312,13 +1316,14 @@ export class WorldRoom {
   #tryFuse(o, now) {
     const ro = stoneRadiusOf(o);
     let target = null, bestD = Infinity;
-    for (const s of this.#gridNear(o.x, o.y, ro + MAX_STONE_R, (s) => s.family === 'stone')) {
+    for (const s of this.#gridNear(o.x, o.y, ro + this.maxStoneR, (s) => s.family === 'stone')) {
       if (s.id === o.id || s.held !== '') continue;
       const d = Math.hypot(s.x - o.x, s.y - o.y);
       if (d < stoneRadiusOf(s) && d < bestD) { bestD = d; target = s; } // dropped onto its footprint → fuse
     }
     if (!target) { this.#settleStoneClear(o); return null; }
-    target.r = Math.min(MAX_STONE_R, Math.hypot(ro, stoneRadiusOf(target))); // area-combine
+    target.r = Math.hypot(ro, stoneRadiusOf(target)); // area-combine, UNCAPPED — rocks keep getting bigger the more you merge (a soothing build)
+    this.maxStoneR = Math.max(this.maxStoneR, target.r); // keep the fuse/settle query bound covering the biggest rock
     target.last_touched = now;
     this.#gridUpdate(target);
     return target;
@@ -1458,7 +1463,7 @@ export class WorldRoom {
   #settleClearOfStones(o, ro) {
     for (let iter = 0; iter < 10; iter++) {
       let worst = null, worstOver = 1e-3;     // ignore sub-unit grazes
-      for (const s of this.#gridNear(o.x, o.y, ro + MAX_STONE_RADIUS, (s) => s.family === 'stone' && s.id !== o.id && s.held === '')) {
+      for (const s of this.#gridNear(o.x, o.y, ro + this.maxStoneR, (s) => s.family === 'stone' && s.id !== o.id && s.held === '')) {
         const min = ro + stoneRadiusOf(s);
         const dx = o.x - s.x, dy = o.y - s.y, d = Math.hypot(dx, dy);
         const over = min - d;

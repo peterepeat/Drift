@@ -97,6 +97,18 @@ const sd = wS.objects.find((o) => o.id === seedId), rk2 = byId(wS, Rk);
 const gapSR = Math.hypot(sd.x - rk2.x, sd.y - rk2.y);
 check(gapSR >= rRk + PLANT_BASE_R - 1.5, `a plant dropped on a rock settles beside it, not through it (gap ${gapSR.toFixed(1)} >= ${(rRk + PLANT_BASE_R).toFixed(1)})`);
 
+// 6. UNCAPPED growth: rocks keep getting bigger the more you merge (a soothing build).
+// Pile many stones onto one spot — the result grows PAST the old MAX_STONE_R=88 cap, and
+// a stone dropped at its far edge still fuses (the grid-query bound tracks the big rock).
+const BIG = pool[20], SPOT = { x: 14000, y: -14000 };
+await move(BIG, SPOT.x, SPOT.y);
+for (let i = 21; i <= 34; i++) await move(pool[i], SPOT.x, SPOT.y); // pile 14 more onto it
+const bigR = radOf(byId(await snap(), BIG));
+check(bigR > 88, `a much-merged rock grows past the old cap (r ${bigR.toFixed(0)} > 88)`);
+await move(pool[35], SPOT.x + bigR - 6, SPOT.y);                    // drop one at the far edge (>88u from centre)
+const wEdge = await snap();
+check(!byId(wEdge, pool[35]) && radOf(byId(wEdge, BIG)) > bigR, `a stone dropped at the big rock's far edge still fuses (r ${radOf(byId(wEdge, BIG)).toFixed(0)})`);
+
 ctl.close();
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
