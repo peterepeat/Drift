@@ -214,6 +214,7 @@ const MIN_STONE_R = 9;                    // break a stone below this and it cru
 function stoneRadius(seed) { return 12 + rng(seed >>> 0)() * 34; }      // MUST match the client's seed-derived base
 function stoneRadiusOf(o) { return o.r != null ? o.r : stoneRadius(o.seed); }
 const MAX_STONE_RADIUS = MAX_STONE_R;     // grid-query radius (a fused stone can be this big)
+const PLANT_BASE_R = 9;                    // a plant's trunk-base clearance — set down on a rock, it settles beside (Unit ⑥)
 
 // ---- water: flow, drift & stone-channelling (Family 3, Phase 3) -------------
 // A slow persistent flow moves across the world. Its direction at a point is a
@@ -871,6 +872,15 @@ export class WorldRoom {
         const an = this.#anomalyNear(o.x, o.y);
         if (an && await this.#anomalyWorkSeed(this.#anomalyKindsOf(an), o, now, true)) return; // o was burst (consumed); else it ripened in place and falls through
       }
+      // A plant set down ON a rock settles beside it — never a flat card on top (Unit ⑥).
+      // If THAT nudge pushed it into a pond, ease it back to the bank (don't strand a
+      // plant in water). Only when the settle actually moved it — a plant dropped
+      // straight into open water keeps its existing behaviour (the tick relocates it).
+      if (o.family === 'seed') {
+        const px = o.x, py = o.y;
+        this.#settleClearOfStones(o, PLANT_BASE_R);
+        if (o.x !== px || o.y !== py) { const pond = poolContaining(o.x, o.y); if (pond) { const b = bankPoint(pond, o.x, o.y, o.seed); o.x = b.x; o.y = b.y; } }
+      }
       if (o.family === 'stone') {
         // Worn to grit by too much handling — a brief scatter, then gone (§4.3).
         if (o.handling >= GRIT_HANDLING) {
@@ -1434,8 +1444,11 @@ export class WorldRoom {
   // so it settles against the near side rather than hiding behind. Each pass resolves
   // the deepest overlap; a few passes clear a small cluster. Fully deterministic (no
   // randomness) so every client agrees on where it came to rest.
-  #settleStoneClear(o) {
-    const ro = stoneRadiusOf(o);
+  #settleStoneClear(o) { this.#settleClearOfStones(o, stoneRadiusOf(o)); }
+  // Generalised: ease object `o` (a body of radius `ro`) out of any stone footprint it
+  // overlaps, biased toward the FRONT (+y). Used both by stone-on-stone settling and to
+  // settle a PLANT set down on a rock beside it — never a flat card on top (Unit ⑥).
+  #settleClearOfStones(o, ro) {
     for (let iter = 0; iter < 10; iter++) {
       let worst = null, worstOver = 1e-3;     // ignore sub-unit grazes
       for (const s of this.#gridNear(o.x, o.y, ro + MAX_STONE_RADIUS, (s) => s.family === 'stone' && s.id !== o.id && s.held === '')) {

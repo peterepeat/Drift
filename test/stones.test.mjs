@@ -83,6 +83,20 @@ const X = pool[12], H = -7000;
 for (let i = 0; i < 26; i++) await move(X, H, H); // GRIT_HANDLING = 26 places
 check(!byId(await snap(), X), 'a stone handled to the bone wears to grit and is gone');
 
+// 5. SOLIDITY (Unit ⑥): a plant set down ON a rock settles BESIDE it, never through it
+// — so a dropped thing reads as resting against a solid, not stacked like a flat card.
+const PLANT_BASE_R = 9;                                  // mirrors the server const
+const Rk = pool[8], SX = -12000, SY = 12000;            // a clear region, far from everything
+await move(Rk, SX, SY);                                  // isolate a rock there
+const rRk = radOf(byId(await snap(), Rk));
+const seedId = (await snap()).objects.find((o) => o.family === 'seed' && !o.held)?.id;
+check(!!seedId, 'a free plant exists to test plant-on-rock settling');
+await move(seedId, SX, SY);                              // drop the plant dead-centre on the rock
+const wS = await snap();
+const sd = wS.objects.find((o) => o.id === seedId), rk2 = byId(wS, Rk);
+const gapSR = Math.hypot(sd.x - rk2.x, sd.y - rk2.y);
+check(gapSR >= rRk + PLANT_BASE_R - 1.5, `a plant dropped on a rock settles beside it, not through it (gap ${gapSR.toFixed(1)} >= ${(rRk + PLANT_BASE_R).toFixed(1)})`);
+
 ctl.close();
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

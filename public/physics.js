@@ -33,6 +33,28 @@ export function spring(pos, vel, dt, k, retain) {
   return { pos: pos + v * dt, vel: v };
 }
 
+// Push a point OUT of any overlapping circle footprints so it rests just clear of
+// them, never inside. Each circle is {x, y, r}; `pad` is extra clearance (e.g. the
+// moving body's radius). Each pass resolves the single deepest overlap, so a point
+// wedged between several circles walks out to the gap over a few passes. The push is
+// continuous (it fades to zero exactly at the rim, so there's no pop as a wanderer
+// approaches). Fully deterministic — every client computes the same rest point.
+// Used to fence ground creatures around rock footprints (solids read as solid).
+export function deflectCircles(x, y, pad, circles, passes = 3) {
+  for (let i = 0; i < passes; i++) {
+    let worst = 0, ux = 0, uy = 1;
+    for (const c of circles) {
+      const min = c.r + pad;
+      const dx = x - c.x, dy = y - c.y, d = Math.hypot(dx, dy);
+      const over = min - d;
+      if (over > worst) { worst = over; ux = d > 0.001 ? dx / d : 0; uy = d > 0.001 ? dy / d : 1; }
+    }
+    if (worst <= 0) break;           // clear of every circle
+    x += ux * worst; y += uy * worst;
+  }
+  return { x, y };
+}
+
 // A soft radial push: an object within `radius` of a moving point is nudged away
 // along the point→object direction, strongest at the centre and zero at the rim,
 // scaled by the point's speed. Returns the velocity to ADD {vx,vy} (world units/s).

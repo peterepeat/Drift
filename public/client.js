@@ -7,7 +7,7 @@ import * as PG from './drift-procgen.js';
 import { paintGround, paintGlows, paintNoise, paintGroundPatches, paintPresence, paintCarryTether, paintSky, paintSeasonGrade, seasonGround, seasonSat, paintWaterWorld, paintFlow } from './render.js';
 import { inViewport, CULL_MARGIN } from './cull.js';
 import { Audio } from './audio.js';
-import { flingStep, ema, nudge, spring } from './physics.js';
+import { flingStep, ema, nudge, spring, deflectCircles } from './physics.js';
 import { wanderAt, drawCreature, creatureR, drawFish, fishR } from './creatures.js';
 
 // ---- tuning constants -------------------------------------------------------
@@ -317,8 +317,8 @@ function creaturePos(o) {
   const t0 = (o.wanderT0 || 0) / 1000;
   const tg = creatureWarpT(o, t), tg2 = creatureWarpT(o, t + 0.2);
   const w = wanderAt(seed, kind, tg), a = wanderAt(seed, kind, t0), w2 = wanderAt(seed, kind, tg2);
-  const wx = o.x + (w.x - a.x), wy = o.y + (w.y - a.y);
-  const wAng = Math.atan2(w2.y - w.y, w2.x - w.x);
+  let x = o.x + (w.x - a.x), y = o.y + (w.y - a.y);
+  let ang = Math.atan2(w2.y - w.y, w2.x - w.x);
   // Tamed (Wave U): ease from the wander toward a spot near the nearest person, who it trails.
   const tf = o.family === 'creature' ? tameFactor(o) : 0;
   if (tf > 0) {
@@ -327,11 +327,18 @@ function creaturePos(o) {
       const dx = o.x - pr.x, dy = o.y - pr.y, d = Math.hypot(dx, dy) || 1;
       const fx = pr.x + (dx / d) * TAME_GAP + (w.x - a.x) * 0.4; // hover near them, with a gentle bob
       const fy = pr.y + (dy / d) * TAME_GAP + (w.y - a.y) * 0.4;
-      const x = wx + (fx - wx) * tf, y = wy + (fy - wy) * tf;
-      return { x, y, ang: tf > 0.4 ? Math.atan2(pr.y - y, pr.x - x) : wAng };
+      const nx = x + (fx - x) * tf, ny = y + (fy - y) * tf;
+      ang = tf > 0.4 ? Math.atan2(pr.y - ny, pr.x - nx) : ang;
+      x = nx; y = ny;
     }
   }
-  return { x: wx, y: wy, ang: wAng };
+  // Unit ⑥: a ground creature steers AROUND rock footprints instead of walking over
+  // them — solids read as solid. Purely local & cosmetic: the creature's server-side
+  // home/wander is untouched, only where it's drawn (so two viewports can fence it
+  // slightly differently against their own visible rocks — fine, like the cursor nudge).
+  // frameStones is last frame's visible rocks (a frame's lag is imperceptible).
+  if (kind === 'crawler' && frameStones.length) { const p = deflectCircles(x, y, creatureR(seed, kind) * 0.7, frameStones, 5); x = p.x; y = p.y; }
+  return { x, y, ang };
 }
 // Where an object is drawn / tested THIS frame: a free creature wanders; everything
 // else sits at its true position plus any local cursor-displacement offset.
@@ -848,6 +855,7 @@ function trackMouseHover(cx, cy) {
 }
 let grab = null;                 // pending press on an object: { id, ox, oy } (object-centre − pointer, world units)
 let lastTapId = null, lastTapT = 0; // double-tap-a-stone detection (→ break)
+let frameStones = [];            // visible rock footprints {x,y,r} this frame — ground creatures steer around them (Unit ⑥)
 let holdMode = null;             // null | 'drag' (an object carried by a pressed pointer)
 let holdOff = { x: 0, y: 0 };    // world-unit offset object-centre − pointer, so a grab doesn't snap to centre
 
@@ -1324,6 +1332,7 @@ function frame(now) {
     drawMark(o, life);
   }
   const list = [];
+  const nextStones = []; // visible rocks → next frame's creature-fencing footprints (Unit ⑥)
   // Viewport culling: only the objects on (or just off) screen are sorted/drawn.
   // Lifted/held objects are never culled — they're drawn in the screen-space pass.
   for (const o of objects.values()) {
@@ -1337,8 +1346,10 @@ function frame(now) {
       ? p.y + (o.kind === 'flier' ? flierLift(o) : 0)
       : groundY(o);
     o._depthScale = depthScaleAt(s.y); // size-by-depth (Wave K) — used by draw + hit-test
+    if (o.family === 'stone') nextStones.push({ x: p.x, y: p.y, r: stoneSize(o) }); // a rock fences ground creatures
     list.push(o);
   }
+  frameStones = nextStones; // creaturePos reads this next frame (a frame's lag is invisible)
   // painter's depth by ground line; ties broken by id for a stable, deterministic order
   list.sort((a, b) => (a._sortY - b._sortY) || (a.id < b.id ? -1 : 1));
   // attend (§5.2): ease the reveal in/out and bloom it behind the attended object

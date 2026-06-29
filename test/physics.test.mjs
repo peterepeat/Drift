@@ -1,5 +1,5 @@
-// Pure motion helpers (no worker needed) — throw momentum + pointer nudge.
-import { friction, flingStep, ema, nudge, spring } from '../public/physics.js';
+// Pure motion helpers (no worker needed) — throw momentum + pointer nudge + rock fencing.
+import { friction, flingStep, ema, nudge, spring, deflectCircles } from '../public/physics.js';
 let pass = 0, fail = 0;
 const check = (c, label) => { console.log((c ? '  PASS ' : '  FAIL ') + label); c ? pass++ : fail++; };
 const near = (a, b, e = 1e-9) => Math.abs(a - b) <= e;
@@ -48,6 +48,22 @@ let a = { pos: 30, vel: 0 }, b = { pos: 30, vel: 0 };
 for (let i = 0; i < 30; i++) { a = spring(a.pos, a.vel, 1 / 60, 95, 0.001); b = spring(b.pos, b.vel, 1 / 60, 95, 0.5); }
 check(Math.abs(a.pos) <= Math.abs(b.pos) + 1e-9, 'heavier damping settles at least as fast as lighter damping');
 check(spring(0, 0, 0.1, 95, 0.02).pos === 0 && spring(0, 0, 0.1, 95, 0.02).vel === 0, 'a thing already at rest stays at rest');
+
+// ---- deflectCircles: fence a ground point out of rock footprints (Unit ⑥) ----
+const noRock = deflectCircles(0, 0, 5, []);
+check(noRock.x === 0 && noRock.y === 0, 'with no rocks a point stays exactly put');
+const clear = deflectCircles(100, 0, 5, [{ x: 0, y: 0, r: 20 }]);
+check(clear.x === 100 && clear.y === 0, 'a point already clear of a rock is untouched');
+const inside = deflectCircles(5, 0, 5, [{ x: 0, y: 0, r: 20 }]); // 5u from centre, needs 25
+check(near(Math.hypot(inside.x, inside.y), 25, 1e-6), 'a point inside a footprint is pushed out to just-clear (r + pad)');
+check(inside.x > 5, 'it is pushed OUTWARD along the offset (away from the rock centre)');
+const dead = deflectCircles(0, 0, 5, [{ x: 0, y: 0, r: 20 }]); // dead-centre → default +y escape
+check(Number.isFinite(dead.x) && Number.isFinite(dead.y) && near(Math.hypot(dead.x, dead.y), 25, 1e-6), 'a dead-centre point still escapes to the rim, finite');
+const edge = deflectCircles(25, 0, 5, [{ x: 0, y: 0, r: 20 }]); // exactly at the rim → no push (continuous)
+check(near(edge.x, 25, 1e-9) && near(edge.y, 0, 1e-9), 'at the rim the push is exactly zero (no pop as a wanderer approaches)');
+// wedged between two rocks → walks out to the gap over a few passes, clear of BOTH
+const wedge = deflectCircles(0, 0, 5, [{ x: -10, y: 0, r: 20 }, { x: 10, y: 0, r: 20 }], 6);
+check(Math.hypot(wedge.x + 10, wedge.y) >= 24.9 && Math.hypot(wedge.x - 10, wedge.y) >= 24.9, 'a point wedged between two rocks settles clear of both');
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
