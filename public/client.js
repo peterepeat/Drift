@@ -36,6 +36,7 @@ const P_IN = 1500, P_OUT = 2500, P_IDLE = 2000; // bloom fade-in / fade-out / id
 const SHARED_RADIUS = 620;                   // world units within which two presences share warmth
 const SHARED_BOOST = 3.2;                     // strength of the extra between-them bloom (intensifies the shared patch)
 const SPROUT_C = 0.14;                        // maturity below this renders as a seed (mirrors server)
+const LOD_PX = 8;                             // below this on-screen radius (zoomed out), draw a cheap colour blob, not full procgen
 const GLOW_PARALLAX = 0.04;                   // ambient glows drift this fraction of the camera (Wave H depth)
 const DEPTH_TOP = 0.2;                         // objects at the TOP of the screen draw this much smaller (Wave K recession — subtle)
 const ANOM_DISSOLVE_MS = 10000, ANOM_FADE_MS = 3000; // hold an anomaly 10s and it fades from your hands
@@ -445,12 +446,38 @@ function drawObjectWorld(o) {
   if (o.family === 'creature' || o.family === 'fish') { const p = creaturePos(o); cx = p.x; cy = p.y; ang = p.ang; } // live wander + heading
   else { cx = o.x + (o._ox || 0); cy = o.y + (o._oy || 0); } // + local cursor-displacement (Wave 6)
   const ds = o._depthScale || 1; // size-by-depth (Wave K) — set in the cull pass
-  paintGroundShadow(o, cx, cy, objRadius(o) * ds);
+  const rad = objRadius(o) * ds;
+  // LOD (zoom-out perf): when an object is only a handful of pixels on screen, a full
+  // procedural tree is hundreds of wasted strokes — draw one colour blob instead. This
+  // is the standard "when a tree is 5px, draw a dot" technique; only the zoomed-out view
+  // is affected, close-up is untouched. Anomalies (luminous, rare) + fish always draw full.
+  if (rad * camera.z < LOD_PX && o.family !== 'anomaly' && o.family !== 'fish') { drawLOD(o, cx, cy, rad); return; }
+  paintGroundShadow(o, cx, cy, rad);
   if (ds === 1) { paintObject(o, cx, cy, ang); return; }
   ctx.save();
   ctx.translate(cx, cy); ctx.scale(ds, ds); ctx.translate(-cx, -cy); // scale about the object's base point
   paintObject(o, cx, cy, ang);
   ctx.restore();
+}
+// A cheap stand-in for a far/tiny object: one opaque disc in its family colour (the
+// global season grade tints it to match), at the foliage height for plants (which rise
+// from their base). No shadow, no procgen — this is the whole point of the LOD.
+function drawLOD(o, cx, cy, rad) {
+  const plant = o.family === 'seed' && shownMat(o) >= SPROUT_C;
+  const y = plant ? cy - rad * 0.55 : cy;          // a tree's mass sits above its base point
+  ctx.beginPath(); ctx.arc(cx, y, rad * 0.85, 0, Math.PI * 2);
+  ctx.fillStyle = lodColor(o); ctx.fill();
+}
+// The representative base colour of an object for its LOD blob — matched to the full
+// form's colour (the plant `core` ramp / the stone's fill) so zooming in/out doesn't shift hue.
+function lodColor(o) {
+  if (o.family === 'stone') return stoneGeom(o).fill;
+  if (o.family === 'crystal') return '#9ec3d6';
+  if (o.family === 'creature') return o.kind === 'flier' ? '#5c564e' : '#2f2c28';
+  const mat = shownMat(o);
+  if (mat < SPROUT_C) return '#7a6e4c'; // a dormant seed — earthy
+  return mat < 0.5 ? PG.mix(PG.PALETTE.growthYoung, PG.PALETTE.growthLight, mat / 0.5)
+                   : PG.mix(PG.PALETTE.growthLight, PG.PALETTE.growthDeep, (mat - 0.5) / 0.5);
 }
 // The "reveal of age" (PRD §5.2): how far along its life an attended object is, so
 // the attend-bloom is larger and warmer the older/more-worn the object — its history
