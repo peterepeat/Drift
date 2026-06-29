@@ -254,9 +254,10 @@ const presences = new Map();   // pid -> { x, y, born, last, gone }
 const lifts = new Map();       // id -> lift animation state
 const flashes = [];            // brief crystal-dissolution flashes { x, y, start }
 const ripples = [];            // brief water ripples — a bug dropped in a pond becomes fish food { x, y, start }
-const feedRushes = [];         // a pond's fish DART toward dropped food then ease back { x, y, start, pond } — local/cosmetic
-const FEED_RUSH_MS = 1700;     // how long the feeding dart lasts
-const FEED_RUSH_STR = 0.82;    // how far toward the food the fish rush (1 = right onto it)
+const feedRushes = [];         // a pond's fish swim over to eat a dropped bug { x, y, start, pond, eatT } — local/cosmetic
+const FISH_SWIM_SPEED = 150;   // world u/s the fish swim toward food (a brisk, natural pursuit — the NEAREST reaches first + eats it)
+const FEED_RELEASE = 0.9;      // seconds for fish to ease back to their wander once the bug is eaten
+const FEED_RUSH_CAP_MS = 5000; // hard cap on a feed-rush (safety; normally it ends when the bug is eaten)
 const grits = [];              // brief stone-to-grit scatters { x, y, seed, r, start }
 const creatureEvts = [];       // brief birth-shimmer / death-puff cues { x, y, start, birth } — the ecosystem made legible
 const CREATURE_EVT_MS = 760;   // lifetime of a birth/death cue
@@ -377,16 +378,21 @@ function creaturePos(o) {
   // A befriended creature is NOT glued to the viewport — its HOME drifts toward you on the
   // server (slow, at its own pace), and here it just wanders normally around that moving
   // home. So it approaches and trails you naturally, never snapping to centre or vanishing.
-  // A pond's fish RUSH toward food just dropped in (a bug → fish food), darting in fast
-  // then easing back to their wander — a brief feeding frenzy. Purely local & cosmetic
-  // (the splash event drives it on every client); the fish's home/wander is untouched.
+  // A bug dropped in a pond becomes every nearby fish's objective: each SWIMS toward it at
+  // a constant speed (turning to face it), so the closest reaches it first + eats it (`eatT`,
+  // set when the rush began). Once eaten, the fish ease back to their wander. Purely local &
+  // cosmetic (the splash event drives it on every client); the fish's home/wander is untouched.
   if (kind === 'fish' && feedRushes.length) {
     let target = null, bestF = 0;
     for (const fr of feedRushes) {
       if (Math.hypot(x - fr.pond.x, y - fr.pond.y) > fr.pond.r + 40) continue; // only the food's own pond
-      const tt = (animT * 1000 - fr.start) / FEED_RUSH_MS;
-      if (tt < 0 || tt > 1) continue;
-      const f = (tt < 0.3 ? tt / 0.3 : 1 - (tt - 0.3) / 0.7) * FEED_RUSH_STR; // dart in fast, ease out slow
+      const elapsed = (animT * 1000 - fr.start) / 1000;
+      if (elapsed < 0) continue;
+      const dist = Math.hypot(fr.x - x, fr.y - y) || 1;
+      const approachT = dist / FISH_SWIM_SPEED;                 // secs for THIS fish to reach the bug at swim speed
+      let f;
+      if (elapsed <= fr.eatT) f = Math.min(1, elapsed / approachT); // still swimming in (constant speed)
+      else { const fAtEat = Math.min(1, fr.eatT / approachT); f = fAtEat * Math.max(0, 1 - (elapsed - fr.eatT) / FEED_RELEASE); } // eaten → ease back from where it had got to
       if (f > bestF) { bestF = f; target = fr; }
     }
     if (target) { ang = Math.atan2(target.y - y, target.x - x); x += (target.x - x) * bestF; y += (target.y - y) * bestF; }
@@ -1429,7 +1435,18 @@ function onMessage(raw) {
       if (m.splash) { // a bug dropped in a pond → fish food: a ripple + the pond's fish rush over to eat
         ripples.push({ x: m.x, y: m.y, start: performance.now() });
         const pond = pools.find((p) => Math.hypot(m.x - p.x, m.y - p.y) <= p.r + 30);
-        if (pond) feedRushes.push({ x: m.x, y: m.y, start: performance.now(), pond });
+        if (pond) {
+          // the NEAREST fish reaches the bug first + eats it — find its swim time so the rush ends then
+          let minD = Infinity;
+          for (const o of objects.values()) {
+            if (o.family !== 'fish') continue;
+            const fp = creaturePos(o);
+            if (Math.hypot(fp.x - pond.x, fp.y - pond.y) > pond.r + 40) continue;
+            const d = Math.hypot(fp.x - m.x, fp.y - m.y); if (d < minD) minD = d;
+          }
+          const eatT = Math.min(FEED_RUSH_CAP_MS / 1000, minD === Infinity ? 0.6 : minD / FISH_SWIM_SPEED);
+          feedRushes.push({ x: m.x, y: m.y, start: performance.now(), pond, eatT });
+        }
       }
       else if (m.burst) ripples.push({ x: m.x, y: m.y, start: performance.now(), burst: true }); // an anomaly burst a tree into saplings
       else if (og && og.family === 'crystal') flashes.push({ x: og.x, y: og.y, start: performance.now() }); // brief flash
@@ -1665,7 +1682,7 @@ function frame(now) {
     }
     ctx.restore();
   }
-  for (let i = feedRushes.length - 1; i >= 0; i--) if (now - feedRushes[i].start > FEED_RUSH_MS) feedRushes.splice(i, 1); // expire the feeding darts
+  for (let i = feedRushes.length - 1; i >= 0; i--) { const fr = feedRushes[i]; if (now - fr.start > Math.min(FEED_RUSH_CAP_MS, (fr.eatT + FEED_RELEASE) * 1000)) feedRushes.splice(i, 1); } // expire once the bug is eaten + the fish have eased back
 
   if (Q.grade) paintSeasonGrade(ctx, vw, vh, seasonPhase); // season composite (crossfaded), last
 
