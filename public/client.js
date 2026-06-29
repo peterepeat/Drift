@@ -334,20 +334,16 @@ function creatureWarpT(o, t) {
 }
 // Is this creature currently glowing? → its rainbow hue, else null.
 function glowHueOf(o) { return (o.glowUntil && (Date.now() + clockSkew) < o.glowUntil) ? (o.glowHue || 0) : null; }
-const TAME_GAP = 64;           // a tamed creature hovers this far from its person
-const FOLLOW_RANGE = 1600;     // ...and only follows a person within this
-// How tamed this creature is right now: 0..1, eased in at the start and out at the end
-// (a pure function of time, so creaturePos stays consistent across its per-frame calls).
+// How strong the BOND is right now, 0..1: eases in when befriended, holds, then FADES over
+// the final ~10s as it lapses — a visible end (the red glow wanes and the creature drifts
+// back to its own life). The server moves a bonded creature; this only drives the glow.
 function tameFactor(o) {
   if (!o.tameUntil) return 0;
   const remain = o.tameUntil - (Date.now() + clockSkew);
   if (remain <= 0) return 0;
-  // ease IN from when we first saw the bond begin (duration-agnostic — works for a 2.5-min
-  // heart-tame OR a 2-hour befriend), and OUT over the final 2.5s as it lapses.
   const inF = o._tameStart ? Math.min(1, (performance.now() - o._tameStart) / 2500) : 1;
-  return Math.max(0, Math.min(1, Math.min(inF, remain / 2500)));
+  return Math.max(0, Math.min(1, Math.min(inF, remain / 10000)));
 }
-function isTamed(o) { return tameFactor(o) > 0.02; }
 // A friendly little 3-note flourish when you greet the giant — all on the season
 // pentatonic (so it's consonant + musical), silent unless sound is on.
 function giantChime() {
@@ -356,19 +352,6 @@ function giantChime() {
   setTimeout(() => Audio.event('pickup', { seed: 0x7c33, family: 'anomaly', x }), 120);
   setTimeout(() => Audio.event('place', { seed: 0x2e9f, family: 'anomaly', x }), 250);
 }
-// The nearest PERSON to (x,y) within FOLLOW_RANGE — the local viewer (camera centre, the
-// same point we broadcast as our presence) plus every remote presence. null if none near.
-function nearestPresence(x, y) {
-  let best = null, bd = FOLLOW_RANGE;
-  const dl = Math.hypot(camera.x - x, camera.y - y);
-  if (dl < bd) { bd = dl; best = { x: camera.x, y: camera.y }; }
-  for (const p of presences.values()) {
-    if (p.gone) continue;
-    const d = Math.hypot(p.x - x, p.y - y);
-    if (d < bd) { bd = d; best = { x: p.x, y: p.y }; }
-  }
-  return best;
-}
 function creaturePos(o) {
   const t = syncedT(), seed = o.seed >>> 0, kind = o.family === 'fish' ? 'fish' : (o.kind || 'crawler');
   const t0 = (o.wanderT0 || 0) / 1000;
@@ -376,19 +359,9 @@ function creaturePos(o) {
   const w = wanderAt(seed, kind, tg), a = wanderAt(seed, kind, t0), w2 = wanderAt(seed, kind, tg2);
   let x = o.x + (w.x - a.x), y = o.y + (w.y - a.y);
   let ang = Math.atan2(w2.y - w.y, w2.x - w.x);
-  // Tamed (Wave U): ease from the wander toward a spot near the nearest person, who it trails.
-  const tf = o.family === 'creature' ? tameFactor(o) : 0;
-  if (tf > 0) {
-    const pr = nearestPresence(o.x, o.y);
-    if (pr) {
-      const dx = o.x - pr.x, dy = o.y - pr.y, d = Math.hypot(dx, dy) || 1;
-      const fx = pr.x + (dx / d) * TAME_GAP + (w.x - a.x) * 0.4; // hover near them, with a gentle bob
-      const fy = pr.y + (dy / d) * TAME_GAP + (w.y - a.y) * 0.4;
-      const nx = x + (fx - x) * tf, ny = y + (fy - y) * tf;
-      ang = tf > 0.4 ? Math.atan2(pr.y - ny, pr.x - nx) : ang;
-      x = nx; y = ny;
-    }
-  }
+  // A befriended creature is NOT glued to the viewport — its HOME drifts toward you on the
+  // server (slow, at its own pace), and here it just wanders normally around that moving
+  // home. So it approaches and trails you naturally, never snapping to centre or vanishing.
   // A pond's fish RUSH toward food just dropped in (a bug → fish food), darting in fast
   // then easing back to their wander — a brief feeding frenzy. Purely local & cosmetic
   // (the splash event drives it on every client); the fish's home/wander is untouched.
@@ -438,7 +411,7 @@ function paintObject(o, cx, cy, ang = 0) {
     drawGiant(ctx, cx, cy, GIANT_R, animT, Math.atan2(o.hy || 0, o.hx || 1), { gait: o.gait, tend: o.tend, lookX: o.lookX, lookY: o.lookY });
     return;
   }
-  if (o.family === 'creature') { drawCreature(ctx, o.seed >>> 0, o.kind || 'crawler', cx, cy, animT, ang, glowHueOf(o), isTamed(o)); return; }
+  if (o.family === 'creature') { drawCreature(ctx, o.seed >>> 0, o.kind || 'crawler', cx, cy, animT, ang, glowHueOf(o), tameFactor(o)); return; }
   if (o.family === 'fish') { drawFish(ctx, o.seed >>> 0, cx, cy, animT, ang); return; }
   const mat = shownMat(o), aged = shownAged(o);
   if (mat < SPROUT_C) { PG.drawSeed(ctx, o.seed >>> 0, cx, cy, seedScale(o.seed) * (1 + mat * 1.4)); return; }

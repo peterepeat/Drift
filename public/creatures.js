@@ -67,21 +67,18 @@ export function fishR(seed) {
 // A small living thing in the world's muted palette. Heading `ang` orients a
 // crawler along its motion; `t` (seconds, local is fine) animates legs/wings so it
 // reads as alive even while its slow drift is barely moving. Form is from `seed`.
-export function drawCreature(ctx, seed, kind, cx, cy, t, ang = 0, glowHue = null, tamed = false) {
+export function drawCreature(ctx, seed, kind, cx, cy, t, ang = 0, glowHue = null, bond = 0) {
   const r = rng(seed >>> 0);
   const size = (kind === 'flier' ? 0.85 : 1) * (9.2 + r() * 5.2); // body half-length, world units — ~2× so creatures read clearly
-  if (tamed) { // a small beating heart floats above — it's been tamed, and follows the nearest person
-    const hb = 0.85 + 0.15 * Math.abs(Math.sin(t * 3)), hs = size * 0.55 * hb;
-    ctx.save(); ctx.translate(cx, cy - size * 2.1);
-    ctx.beginPath();
-    ctx.moveTo(0, -hs * 0.2);
-    ctx.bezierCurveTo(0, -hs * 0.5, -hs * 0.5, -hs * 0.5, -hs * 0.5, -hs * 0.12);
-    ctx.bezierCurveTo(-hs * 0.5, hs * 0.2, 0, hs * 0.4, 0, hs * 0.55);
-    ctx.bezierCurveTo(0, hs * 0.4, hs * 0.5, hs * 0.2, hs * 0.5, -hs * 0.12);
-    ctx.bezierCurveTo(hs * 0.5, -hs * 0.5, 0, -hs * 0.5, 0, -hs * 0.2);
-    ctx.closePath();
-    ctx.fillStyle = rgba('#ff6f8f', 0.92); ctx.fill();
-    ctx.strokeStyle = rgba('#ffd9e2', 0.7); ctx.lineWidth = 0.6; ctx.stroke();
+  if (bond > 0.01) { // befriended — a soft warm-RED glow that breathes; `bond` 0..1 fades it as the bond wanes (a visible end, no tacky heart)
+    const pulse = 0.7 + 0.3 * Math.sin(t * 2.2 + (seed & 7));
+    const a = bond * pulse, rad = size * (2.5 + 0.6 * pulse);
+    ctx.save(); ctx.globalCompositeOperation = 'lighter';
+    const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, rad);
+    g.addColorStop(0, rgba('#ff5566', 0.6 * a));
+    g.addColorStop(0.4, rgba('#ff3b4a', 0.3 * a));
+    g.addColorStop(1, rgba('#ff3b4a', 0));
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, rad, 0, TAU); ctx.fill();
     ctx.restore();
   }
   if (glowHue != null) { // anomaly glow buff — a bright, pulsing rainbow halo (touched by wonder)

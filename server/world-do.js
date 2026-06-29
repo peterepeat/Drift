@@ -215,11 +215,14 @@ const CREATURE_SEP_STEP = 24;             // max world units the anti-crowd push
 // toward a nearby person and mills a little way off — so lingering draws life to you.
 const CURIOSITY_R = 760;                  // a creature this near a presence may amble over (during its roam phase)
 const CURIOSITY_STANDOFF = 95;            // it stops this far off (curious, not crowding — the wander + anti-crowd keep it loose)
-// BEFRIEND (the come-back hook): attend a creature steadily and it BONDS to you. Bonding
-// = tamed (the client already renders a tamed creature hovering near its person + draws it
-// aglow), just for a long while + triggered by attention instead of a heart anomaly. So you
-// have a companion that greets you when you return to where you befriended it.
-const BEFRIEND_MS = 2 * 60 * 60 * 1000;   // a befriended creature stays bonded ~2h (re-attend to refresh)
+// BEFRIEND (a companion): attend a creature steadily and it BONDS to you — for a bounded,
+// OBSERVABLE while it follows you (its HOME drifts toward you each tick, at its own brisk-but-
+// natural pace — NOT glued to your viewport) and glows warm-red, the glow fading as the bond
+// wanes so you can SEE it end (then it drifts back to its own life). Re-attend to refresh.
+const BEFRIEND_MS = 6 * 60 * 1000;        // a bond lasts ~6 min — long enough to be a companion, short enough that its whole arc (form → follow → fade) is watchable
+const CREATURE_FOLLOW_R = 1500;           // a bonded creature follows a person within this (beyond it, it just stays put + lives — no snap)
+const CREATURE_FOLLOW_STANDOFF = 70;      // ...and settles this close to its person
+const CREATURE_FOLLOW_STEP = 130;         // home units it closes toward its person per tick (≈3× a normal drive step — keeps up, but at its own pace, not glued)
 // ---- the giant: a shared, world-tending NPC (the gardener, built in stages) -
 const GIANT_SEED = 0x6a11d7;              // fixed form — one big, gentle creature for everyone
 const GIANT_STEP = 800;                   // world units it covers per tick — the client walks it CONTINUOUSLY along its heading between ticks (no longer looks parked). Brisk (not rushed) so it's always visibly going somewhere
@@ -1295,9 +1298,10 @@ export class WorldRoom {
       if (o.family !== 'creature' || o.held !== '') continue;
       let mx = 0, my = 0;
       const goal = this.#creatureGoal(o);
-      if (goal) {                                    // step toward what it needs this cycle
+      if (goal) {                                    // step toward what it needs this cycle (a bonded creature follows FASTER, to keep up with you)
+        const bonded = o.tameUntil && o.tameUntil > Date.now();
         const dx = goal.x - o.x, dy = goal.y - o.y, d = Math.hypot(dx, dy);
-        if (d > CREATURE_ARRIVE) { const step = Math.min(CREATURE_STEP, d - CREATURE_ARRIVE); mx += (dx / d) * step; my += (dy / d) * step; }
+        if (d > CREATURE_ARRIVE) { const step = Math.min(bonded ? CREATURE_FOLLOW_STEP : CREATURE_STEP, d - CREATURE_ARRIVE); mx += (dx / d) * step; my += (dy / d) * step; }
       }
       const sep = this.#creatureSeparation(o);        // ALWAYS shove off the crowd (even while grazing) — no pile-ups
       if (sep.x || sep.y) { const sl = Math.hypot(sep.x, sep.y); const push = Math.min(CREATURE_SEP_STEP, sl * CREATURE_SEP_STEP); mx += (sep.x / sl) * push; my += (sep.y / sl) * push; }
@@ -1849,8 +1853,14 @@ export class WorldRoom {
     return best;
   }
   #creatureGoal(c) {
-    // (A bonded/tamed creature's FOLLOW is rendered client-side — it hovers near its person
-    // via creaturePos/tameFactor — so the server leaves its home in the ecosystem.)
+    // BONDED: a befriended (tamed) creature follows its person — its home drifts toward the
+    // nearest presence within range, overriding its ordinary drives while you're around, and
+    // resuming normal life when you leave (or the bond lapses). The drift loop steps a bonded
+    // creature by the larger CREATURE_FOLLOW_STEP so it actually keeps up, at its own pace.
+    if (c.tameUntil && c.tameUntil > Date.now()) {
+      const fp = this.#nearestPresence(c.x, c.y, CREATURE_FOLLOW_R);
+      if (fp) { const dx = c.x - fp.x, dy = c.y - fp.y, d = Math.hypot(dx, dy) || 1; return { x: fp.x + (dx / d) * CREATURE_FOLLOW_STANDOFF, y: fp.y + (dy / d) * CREATURE_FOLLOW_STANDOFF }; }
+    }
     const drive = this.#creatureDrive(c);
     if (drive === 'roam') {                            // a free-wander phase — but if someone is lingering nearby, amble over to them
       const p = this.#nearestPresence(c.x, c.y, CURIOSITY_R);

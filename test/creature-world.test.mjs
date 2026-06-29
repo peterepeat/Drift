@@ -122,15 +122,22 @@ await tickG(30);
 const post = minSpacing(await snap());
 check(post.n >= 2 && post.m > pre.m && post.m > 25, `a pile of ${NPILE} creatures spreads out (closest pair ${pre.m.toFixed(0)}u -> ${post.m.toFixed(0)}u)`);
 
-// 10. BEFRIEND: a `befriend` message bonds a creature to you — the server tames it for a
-// LONG while (the come-back hook). The follow + glow are rendered client-side; here we
-// just confirm the durable bond is set.
+// 10. BEFRIEND: a `befriend` message bonds a creature for a bounded while, AND a bonded
+// creature's HOME drifts toward a nearby presence (it follows you, server-side, at its
+// own pace — no client camera-glue). The red-glow fade is rendered client-side.
 const bf = await spawn('crawler', 33000, 33000);
 const bws = await open(); await bws.world;
 bws.send(JSON.stringify({ t: 'befriend', id: bf.creature.id, token: 'bff-tok', ts: Date.now() }));
 await wait(150);
 const bonded = creatures(await snap()).find((o) => o.id === bf.creature.id);
-check(!!bonded && bonded.tameUntil > Date.now() + 60 * 60 * 1000, `befriending a creature bonds it for a long while (tamed=${!!(bonded && bonded.tameUntil)})`);
+check(!!bonded && bonded.tameUntil > Date.now() + 4 * 60 * 1000, `befriending bonds a creature for a watchable while (tamed=${!!(bonded && bonded.tameUntil)})`);
+bws.send(JSON.stringify({ t: 'presence_move', x: 33000 + 600, y: 33000, hw: 100, hh: 100, ts: Date.now() })); // linger ~600u away
+await wait(120);
+const fBefore = Math.hypot((33000 + 600) - bonded.x, 33000 - bonded.y);
+await tickG(3);
+const bf2 = creatures(await snap()).find((o) => o.id === bf.creature.id);
+const fAfter = bf2 ? Math.hypot((33000 + 600) - bf2.x, 33000 - bf2.y) : Infinity;
+check(!!bf2 && fAfter < fBefore - 100, `a bonded creature follows a nearby presence at its own pace (${fBefore.toFixed(0)}u -> ${fAfter.toFixed(0)}u)`);
 bws.close();
 
 console.log(`\n${pass} passed, ${fail} failed`);
