@@ -9,7 +9,8 @@
     "deploy": "wrangler deploy",
     "seed": "node scripts/seed-world.js",
     "seed:prod": "node scripts/seed-world.js",
-    "test": "bash test/run-all.sh"
+    "test": "bash test/run-all.sh",
+    "reap": "bash test/reap.sh"
   },
   "devDependencies": {
     "wrangler": "^4.20.0"

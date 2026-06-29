@@ -15,10 +15,19 @@
 # a wedged worker/test is killed and counted as a failure instead of hanging the
 # whole run forever (learned the hard way — a single hung suite once ran for hours).
 set -u
-cd "$(dirname "$0")/.."
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR/.."
 PORT=${PORT:-8799}
 LOG=/tmp/drift-test-worker.log
 SUITE_TIMEOUT=${SUITE_TIMEOUT:-75}
+
+# Reap orphaned wrangler/workerd/esbuild via the shared reaper (see test/reap.sh for the
+# root-cause writeup). A trap guarantees we clean up on ANY exit — normal, error, or
+# Ctrl-C — so an interrupted run can never leave the CPU-pegging process pile behind.
+reap() { bash "$SCRIPT_DIR/reap.sh" 2>/dev/null || true; }
+trap 'reap; exit 130' INT TERM
+trap reap EXIT
+reap   # clear anything a prior crashed/killed run left running before we start
 
 # Run `node <file>` with a hard wall-clock cap (portable — macOS has no `timeout`).
 # Returns the test's exit code, or 124 if it was killed for exceeding the cap.
@@ -35,12 +44,7 @@ run_node() {
 }
 
 boot() {
-  pkill -9 -f "wrangler dev" 2>/dev/null || true
-  pkill -9 -f workerd 2>/dev/null || true
-  # wrangler dev spawns long-lived `esbuild --service` children that ORPHAN when
-  # wrangler is SIGKILLed — kill them too, or they pile up across suites/runs and
-  # peg the CPU (dozens of idle esbuild @ ~1-2% each). Scoped to this project.
-  pkill -9 -f "$PWD/node_modules/@esbuild" 2>/dev/null || true
+  reap          # kill the PREVIOUS suite's wrangler worker + its workerd/esbuild children
   sleep 3
   rm -rf .wrangler/state
   WRANGLER_SEND_METRICS=false npx wrangler dev --port "$PORT" --ip 127.0.0.1 > "$LOG" 2>&1 &
@@ -70,7 +74,5 @@ for suite in protocol interest grid checkpoint decouple growth seasons anomalies
   echo "=== $suite ==="
   run_node "test/$suite.test.mjs" || fail=1
 done
-pkill -9 -f "wrangler dev" 2>/dev/null || true
-pkill -9 -f workerd 2>/dev/null || true
-pkill -9 -f "$PWD/node_modules/@esbuild" 2>/dev/null || true # don't leave orphaned esbuild services behind
+reap   # tear down the last suite's worker (the EXIT trap also reaps as a backstop)
 [ "$fail" = 0 ] && echo "ALL SUITES PASSED" || { echo "SOME SUITES FAILED"; exit 1; }
