@@ -399,7 +399,7 @@ function paintObject(o, cx, cy, ang = 0) {
   if (o.family === 'anomaly') { drawAnomalyForm(ctx, o, animT, cx, cy, anomalyR(o)); return; }
   if (o.family === 'crystal') { PG.drawCrystal(ctx, o.seed >>> 0, cx, cy, crystalR(o), animT); return; }
   if (o.family === 'giant') { // the journeyer (a being apart) — see giant.js
-    drawGiant(ctx, cx, cy, GIANT_R, animT, Math.atan2(o.hy || 0, o.hx || 1), o.walk != null ? o.walk : 1);
+    drawGiant(ctx, cx, cy, GIANT_R, animT, Math.atan2(o.hy || 0, o.hx || 1), { gait: o.gait, tend: o.tend, lookX: o.lookX, lookY: o.lookY });
     return;
   }
   if (o.family === 'creature') { drawCreature(ctx, o.seed >>> 0, o.kind || 'crawler', cx, cy, animT, ang, glowHueOf(o), isTamed(o)); return; }
@@ -623,12 +623,18 @@ function updatePositions(now) {
     // It WALKS continuously along its heading between the (slow) broadcasts, only gently
     // correcting toward the latest broadcast spot — so it always looks like it's going
     // somewhere instead of teleport-then-wait. When tending (walk 0) it just settles.
+    const ox = giant.x, oy = giant.y;
     const moving = (giant.walk || 0) > 0.1;
     if (moving) { giant.x += (giant.hx || 0) * GIANT_VIS_SPEED * dt; giant.y += (giant.hy || 0) * GIANT_VIS_SPEED * dt; }
     const kg = dt > 0 ? 1 - Math.pow(GIANT_EASE, dt) : 0;
     const corr = moving ? 0.5 : 1;
     giant.x += (giant._tx - giant.x) * kg * corr;
     giant.y += (giant._ty - giant.y) * kg * corr;
+    // GAIT from ACTUAL frame speed (so ANY motion — including a correction slide — walks
+    // the legs, never a frozen slide); the neck-dip eases toward the server's tending flag.
+    const spd = dt > 0 ? Math.hypot(giant.x - ox, giant.y - oy) / dt : 0;
+    giant._spd = (giant._spd || 0) + (spd - (giant._spd || 0)) * Math.min(1, dt * 6);
+    giant._tend = (giant._tend || 0) + ((giant.tending || 0) - (giant._tend || 0)) * Math.min(1, dt * 3);
     // leave a fading footprint every so many units walked (perpendicular L/R of the heading)
     if (giant._fx == null) { giant._fx = giant.x; giant._fy = giant.y; giant._fside = 1; }
     if (moving && Math.hypot(giant.x - giant._fx, giant.y - giant._fy) >= FOOT_STEP) {
@@ -1338,7 +1344,7 @@ function onMessage(raw) {
       if (m.phase != null) seasonPhase = m.phase;
       if (m.bounds && Number.isFinite(m.bounds.x) && Number.isFinite(m.bounds.y)) worldBounds = m.bounds; // keep the camera bound fresh as the world grows
       if (m.giant && Number.isFinite(m.giant.x)) { // the gardener stepped — glide toward its new spot
-        if (giant) { giant._tx = m.giant.x; giant._ty = m.giant.y; giant.hx = m.giant.hx; giant.hy = m.giant.hy; }
+        if (giant) { giant._tx = m.giant.x; giant._ty = m.giant.y; giant.hx = m.giant.hx; giant.hy = m.giant.hy; giant.walk = m.giant.walk; giant.tending = m.giant.tending; }
         else giant = { ...m.giant, _tx: m.giant.x, _ty: m.giant.y };
       }
       break;
@@ -1481,7 +1487,7 @@ function frame(now) {
   if (giant) {
     const gs = worldToScreen(giant.x, giant.y);
     if (inViewport(gs.x, gs.y, vw, vh, CULL_MARGIN)) {
-      const ge = { family: 'giant', id: '__giant', x: giant.x, y: giant.y, hx: giant.hx || 1, hy: giant.hy || 0, walk: giant.walk };
+      const ge = { family: 'giant', id: '__giant', x: giant.x, y: giant.y, hx: giant.hx || 1, hy: giant.hy || 0, gait: Math.min(1, (giant._spd || 0) / GIANT_VIS_SPEED), tend: giant._tend || 0 };
       ge._sortY = giant.y; ge._depthScale = depthScaleAt(gs.y);
       list.push(ge);
     }

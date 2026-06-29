@@ -1777,10 +1777,14 @@ export class WorldRoom {
       const pond = poolContaining(nx, ny);              // a land creature — it rounds ponds, never wades
       if (pond) { const b = bankPoint(pond, nx, ny, 0); nx = b.x; ny = b.y; }
       const moved = Math.hypot(nx - g.x, ny - g.y);
-      g.x = nx; g.y = ny; g.hx = dx / d; g.hy = dy / d; g.walk = 1;
+      g.x = nx; g.y = ny; g.hx = dx / d; g.hy = dy / d; g.walk = 1; g.tending = 0;
       if (moved < GIANT_STEP * 0.3) { g.stuck = (g.stuck || 0) + 1; if (g.stuck >= GIANT_STUCK_TICKS) { g.goal = null; g.stuck = 0; } } // blocked (a pond) → give up + reroute
       else g.stuck = 0;
-    } else { await this.#giantAct(g, now); g.goal = null; g.walk = 0; } // arrived — tend, stand still this tick
+    } else { // arrived — tend, stand still this tick; flag real work so the client dips its mouth to the spot
+      const k = g.goal.kind;
+      await this.#giantAct(g, now); g.goal = null; g.walk = 0;
+      g.tending = (k === 'ripen' || k === 'thin' || k === 'fillhole' || k === 'tendstone' || k === 'sow') ? 1 : 0;
+    }
   }
   #giantGoalValid(goal) {
     if (goal.kind === 'stroll' || goal.kind === 'sow' || goal.kind === 'drink' || goal.kind === 'watch') return true; // point goals — re-checked on arrival
@@ -1901,7 +1905,7 @@ export class WorldRoom {
     // drink + watch: no mutation — the giant simply pauses a beat (walk=0); the visual is
     // the journeyer at the water's edge / standing beside a creature, watching.
   }
-  #giantPub() { const g = this.giant; return { x: g.x, y: g.y, hx: g.hx, hy: g.hy, walk: g.walk || 0 }; }
+  #giantPub() { const g = this.giant; return { x: g.x, y: g.y, hx: g.hx, hy: g.hy, walk: g.walk || 0, tending: g.tending || 0 }; }
 
   // A creature's "strength" = its drawn size (mirrors public/creatures.js creatureR):
   // in a clash the smaller one is the loser. Server-only (it decides + broadcasts the
