@@ -101,14 +101,16 @@ if (!token) { token = crypto.randomUUID(); localStorage.setItem('drift_session',
 // resolution (dpr), the full-screen passes (noise/glows/flow/grade/sat-filter), per-
 // object shadows, the LOD pixel threshold, and drifting litter. Hysteresis + a cooldown
 // keep it from flapping. No UI, no toggle: it just adapts. Tier 0 = full, higher = leaner.
-// lodZoom: LOD only kicks in when zoomed OUT past this (camera.z below it). When zoomed
-// IN (z ≥ lodZoom) every object draws full detail, however small — so a close-up sprout
-// is never chunky. LOD is about zoom (distance), not absolute on-screen size.
+// detailBudget: the max objects drawn at FULL detail in a frame. LOD is keyed to the actual
+// cost — the on-screen object COUNT — not zoom or absolute size. Under budget, EVERYTHING
+// draws full (a close-up sprout is never chunky); over budget, only the smallest-on-screen
+// overflow simplifies. So chunkiness happens solely under genuine load, and a leaner tier
+// just lowers the budget.
 const QUALITY_TIERS = [
-  { dprCap: 2,    noise: 1, glows: 1, flow: 1, sky: 1, grade: 1, sat: 1, patches: 1, shadows: 1, leaves: 1, lodPx: 7,  lodZoom: 0.5  }, // full
-  { dprCap: 1.5,  noise: 0, glows: 1, flow: 1, sky: 1, grade: 1, sat: 1, patches: 1, shadows: 1, leaves: 1, lodPx: 9,  lodZoom: 0.65 }, // drop the full-screen noise; cap retina
-  { dprCap: 1.25, noise: 0, glows: 0, flow: 0, sky: 1, grade: 1, sat: 0, patches: 1, shadows: 1, leaves: 0, lodPx: 16, lodZoom: 0.9  }, // drop glows/flow/litter + the sat-filter (a real GPU win)
-  { dprCap: 1,    noise: 0, glows: 0, flow: 0, sky: 0, grade: 0, sat: 0, patches: 0, shadows: 0, leaves: 0, lodPx: 28, lodZoom: 1.3  }, // bare: no sky/grade/patches/shadows, aggressive LOD even fairly zoomed in
+  { dprCap: 2,    noise: 1, glows: 1, flow: 1, sky: 1, grade: 1, sat: 1, patches: 1, shadows: 1, leaves: 1, detailBudget: 650 }, // full
+  { dprCap: 1.5,  noise: 0, glows: 1, flow: 1, sky: 1, grade: 1, sat: 1, patches: 1, shadows: 1, leaves: 1, detailBudget: 420 }, // drop the full-screen noise; cap retina
+  { dprCap: 1.25, noise: 0, glows: 0, flow: 0, sky: 1, grade: 1, sat: 0, patches: 1, shadows: 1, leaves: 0, detailBudget: 250 }, // drop glows/flow/litter + the sat-filter (a real GPU win)
+  { dprCap: 1,    noise: 0, glows: 0, flow: 0, sky: 0, grade: 0, sat: 0, patches: 0, shadows: 0, leaves: 0, detailBudget: 130 }, // bare: no sky/grade/patches/shadows, tight budget
 ];
 let qTier = 0, Q = QUALITY_TIERS[0];
 let frameMsEMA = 16.7, qLastChangeMs = 0, qHotFrames = 0, qCoolFrames = 0, qPrevNow = 0;
@@ -199,8 +201,21 @@ function camLimits() {
   const h = viewHalf();
   return { x: Math.max(0, worldBounds.x + EDGE_MARGIN - h.hw), y: Math.max(0, worldBounds.y + EDGE_MARGIN - h.hh) };
 }
-// Hard backstop: pull the camera within the limits (used after a zoom/anchor jump).
+// Zoom-out is LIMITED so you can't take in the whole world at once (more to discover, and
+// it keeps the on-screen object count sane). At the most zoomed-out, the viewport covers
+// ~VIEW_FRAC of the WORLD's area — and since that's derived from the live world bounds, the
+// limit scales as the world grows. (Zoom-IN is unchanged, up to ZMAX.)
+const VIEW_FRAC = 0.10;
+function zMin() {
+  if (!worldBounds || !vw || !vh) return ZMIN;
+  const bx = Math.max(500, worldBounds.x), by = Math.max(500, worldBounds.y);
+  const z = Math.sqrt((vw * vh) / (VIEW_FRAC * 4 * bx * by)); // (vw/z)(vh/z) = VIEW_FRAC · worldArea
+  return clamp(z, 0.05, ZMAX * 0.9);
+}
+// Hard backstop: pull the camera within the limits + the zoom within range (after a jump,
+// a resize, or the world bounds changing under it).
 function clampCam() {
+  camera.z = clamp(camera.z, zMin(), ZMAX);
   const L = camLimits();
   camera.x = clamp(camera.x, -L.x, L.x);
   camera.y = clamp(camera.y, -L.y, L.y);
@@ -502,7 +517,13 @@ function drawObjectWorld(o) {
   // procedural tree is hundreds of wasted strokes — draw one colour blob instead. This
   // is the standard "when a tree is 5px, draw a dot" technique; only the zoomed-out view
   // is affected, close-up is untouched. Anomalies (luminous, rare) + fish always draw full.
-  if (camera.z < Q.lodZoom && rad * camera.z < Q.lodPx && o.family !== 'anomaly' && o.family !== 'fish' && o.family !== 'giant') { drawLOD(o, cx, cy, rad); return; }
+  // LOD only when over the detail budget (frameLodCut > 0, set in the cull pass): the
+  // smallest-on-screen overflow draws as a cheap blob, everything else full. Plus a hard
+  // sub-pixel floor (a thing under ~1.5px is invisible anyway). Anomalies/fish/giant: always full.
+  if (o.family !== 'anomaly' && o.family !== 'fish' && o.family !== 'giant') {
+    const px = rad * camera.z;
+    if (px < 1.5 || (frameLodCut > 0 && px < frameLodCut)) { drawLOD(o, cx, cy, rad); return; }
+  }
   if (Q.shadows) paintGroundShadow(o, cx, cy, rad);
   if (ds === 1) { paintObject(o, cx, cy, ang); return; }
   ctx.save();
@@ -999,6 +1020,7 @@ function trackMouseHover(cx, cy) {
 let grab = null;                 // pending press on an object: { id, ox, oy } (object-centre − pointer, world units)
 let lastTapId = null, lastTapT = 0; // double-tap-a-stone detection (→ break)
 let frameStones = [];            // visible rock footprints {x,y,r} this frame — ground creatures steer around them (Unit ⑥)
+let frameLodCut = 0;             // on-screen radius below which to LOD this frame (0 = LOD nothing); set by the detail budget in the cull pass
 let holdMode = null;             // null | 'drag' (an object carried by a pressed pointer)
 let holdOff = { x: 0, y: 0 };    // world-unit offset object-centre − pointer, so a grab doesn't snap to centre
 
@@ -1109,7 +1131,7 @@ canvas.addEventListener('pointermove', (e) => {
     const d = Math.hypot(a.x - b.x, a.y - b.y);
     const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
     const before = screenToWorld(mx, my);
-    camera.z = clamp(pinch.z0 * (d / pinch.d0), ZMIN, ZMAX);
+    camera.z = clamp(pinch.z0 * (d / pinch.d0), zMin(), ZMAX);
     const after = screenToWorld(mx, my);
     camera.x += before.x - after.x; camera.y += before.y - after.y;     // zoom, anchored at the centroid
     applyPan(-(mx - pinch.mx) / camera.z, -(my - pinch.my) / camera.z); // + two-finger pan (resisted at the edge)
@@ -1190,7 +1212,7 @@ canvas.addEventListener('wheel', (e) => {
   // move across the landscape on both"). Ctrl+wheel still zooms for mouse users.
   if (e.ctrlKey) {
     const before = screenToWorld(e.clientX, e.clientY);
-    camera.z = clamp(camera.z * Math.exp(-e.deltaY * 0.01), ZMIN, ZMAX);
+    camera.z = clamp(camera.z * Math.exp(-e.deltaY * 0.01), zMin(), ZMAX);
     const after = screenToWorld(e.clientX, e.clientY);
     camera.x += before.x - after.x; camera.y += before.y - after.y;
     clampCam();
@@ -1216,7 +1238,7 @@ document.addEventListener('gesturechange', (e) => {
   e.preventDefault();
   const ax = gestureAnchor ? gestureAnchor.x : vw / 2, ay = gestureAnchor ? gestureAnchor.y : vh / 2;
   const before = screenToWorld(ax, ay);
-  camera.z = clamp(gestureZ0 * (e.scale || 1), ZMIN, ZMAX);
+  camera.z = clamp(gestureZ0 * (e.scale || 1), zMin(), ZMAX);
   const after = screenToWorld(ax, ay);
   camera.x += before.x - after.x; camera.y += before.y - after.y; clampCam(); arrive = null;
 }, { passive: false });
@@ -1535,6 +1557,15 @@ function frame(now) {
     if (other && other !== G) { ge.lookX = other.x; ge.lookY = other.y; } // its gaze tracks its companion
     ge._sortY = G.y; ge._depthScale = depthScaleAt(gs.y);
     list.push(ge);
+  }
+  // LOD-by-LOAD: if more objects are visible than the detail budget, LOD the smallest-on-
+  // screen overflow (find the budget-th largest size → cut below it). Under budget → 0 → all
+  // full detail, however small. So chunkiness is purely a function of on-screen count (cost).
+  frameLodCut = 0;
+  if (list.length > Q.detailBudget) {
+    const sizes = [];
+    for (const o of list) { if (o.family === 'anomaly' || o.family === 'fish' || o.family === 'giant') continue; sizes.push(objRadius(o) * (o._depthScale || 1) * camera.z); }
+    if (sizes.length > Q.detailBudget) { sizes.sort((a, b) => b - a); frameLodCut = sizes[Q.detailBudget] || 0; }
   }
   // painter's depth by ground line; ties broken by id for a stable, deterministic order
   list.sort((a, b) => (a._sortY - b._sortY) || (a.id < b.id ? -1 : 1));
