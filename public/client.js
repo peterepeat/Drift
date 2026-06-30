@@ -107,10 +107,10 @@ if (!token) { token = crypto.randomUUID(); localStorage.setItem('drift_session',
 // overflow simplifies. So chunkiness happens solely under genuine load, and a leaner tier
 // just lowers the budget.
 const QUALITY_TIERS = [
-  { dprCap: 2,    noise: 1, glows: 1, flow: 1, sky: 1, grade: 1, sat: 1, patches: 1, shadows: 1, leaves: 1, detailBudget: 650 }, // full
-  { dprCap: 1.5,  noise: 0, glows: 1, flow: 1, sky: 1, grade: 1, sat: 1, patches: 1, shadows: 1, leaves: 1, detailBudget: 420 }, // drop the full-screen noise; cap retina
-  { dprCap: 1.25, noise: 0, glows: 0, flow: 0, sky: 1, grade: 1, sat: 0, patches: 1, shadows: 1, leaves: 0, detailBudget: 250 }, // drop glows/flow/litter + the sat-filter (a real GPU win)
-  { dprCap: 1,    noise: 0, glows: 0, flow: 0, sky: 0, grade: 0, sat: 0, patches: 0, shadows: 0, leaves: 0, detailBudget: 130 }, // bare: no sky/grade/patches/shadows, tight budget
+  { dprCap: 2,    noise: 1, glows: 1, flow: 1, sky: 1, grade: 1, sat: 1, patches: 1, shadows: 1, leaves: 1, detailBudget: 1300 }, // full — doubled headroom: ~2× as many on-screen objects stay full-detail before any chunk
+  { dprCap: 1.5,  noise: 0, glows: 1, flow: 1, sky: 1, grade: 1, sat: 1, patches: 1, shadows: 1, leaves: 1, detailBudget: 840 }, // drop the full-screen noise; cap retina
+  { dprCap: 1.25, noise: 0, glows: 0, flow: 0, sky: 1, grade: 1, sat: 0, patches: 1, shadows: 1, leaves: 0, detailBudget: 500 }, // drop glows/flow/litter + the sat-filter (a real GPU win)
+  { dprCap: 1,    noise: 0, glows: 0, flow: 0, sky: 0, grade: 0, sat: 0, patches: 0, shadows: 0, leaves: 0, detailBudget: 260 }, // bare: no sky/grade/patches/shadows, tight budget
 ];
 let qTier = 0, Q = QUALITY_TIERS[0];
 let frameMsEMA = 16.7, qLastChangeMs = 0, qHotFrames = 0, qCoolFrames = 0, qPrevNow = 0;
@@ -982,10 +982,10 @@ function updateHover(cx, cy) { // desktop: attend whatever the mouse rests on
   attendId = o ? o.id : null;
 }
 
-// ---- befriend (the come-back hook): hold your attention on a creature ~2.2s and it BONDS
+// ---- befriend (the come-back hook): hold your attention on a creature ~4.4s and it BONDS
 // to you — the server tames it (it then hovers near you, trailing you, drawn aglow) and we
 // remember it. All the client adds is the steady-attention dwell; tame does the rest.
-const BEFRIEND_DWELL = 2200;            // ms of unbroken attention on one creature to befriend it
+const BEFRIEND_DWELL = 4400;            // ms of unbroken attention on one creature to befriend it (doubled: harder to do inadvertently)
 let befriendTrack = null, befriendSince = 0, befriendSent = false;
 let myFriendId = (() => { try { return localStorage.getItem('drift_friend'); } catch { return null; } })(); // a befriended creature, remembered across visits
 function updateBefriend(now) {
