@@ -26,6 +26,7 @@ import { MSG, scrubForbidden } from '../public/shared/protocol.js'; // shared wi
 import { familyOf } from '../public/shared/families.js'; // shared per-family behaviour flags (drift/fade/tend/trim/deflect)
 import { CATALOG as TUNE_CATALOG, coerce as tuneCoerce } from './tuning.js'; // operator panel: full knob catalogue + value coercion
 import { HeatField } from './systems/heat.js'; // the coarse thermal field — decay/gradient/stone-formation (PRD §4.1)
+import { GiantManager } from './systems/giant.js'; // the gardener giants — movement + the job catalogue (a world-facade + tune-port seam)
 const TUNE_KIND = Object.fromEntries(TUNE_CATALOG.map((c) => [c.key, c.kind]));
 
 const TICK_MS = 60000;
@@ -227,29 +228,14 @@ let BEFRIEND_MS = 6 * 60 * 1000;        // a bond lasts ~6 min — long enough t
 const CREATURE_FOLLOW_R = 1500;           // a bonded creature follows a person within this (beyond it, it just stays put + lives — no snap)
 const CREATURE_FOLLOW_STANDOFF = 70;      // ...and settles this close to its person
 const CREATURE_FOLLOW_STEP = 130;         // home units it closes toward its person per tick (≈3× a normal drive step — keeps up, but at its own pace, not glued)
-// ---- the giant: a shared, world-tending NPC (the gardener, built in stages) -
-const GIANT_SEED = 0x6a11d7;              // fixed form — one big, gentle creature for everyone
-const GIANT_STEP = 800;                   // world units it covers per tick — the client walks it CONTINUOUSLY along its heading between ticks (no longer looks parked). Brisk (not rushed) so it's always visibly going somewhere
-const GIANT_MAX_HOPS = 5;                  // a tick resolves up to this many waypoints before settling — so a giant never burns a whole 60s tick standing still doing nothing
-const GIANT_TENDS_PER_TICK = 2;            // it can finish up to this many tending jobs in one tick (2× throughput in a cluster) — half the time per job, while its body animates calmly
-const GIANT_STUCK_TICKS = 4;              // no PROGRESS toward the goal this many ticks (e.g. a goal it can only circle) → give up + reroute (enough patience to round a pond first)
-const GIANT_AVOID_TICKS = 30;            // after giving up a stuck goal, don't re-pick THAT object for this many ticks — breaks the re-pick-the-same-unreachable-goal oscillation
-let GIANT_REACH = 64;                   // close enough to tend its goal
-let GIANT_SIGHT = 1300;                 // how far it looks for something to tend (wide, so a big boulder is noticed from afar)
-const GIANT_ROAM = 2600;                  // legacy stroll radius (now it explores the whole world via the bounds — see #giantPickGoal)
-const GIANT_YIELD = 0.8;                   // a giant LEAVES a job to its companion if the companion is within this fraction of its own distance to it — so the closer one takes it and the pair spread out (no two-on-one pile-ups)
-const GIANT_PERSONAL = 500;                // if the two come within this, the one farther from its own territory peels off home — they keep room between them (no standing on top of each other)
-const GIANT_NEED_SCALE = 700;              // distance falloff for need-scoring: a job's pull = need ÷ (1 + dist/this). Higher = distance matters less, so an EGREGIOUS need wins even from across the field
-const GIANT_FUSE_R = 78;                  // it presses two stones THIS close together into one (a small, eased nudge — a cairn)
-const GIANT_THIN_R = 160;                 // it THINS a plant standing in a patch this crowded (same-family count within this radius)
-const GIANT_THIN_N = 12;                  // ...crowded means at least this many neighbours (a patient force against runaway thickets)
-const GIANT_SOW_CLEAR = 220;             // it SOWS a seed where there's no plant within this — breeding life back where it's scarce (the other half of balance)
-// The gardener's JOBS are a data table (#buildGiantJobs); these two lists fix the
-// ORDER pickGoal walks them — PRESSING jobs are need÷distance-scored (order is the
-// stable-sort tie-break), IDLE jobs are rotated by g.cycle. Order is behaviour, so
-// it's pinned here, not derived from the table's key order.
-const GIANT_PRESSING = ['ripen', 'thin', 'fillhole', 'tendstone', 'breakstone'];
-const GIANT_IDLE = ['sow', 'drink', 'watch'];
+// ---- the giant: a shared, world-tending NPC (the gardener) ------------------
+// Its LOGIC + the non-tunable GIANT_* consts now live in server/systems/giant.js
+// (the GiantManager). These stay HERE: GIANT_REACH/SIGHT are LIVE-TUNABLE — the
+// TUNE_REG closures below bind these module `let`s, so the operator panel keeps
+// tuning them at runtime; the manager reads them through a `tune` getter port.
+const GIANT_SEED = 0x6a11d7;              // fixed form — one big, gentle creature for everyone (mirrored client-side; unused server-side)
+let GIANT_REACH = 64;                   // close enough to tend its goal (live-tunable)
+let GIANT_SIGHT = 1300;                 // how far it looks for something to tend (live-tunable; wide, so a big boulder is noticed from afar)
 
 // ---- stones: erosion-to-grit, fuse & break (Family 1) ----------------------
 // Stones don't grow; they erode by handling (each place wears them smoother and
@@ -398,13 +384,7 @@ export class WorldRoom {
     const envSeedN = parseInt(env.SEED_N, 10);
     this.seedCount = Number.isFinite(envSeedN) ? Math.max(20, Math.min(50000, envSeedN)) : undefined;
     this.objects = new Map();      // id -> record
-    this.cog = { x: 0, y: 0, n: 0 };
-    // TWO gardeners — a pair of journeyers tending the world's balance, biased to roam
-    // opposite sides so they spread their care. (In-memory; start from the cog on load.)
-    this.giants = [
-      { x: 0, y: 0, hx: 1, hy: 0, goal: null, bias: { x: 1000, y: 560 } },
-      { x: 0, y: 0, hx: -1, hy: 0, goal: null, bias: { x: -1000, y: -560 } },
-    ];
+    this.cog = { x: 0, y: 0, n: 0 }; // world centre-of-gravity (EMA of presence; DO-owned, shared by many readers incl. the giant)
     this.lastSeen = new Map();     // pid -> ts (presence liveness)
     this.presencePos = new Map();  // pid -> { x, y, ts } (drives warmth)
     this.bcastMark = new Map();    // id -> { maturity, aged } last broadcast (chatter control)
@@ -432,7 +412,33 @@ export class WorldRoom {
       [MSG.BREAK]: this.#onBreak, [MSG.DISSOLVE]: this.#onDissolve, [MSG.MARK]: this.#onMark,
       [MSG.GIANT_SKIP]: this.#onGiantSkip, [MSG.BEFRIEND]: this.#onBefriend, [MSG.PRESENCE_MOVE]: this.#onPresenceMove,
     });
-    this.giantJobs = this.#buildGiantJobs(); // the gardener's job catalogue (one descriptor per goal.kind)
+    // The gardener giants (server/systems/giant.js). They TEND the world in place —
+    // their act() writes go straight to storage OUTSIDE the per-tick ledger (this is
+    // why the write-economy tests run them off) — so the manager keeps writing through
+    // a small WORLD FACADE: read-throughs for the shared/DO-owned state (objects, cog,
+    // bounds, season, maxObjects) + arrow forwarders to the DO's own private write
+    // methods (so #-privacy + objWrites accounting + broadcast order stay intact). The
+    // TUNE port exposes the live-tunable knobs as getters over the module `let`s.
+    const self = this;
+    const world = {
+      get objects() { return self.objects; }, get cog() { return self.cog; },
+      get bounds() { return self.bounds; }, get season() { return self.season; },
+      get maxObjects() { return self.maxObjects; },
+      gridNear: (x, y, r, f) => self.#gridNear(x, y, r, f),
+      gridUpdate: (o) => self.#gridUpdate(o),
+      addObject: (o) => self.#addObject(o),
+      removeObject: (o, extras) => self.#removeObject(o, extras),
+      persist: (o) => self.#persist(o),
+      bcast: (msg, except) => self.#bcast(msg, except),
+      stateMsg: (o, now) => self.#stateMsg(o, now),
+      tryFuse: (o, now) => self.#tryFuse(o, now),
+      breakStone: (o, now) => self.#breakStone(o, now),
+    };
+    const tune = {
+      get REACH() { return GIANT_REACH; }, get SIGHT() { return GIANT_SIGHT; }, get BREAK_R() { return GIANT_BREAK_R; },
+      get SEASON_PER_TICK() { return SEASON_PER_TICK; }, get STONE_EQ_R() { return STONE_EQ_R; }, get STONE_CAP_R() { return STONE_CAP_R; },
+    };
+    this.giant = new GiantManager(world, tune, POOLS);
     this.state.blockConcurrencyWhile(async () => { await this.#load(); });
   }
 
@@ -445,7 +451,7 @@ export class WorldRoom {
     // last_touched=now on every cold load and never accumulate its fade clock.
     for (const [, rec] of list) { if (this.#migrate(rec)) this.dirty.add(rec.id); this.objects.set(rec.id, rec); }
     this.cog = (await this.state.storage.get('cog')) || { x: 0, y: 0, n: 0 };
-    for (const g of this.giants) { g.x = this.cog.x + g.bias.x * 0.3; g.y = this.cog.y + g.bias.y * 0.3; } // the gardeners begin near the world's heart, a little apart
+    this.giant.load(this.cog); // the gardeners begin near the world's heart, a little apart
     this.season = (await this.state.storage.get('meta:season')) || 0;
     this.heat.load(await this.state.storage.get('field:heat')); // rebuilt lazily if absent
     this.lastCheckpoint = (await this.state.storage.get('meta:checkpoint')) || 0;
@@ -639,12 +645,8 @@ export class WorldRoom {
     // Ops/testing only: read the giant, or set its position (?x=&y=) + clear its goal. Gated.
     if (url.pathname === '/admin/giant') {
       if (!this.#adminOk(request)) return Response.json({ ok: false, error: 'forbidden' }, { status: 403 });
-      const px = url.searchParams.get('x'), py = url.searchParams.get('y'), off = url.searchParams.get('off');
-      const i = Math.max(0, Math.min(this.giants.length - 1, parseInt(url.searchParams.get('i') || '0', 10) || 0)); // which gardener (tests can drive either to check spreading)
-      const gi = this.giants[i];
-      if (px != null && py != null) { gi.x = parseFloat(px); gi.y = parseFloat(py); gi.goal = null; }
-      if (off != null) for (const g of this.giants) g.off = off === '1';                                // off toggles BOTH
-      return Response.json({ ok: true, giant: { x: gi.x, y: gi.y, goal: gi.goal, off: !!gi.off }, giants: this.giants.map((g) => ({ x: g.x, y: g.y, goal: g.goal ? g.goal.kind : null })) });
+      const payload = this.giant.admin({ i: url.searchParams.get('i'), x: url.searchParams.get('x'), y: url.searchParams.get('y'), off: url.searchParams.get('off') });
+      return Response.json({ ok: true, ...payload });
     }
 
     // Ops/testing only: spawn one fish in a pond (?pond= index, default central). Gated.
@@ -837,7 +839,7 @@ export class WorldRoom {
     // #inBox); the box-less full world stays a plain scan (old / test clients).
     const src = box ? this.#gridQueryBox(box) : this.objects.values();
     for (const o of src) { if (box && !this.#inBox(o, box)) continue; objects.push(this.#pub(o)); }
-    return { t: MSG.WORLD_STATE, now: Date.now(), pid, season: this.season, pool: POOL, pools: POOLS, cog: { x: this.cog.x, y: this.cog.y }, bounds: this.bounds || this.#computeBounds(), giants: this.giants.map((g) => this.#giantPub(g)), objects };
+    return { t: MSG.WORLD_STATE, now: Date.now(), pid, season: this.season, pool: POOL, pools: POOLS, cog: { x: this.cog.x, y: this.cog.y }, bounds: this.bounds || this.#computeBounds(), giants: this.giant.pub(), objects };
   }
   // Half-extents of the whole object field (every object, not just the box) — the
   // client clamps its camera here so it can never wander far into empty space. A
@@ -1158,7 +1160,7 @@ export class WorldRoom {
 
   // giant_skip: a friendly tap on a giant — it lets go of what it was about to do and ambles on.
   async #onGiantSkip(ws, m, pid, now) {
-    for (const g of this.giants) { g.goal = null; g.stuck = 0; } // a friendly tap lets the gardeners amble on
+    this.giant.reset(); // a friendly tap lets the gardeners amble on
   }
 
   // befriend: sustained attention has bonded a creature to someone — it becomes tamed
@@ -1516,9 +1518,9 @@ export class WorldRoom {
       checkpointWrote = await this.#checkpoint(now);
       checkpointed = true;
     }
-    for (const g of this.giants) await this.#giantStep(g, now); // each gardener strolls a step + tends what it reaches
+    await this.giant.step(now); // each gardener strolls a step + tends what it reaches
     this.bounds = this.#computeBounds(); // refresh the camera bound (the world grows/shrinks)
-    this.#bcast({ t: MSG.SEASON, phase: this.season, bounds: this.bounds, giants: this.giants.map((g) => this.#giantPub(g)) }, null); // feel the clock turn + the gardeners' new spots (clients glide to them)
+    this.#bcast({ t: MSG.SEASON, phase: this.season, bounds: this.bounds, giants: this.giant.pub() }, null); // feel the clock turn + the gardeners' new spots (clients glide to them)
 
     return { spawned: ctx.spawned.length, gone: ctx.gone.size, checkpointed, checkpointWrote };
   }
@@ -1946,265 +1948,8 @@ export class WorldRoom {
     return best ? { x: best.x, y: best.y } : null;
   }
 
-  // ---- the giant (gardener NPC) ----------------------------------------------
-  // Each tick it strolls one step toward a goal; on arrival it TENDS (ripens a young
-  // plant, or presses two adjacent stones into one). Server-authoritative + broadcast
-  // on the tick; the client glides it between waypoints (no per-frame sync). Its own
-  // position is in-memory only (zero new writes); its tending mutates real objects.
-  // The pond (if any) whose body the giant's straight step would cross — segment-vs-circle,
-  // so it catches both stepping INTO a pond and stepping OVER a small one. Used to route around.
-  #pondAcross(x, y, dirX, dirY, s) {
-    for (const p of POOLS) {
-      const proj = Math.max(0, Math.min(s, (p.x - x) * dirX + (p.y - y) * dirY));
-      const cx = x + dirX * proj, cy = y + dirY * proj;
-      if (Math.hypot(p.x - cx, p.y - cy) < p.r + GIANT_REACH) return p;
-    }
-    return null;
-  }
-  async #giantStep(g, now) {
-    if (g.off) return; // disabled (tests that isolate write-economy turn the giants off)
-    // A tick ends in exactly one of two states: WALKING toward something (the client
-    // glides it there), or doing a beat of visible WORK (mouth dipped to the spot). It
-    // never ends "standing still doing nothing": a non-tending waypoint (drink/watch/
-    // stroll) is resolved and the giant walks straight on within the same tick, so the
-    // pair always reads as busy — and the brisk GIANT_STEP makes that motion quick.
-    let tended = 0;
-    for (let hop = 0; hop < GIANT_MAX_HOPS; hop++) {
-      if (!g.goal || !this.#giantGoalValid(g.goal)) { g.goal = this.#giantPickGoal(g); g.stuck = 0; g.bestDist = Infinity; }
-      const dx = g.goal.x - g.x, dy = g.goal.y - g.y, d = Math.hypot(dx, dy) || 1;
-      if (d > GIANT_REACH) {
-        const s = Math.min(GIANT_STEP, d);
-        let dirX = dx / d, dirY = dy / d;
-        // If a pond's body lies across the straight path, CIRCUMNAVIGATE — steer along its
-        // rim toward the goal (rather than ramming the bank + getting stuck). Catches both
-        // stepping-into and stepping-over a pond (segment-vs-circle).
-        const block = this.#pondAcross(g.x, g.y, dirX, dirY, s);
-        // only route AROUND a pond that's BETWEEN us and the goal — not one the goal sits on
-        // (a drink/watch spot at the rim is approached directly; the wade-backstop keeps it dry).
-        if (block && Math.hypot(g.goal.x - block.x, g.goal.y - block.y) > block.r + GIANT_REACH * 2) {
-          const rx = g.x - block.x, ry = g.y - block.y, rl = Math.hypot(rx, ry) || 1;
-          let tx = -ry / rl, ty = rx / rl;                 // a rim tangent...
-          if (tx * dirX + ty * dirY < 0) { tx = -tx; ty = -ty; } // ...the way that heads toward the goal
-          dirX = tx; dirY = ty;
-        }
-        let nx = g.x + dirX * s, ny = g.y + dirY * s;
-        const wade = poolContaining(nx, ny);              // backstop: never wade — hug the bank if even the tangent dips in
-        if (wade) { const b = bankPoint(wade, nx, ny, 0); nx = b.x; ny = b.y; }
-        g.x = nx; g.y = ny; g.hx = dirX; g.hy = dirY; g.walk = 1; g.tending = 0;
-        // PROGRESS-based stuck: quit only if it isn't getting CLOSER to the goal (e.g. a goal
-        // across/inside a pond it can only circle). Rounding a REACHABLE goal closes the gap,
-        // so it won't quit mid-route.
-        const after = Math.hypot(g.goal.x - g.x, g.goal.y - g.y);
-        if (after < (g.bestDist != null ? g.bestDist : Infinity) - GIANT_STEP * 0.25) { g.bestDist = after; g.stuck = 0; }
-        else if (++g.stuck >= GIANT_STUCK_TICKS) { if (!g.avoid) g.avoid = new Map(); if (g.goal.id) g.avoid.set(g.goal.id, this.season / SEASON_PER_TICK + GIANT_AVOID_TICKS); g.goal = null; g.stuck = 0; g.bestDist = Infinity; } // blacklist the unreachable goal a while so we don't immediately re-pick it
-        return; // walking this tick
-      }
-      // arrived
-      const tends = this.giantJobs[g.goal.kind]?.tend;
-      await this.#giantAct(g, now); g.goal = null; g.bestDist = Infinity;
-      if (tends) {
-        if (++tended >= GIANT_TENDS_PER_TICK) { g.walk = 0; g.tending = 1; return; } // worked its quota — a beat of visible work
-        // else loop: it may reach + tend ANOTHER nearby job this same tick (2× throughput in a cluster)
-      }
-      // a non-tending arrival, or room for another tend: loop and walk on
-    }
-    g.walk = 0; g.tending = tended > 0 ? 1 : 0; // ran out of hops — show work if we tended, else a brief pause
-  }
-  // The gardener's JOB CATALOGUE — one descriptor per goal.kind, collapsing the three
-  // parallel ladders (pickGoal's need-scored finds, goalValid's by-kind re-check, act's
-  // by-kind execution) into a single table. Per descriptor:
-  //   find(g)   → locate a candidate goal ({kind,id,x,y} or a point {kind,x,y}), or null
-  //   need      → urgency weight in pickGoal — a number, or fn(o) when it scales with the
-  //               target (a boulder's pull grows with how far past the break threshold)
-  //   valid(o)  → re-check an OBJECT goal each hop (find's filter can be stricter, e.g.
-  //               ripen's find needs maturity>0.06 but valid only >0.02 — a hysteresis)
-  //   act(g,now)→ perform the job on arrival (absent = a pure pause, e.g. drink/watch)
-  //   tend      → counts toward GIANT_TENDS_PER_TICK (the 2×-throughput cluster work)
-  //   point     → goal validated by POSITION alone (re-checked on arrival, not by id)
-  // Built once (constructor); the arrows close over `this` so they reach the find/act
-  // helpers + the live-tunable GIANT_*/STONE_* knobs at call time.
-  #buildGiantJobs() {
-    const removeReached = async (g, now) => { const o = this.objects.get(g.goal.id); if (!o || o.held !== '') return; await this.#removeObject(o); };
-    return Object.assign(Object.create(null), {
-      ripen: { tend: true, need: 1.0, find: (g) => this.#giantFindRipen(g),
-        valid: (o) => o.family === 'seed' && (o.maturity || 0) > 0.02 && (o.maturity || 0) < 1,
-        act: async (g, now) => { const o = this.objects.get(g.goal.id); if (o && o.family === 'seed' && (o.maturity || 0) < 1) { o.maturity = 1; o.aged = 0; o.heat = 0; o.last_touched = now; await this.#persist(o); this.#bcast(this.#stateMsg(o, now), null); } } },
-      thin: { tend: true, need: 3.0, find: (g) => this.#giantFindThin(g),     // a thicket is a real imbalance
-        valid: (o) => o.family === 'seed' && this.#giantOvercrowded(o), act: removeReached },
-      fillhole: { tend: true, need: 1.4, find: (g) => this.#giantFindFillhole(g),
-        valid: (o) => o.family === 'mark', act: removeReached },             // thin a surplus plant or fill a dug hole — either way the thing it reached is gently removed
-      tendstone: { tend: true, need: 0.6, find: (g) => this.#giantFindStone(g), // merging pebbles is low-stakes
-        valid: (o) => o.family === 'stone' && stoneRadiusOf(o) < STONE_EQ_R && !!this.#giantStonePartner(o),
-        act: async (g, now) => {
-          const o = this.objects.get(g.goal.id); if (!o || o.held !== '') return;
-          const partner = this.#giantStonePartner(o); if (!partner) return;
-          o.x = partner.x; o.y = partner.y; o.last_touched = now; this.#gridUpdate(o); // nudge the stray onto its partner → fuse into a larger stone
-          const fused = this.#tryFuse(o, now);
-          if (fused) { await this.#removeObject(o, { fused: fused.id }); await this.#persist(fused); this.#bcast(this.#stateMsg(fused, now), null); }
-          else { this.#gridUpdate(o); await this.#persist(o); this.#bcast(this.#stateMsg(o, now), null); }
-        } },
-      breakstone: { tend: true, need: (o) => 4.5 + ((o ? stoneRadiusOf(o) : GIANT_BREAK_R) - GIANT_BREAK_R) / 9, find: (g) => this.#giantFindBoulder(g), // a big boulder is URGENT — scales steeply with how far past the break threshold
-        valid: (o) => o.family === 'stone' && stoneRadiusOf(o) > GIANT_BREAK_R,
-        act: async (g, now) => { // EQUILIBRIUM: break a boulder back down into middling pieces (mirrors a hand-break)
-          const o = this.objects.get(g.goal.id); if (!o || o.held !== '' || o.family !== 'stone' || stoneRadiusOf(o) <= GIANT_BREAK_R) return;
-          const pieces = this.#breakStone(o, now); if (!pieces.length) return;
-          await this.#removeObject(o, { grit: true }); // a soft dust puff, like a hand-break
-          for (const c of pieces) await this.#addObject(c);
-        } },
-      sow: { tend: true, point: true, find: (g) => this.#giantFindSow(g),
-        act: async (g, now) => { // breed life where it's scarce — a young sprout at this still-empty spot
-          if (this.objects.size < this.maxObjects && !poolContaining(g.x, g.y) && this.#giantSparse(g.x, g.y)) {
-            const s = makeSeedRecord(crypto.randomUUID(), (Math.random() * 4294967296) >>> 0, g.x, g.y, now);
-            s.maturity = 0.08 + Math.random() * 0.05; // clearly a sprout, not dormant
-            await this.#addObject(s);
-          }
-        } },
-      drink: { point: true, find: (g) => this.#giantFindDrink(g) }, // no act — pause a beat at the water's edge
-      watch: { point: true, find: (g) => this.#giantFindWatch(g) }, // no act — pause beside a creature, watching
-      stroll: { point: true },                                      // the explore/home fallback — its goal is built inline in pickGoal
-    });
-  }
-  #giantGoalValid(goal) {
-    const job = this.giantJobs[goal.kind];
-    if (!job) return false;
-    if (job.point) return true;                       // point goals (stroll/sow/drink/watch) — re-checked on arrival
-    const o = this.objects.get(goal.id);
-    if (!o || o.held !== '') return false;
-    return job.valid(o);
-  }
-  // A patient force toward balance: it CYCLES its attention so over time it does a variety
-  // of work — ripen the young, THIN the over-crowded, FILL dug holes, build cairns —
-  // rather than only ever the first thing it sees. (Breeding-where-sparse is handled by
-  // the density-throttled shedding; the giant actively reduces the surplus.)
-  #giantPickGoal(g) {
-    g.cycle = (g.cycle || 0) + 1;
-    if (g.avoid) { const t = this.season / SEASON_PER_TICK; for (const [id, exp] of g.avoid) if (exp <= t) g.avoid.delete(id); } // expire stale avoid entries
-    // GIVE EACH OTHER ROOM: when the two crowd the same spot, the one FARTHER from its own
-    // territory peels off toward home (the nearer-home one keeps working) — so a co-located
-    // pair fans back out instead of standing on top of each other.
-    const sib = this.#giantSibling(g);
-    if (sib && Math.hypot(sib.x - g.x, sib.y - g.y) < GIANT_PERSONAL) {
-      const hx = this.cog.x + g.bias.x, hy = this.cog.y + g.bias.y;        // my territory centre
-      const dHome = Math.hypot(g.x - hx, g.y - hy);
-      const dSibHome = Math.hypot(sib.x - (this.cog.x + sib.bias.x), sib.y - (this.cog.y + sib.bias.y));
-      if (dHome >= dSibHome) return { kind: 'stroll', x: hx, y: hy };      // I'm the visitor here → head home, leave this patch to my companion
-    }
-    // FIRST, pick the most PRESSING tending job — not just the nearest. Each candidate
-    // scores by NEED (how egregious the imbalance) ÷ distance, so a big boulder or a packed
-    // thicket pulls a gardener from across the field while a lone sapling waits its turn. A
-    // little jitter keeps the pair from being robotic / always picking the identical thing.
-    // Severity is weighted HARD (≈2× the gentle jobs, per the table's `need`) so a real
-    // imbalance pulls a gardener from across the field instead of it puttering on whatever
-    // sapling is nearest. (Walk GIANT_PRESSING in order so the score-tie stable-sort is
-    // stable; a job whose need scales with its target reads it via need(o).)
-    const cands = [];
-    for (const kind of GIANT_PRESSING) {
-      const job = this.giantJobs[kind];
-      const goal = job.find(g);
-      if (!goal) continue;
-      const need = typeof job.need === 'function' ? job.need(this.objects.get(goal.id)) : job.need;
-      const d = Math.hypot(goal.x - g.x, goal.y - g.y);
-      cands.push({ goal, score: need * (0.85 + Math.random() * 0.3) / (1 + d / GIANT_NEED_SCALE) });
-    }
-    if (cands.length) { cands.sort((p, q) => q.score - p.score); return cands[0].goal; }
-    // THEN, with nothing pressing nearby: sow life into a barren patch, or pause by the
-    // water / beside a creature. (So in a dense grove it tends; out in the open it seeds.)
-    const rot = (arr) => { const s = g.cycle % arr.length; for (let i = 0; i < arr.length; i++) { const goal = arr[(s + i) % arr.length](); if (goal) return goal; } return null; };
-    const idle = rot(GIANT_IDLE.map((kind) => () => this.giantJobs[kind].find(g)));
-    if (idle) return idle;
-    // truly nothing nearby → EXPLORE the world widely: a random point across the whole bounds,
-    // leaning toward this giant's home half (so the pair still favour opposite sides). Wide
-    // roaming means far things — a lone monstrous boulder — eventually come into sight + get tended.
-    const bx = (this.bounds && this.bounds.x) || GIANT_ROAM, by = (this.bounds && this.bounds.y) || GIANT_ROAM;
-    const ex = this.cog.x + (Math.random() * 2 - 1) * bx, ey = this.cog.y + (Math.random() * 2 - 1) * by;
-    const hx = this.cog.x + g.bias.x, hy = this.cog.y + g.bias.y; // its home (its side of the world)
-    return { kind: 'stroll', x: ex * 0.6 + hx * 0.4, y: ey * 0.6 + hy * 0.4 }; // 60% explore-anywhere, 40% toward home
-  }
-  #giantSibling(g) { for (const x of this.giants) if (x !== g && !x.off) return x; return null; }
-  // Nearest matching object — but the two gardeners coordinate so they spread out instead
-  // of piling onto the same spot: a giant (1) never targets the job its companion has
-  // already CLAIMED (its current goal), and (2) YIELDS any job the companion is clearly
-  // closer to (comparative distance to where the companion is headed). So the nearer one
-  // takes each job and the other drifts off to its own work — more interesting to watch.
-  #giantNearest(g, kind, filter, extra) {
-    const sib = this.#giantSibling(g);
-    const claimed = sib && sib.goal ? sib.goal.id : null;                 // the companion already called this one
-    const sx = sib ? (sib.goal ? sib.goal.x : sib.x) : 0;                 // where the companion is headed (its goal, else itself)
-    const sy = sib ? (sib.goal ? sib.goal.y : sib.y) : 0;
-    let best = null, bd = GIANT_SIGHT;
-    for (const o of this.#gridNear(g.x, g.y, GIANT_SIGHT, filter)) {
-      if (o.id === claimed) continue;
-      if (g.avoid && g.avoid.get(o.id) > this.season / SEASON_PER_TICK) continue; // recently gave up on this one (unreachable) — leave it be for a while
-      const d = Math.hypot(o.x - g.x, o.y - g.y);
-      if (d >= bd) continue;
-      if (sib && Math.hypot(o.x - sx, o.y - sy) < d * GIANT_YIELD) continue; // the companion is clearly closer — leave it to them
-      if (extra && !extra(o)) continue;
-      bd = d; best = o;
-    }
-    return best ? { kind, id: best.id, x: best.x, y: best.y } : null;
-  }
-  #giantFindRipen(g) { return this.#giantNearest(g, 'ripen', (o) => o.family === 'seed' && o.held === '' && (o.maturity || 0) > 0.06 && (o.maturity || 0) < 1); }
-  #giantFindThin(g) { return this.#giantNearest(g, 'thin', (o) => o.family === 'seed' && o.held === '', (o) => this.#giantOvercrowded(o)); }
-  #giantFindFillhole(g) { return this.#giantNearest(g, 'fillhole', (o) => o.family === 'mark'); }
-  // EQUILIBRIUM (stones, the merge half): nudge a PEBBLE onto a nearby pebble so two
-  // tiny stones become one middling one — never fusing decent stones into a boulder.
-  #giantFindStone(g) { return this.#giantNearest(g, 'tendstone', (o) => o.family === 'stone' && o.held === '' && stoneRadiusOf(o) < STONE_EQ_R, (o) => !!this.#giantStonePartner(o)); }
-  // EQUILIBRIUM (stones, the break half): find a BOULDER (grown past the cap — e.g. a
-  // legacy uncapped pile) and break it back down toward the middle.
-  #giantFindBoulder(g) { return this.#giantNearest(g, 'breakstone', (o) => o.family === 'stone' && o.held === '' && stoneRadiusOf(o) > GIANT_BREAK_R); }
-  // SOW: breed life back where it's scarce — find a nearby SPARSE spot (no plant within
-  // GIANT_SOW_CLEAR) and seed it. With THIN (cull the dense), this is the giant moving
-  // life from where there's too much to where there's too little — a sway toward balance.
-  #giantFindSow(g) {
-    if (this.objects.size >= this.maxObjects - 50) return null;        // don't sow into a full world
-    for (let k = 0; k < 6; k++) {
-      const a = Math.random() * Math.PI * 2, r = 220 + Math.random() * (GIANT_SIGHT - 220);
-      const x = g.x + Math.cos(a) * r, y = g.y + Math.sin(a) * r;
-      if (!poolContaining(x, y) && this.#giantSparse(x, y)) return { kind: 'sow', x, y };
-    }
-    return null;
-  }
-  #giantSparse(x, y) { for (const o of this.#gridNear(x, y, GIANT_SOW_CLEAR, (o) => o.family === 'seed')) { if (Math.hypot(o.x - x, o.y - y) <= GIANT_SOW_CLEAR) return false; } return true; }
-  // DRINK: amble to the rim of the nearest pond and pause there (a beat at the water's edge).
-  #giantFindDrink(g) {
-    let best = null, bd = GIANT_SIGHT;
-    for (const p of POOLS) { const e = Math.hypot(g.x - p.x, g.y - p.y) - p.r; if (e < bd) { bd = e; best = p; } }
-    if (!best) return null;
-    const dx = g.x - best.x, dy = g.y - best.y, dd = Math.hypot(dx, dy) || 1;
-    return { kind: 'drink', x: best.x + (dx / dd) * (best.r + 30), y: best.y + (dy / dd) * (best.r + 30) }; // just off the rim, on land
-  }
-  // WATCH: stand a little way off from a creature and watch it a beat (the giant, curious).
-  #giantFindWatch(g) {
-    const c = this.#giantNearest(g, 'watch', (o) => o.family === 'creature' && o.held === '');
-    if (!c) return null;
-    const dx = g.x - c.x, dy = g.y - c.y, dd = Math.hypot(dx, dy) || 1;
-    return { kind: 'watch', x: c.x + (dx / dd) * 70, y: c.y + (dy / dd) * 70 };
-  }
-  // Is this plant standing in an over-crowded patch (≥ GIANT_THIN_N same-family neighbours)?
-  #giantOvercrowded(o) {
-    let n = 0; const r2 = GIANT_THIN_R * GIANT_THIN_R;
-    for (const s of this.#gridNear(o.x, o.y, GIANT_THIN_R, (s) => s.family === 'seed')) {
-      if (s.id === o.id) continue;
-      const dx = s.x - o.x, dy = s.y - o.y;
-      if (dx * dx + dy * dy <= r2 && ++n >= GIANT_THIN_N) return true;
-    }
-    return false;
-  }
-  #giantStonePartner(stone) { // another small free stone within fuse-gather range (pebble + pebble → one middling stone, never a boulder)
-    const rs = stoneRadiusOf(stone);
-    for (const o of this.#gridNear(stone.x, stone.y, GIANT_FUSE_R, (o) => o.family === 'stone' && o.held === '')) {
-      if (o.id === stone.id || stoneRadiusOf(o) >= STONE_EQ_R) continue; // only merge two pebbles
-      if (Math.hypot(o.x - stone.x, o.y - stone.y) <= GIANT_FUSE_R && Math.hypot(rs, stoneRadiusOf(o)) <= STONE_CAP_R) return o;
-    }
-    return null;
-  }
-  async #giantAct(g, now) {
-    const job = this.giantJobs[g.goal.kind];
-    // drink/watch/stroll have no act — the giant simply pauses a beat (walk=0); the visual
-    // is the journeyer at the water's edge / standing beside a creature, watching.
-    if (job && job.act) await job.act(g, now);
-  }
-  #giantPub(g) { return { x: g.x, y: g.y, hx: g.hx, hy: g.hy, walk: g.walk || 0, tending: g.tending || 0, act: g.goal ? g.goal.kind : 'roam', stuck: g.stuck || 0 }; }
+  // (the giant — #pondAcross/#giantStep/#buildGiantJobs/#giant* — extracted to
+  //  server/systems/giant.js; the DO holds one GiantManager as this.giant.)
 
   // A creature's "strength" = its drawn size (mirrors public/creatures.js creatureR):
   // in a clash the smaller one is the loser. Server-only (it decides + broadcasts the
