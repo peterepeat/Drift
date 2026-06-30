@@ -217,6 +217,12 @@ const CREATURE_STEP = 46;                 // world units the home migrates towar
 const CREATURE_SEEK_R = 720;              // how far a creature looks for an attractor
 const CREATURE_ARRIVE = 42;               // stop this near the goal (graze/rest beside it, don't pile on)
 const CREATURE_DRIVE_TICKS = 5;           // a creature holds one drive ~this many ticks before it shifts
+// SPREAD (declustering at the SOURCE): each creature carries a stable, SEEDED affinity for every
+// feed/rest target, so a knot of creatures fans out across nearby trees instead of all collapsing
+// onto the single nearest one (the pile-up). A creature will favour "its" tree up to this many
+// world units farther than the true-nearest — one pile becomes a scatter across the grove.
+// (0 ⇒ pure nearest, the old behaviour. Deterministic ⇒ zero per-frame sync, no client change.)
+const CREATURE_PREF_SPREAD = 260;
 // ANTI-CROWD (Wave: declustering): a creature is pushed off its neighbours each tick so
 // the population spreads into a living scatter instead of piling into one dense blob.
 // Radius < MATE_DIST so two CAN still close enough to breed — it only stops the pile-up.
@@ -1885,10 +1891,17 @@ export class WorldRoom {
       return bankPoint(p, c.x, c.y, c.seed);          // the (elliptical) water's edge nearest the creature
     }
     const wantPlant = drive === 'feed';               // feed → a growing plant; rest → a stone
-    let best = null, bestD = CREATURE_SEEK_R;
+    // Pick by SEEDED preference, not raw distance: each (creature,target) pair has a stable
+    // affinity in [0,1), so two creatures near the same tree usually favour DIFFERENT nearby
+    // trees and the crowd spreads across the grove. A lone creature still usually takes the
+    // nearest; the affinity only tips the balance among trees within ~CREATURE_PREF_SPREAD.
+    let best = null, bestScore = Infinity;
     for (const o of this.#gridNear(c.x, c.y, CREATURE_SEEK_R, (o) => wantPlant ? (o.family === 'seed' && o.maturity >= SPROUT) : o.family === 'stone')) {
       const d = Math.hypot(o.x - c.x, o.y - c.y);
-      if (d < bestD) { bestD = d; best = o; }
+      if (d > CREATURE_SEEK_R) continue;
+      const aff = rng((Math.imul(c.seed >>> 0, 2654435761) ^ (o.seed >>> 0)) >>> 0)(); // stable per (creature,target), every tick
+      const score = d - aff * CREATURE_PREF_SPREAD;
+      if (score < bestScore) { bestScore = score; best = o; }
     }
     return best ? { x: best.x, y: best.y } : null;
   }
