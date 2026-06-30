@@ -7,6 +7,8 @@
 // desyncing what the world treats as water from what the client paints.
 import { POND_ASPECT, inPond, poolContaining, bankPoint, POND_BANK_PAD } from '../public/shared/geometry.js';
 import { POND_ASPECT as RENDER_POND_ASPECT } from '../public/render.js';
+import { stoneRadius, anomalyRadius, crystalRadius, seedScale } from '../public/shared/sizing.js';
+import { rng } from '../public/drift-procgen.js';
 
 let pass = 0, fail = 0;
 const check = (c, label) => { console.log((c ? '  PASS ' : '  FAIL ') + label); c ? pass++ : fail++; };
@@ -28,6 +30,17 @@ const be = bankPoint(pool, 200, 0);   // due east: rim at x=100, pushed past by 
 check(Math.abs(be.x - (100 + POND_BANK_PAD)) < 1e-6 && Math.abs(be.y) < 1e-6, `bankPoint eases past the horizontal rim (${be.x.toFixed(1)}, ${be.y.toFixed(1)})`);
 const bs = bankPoint(pool, 0, 200);   // due south: vertical rim at y=70 (0.7r), pushed past by 16
 check(Math.abs(bs.x) < 1e-6 && Math.abs(bs.y - (70 + POND_BANK_PAD)) < 1e-6, `bankPoint respects the squashed vertical rim (${bs.x.toFixed(1)}, ${bs.y.toFixed(1)})`);
+
+// ---- form-from-seed sizing is one source (server + client + generator + tests) ----
+for (const s of [0, 1, 7, 12345, 0xdeadbeef, 4294967295]) {
+  check(stoneRadius(s) === 12 + rng(s >>> 0)() * 34, `stoneRadius(${s}) matches the canonical 12 + rng*34 footprint`);
+}
+check(stoneRadius(123) >= 12 && stoneRadius(123) <= 46, 'stoneRadius is bounded to [12, 46]');
+check(anomalyRadius(99, 1) >= 18 && anomalyRadius(99, 1) <= 32, 'anomalyRadius (single kind) reads ~18-32 wu');
+check(anomalyRadius(99, 3) > anomalyRadius(99, 1), 'a fused anomaly (more kinds) is larger than a plain one');
+check(crystalRadius(99) >= 6 && crystalRadius(99) <= 13, 'crystalRadius reads ~6-13 wu');
+check(seedScale(42) >= 0.9 && seedScale(42) <= 1.8, 'seedScale is in [0.9, 1.8]');
+check(stoneRadius(42) === stoneRadius(42) && seedScale(42) === seedScale(42), 'sizers are deterministic for a given seed');
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

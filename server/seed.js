@@ -5,6 +5,7 @@
 // procgen module so a given WORLD_SEED always rebuilds the identical world.
 // =============================================================================
 import { rng, makeNoise } from '../public/drift-procgen.js';
+import { stoneRadius } from '../public/shared/sizing.js'; // shared stone footprint (== the DO + client base)
 export { rng, makeNoise }; // re-exported so the DO shares the client's EXACT primitives
 // (rng -> identical stone footprints; makeNoise -> identical water flow field)
 
@@ -127,7 +128,7 @@ const softUniform = (rand, scale) => scale * softEdge(rand() * 2 - 1);
 // scaled by its seeded maturity — so a mature tree reserves far more room than a seed.
 // Mirrors the client/server radii closely enough to keep seeded forms from overlapping.
 export function spacingRadius(o) {
-  if (o.family === 'stone') return 12 + rng(o.seed >>> 0)() * 34;   // == stoneRadius
+  if (o.family === 'stone') return stoneRadius(o.seed);             // shared stone footprint
   return 12 + (o.maturity || 0) * 54;                                // seed → mature tree
 }
 // Push apart any objects whose footprints (radius_i + radius_j + gap) overlap — grid-

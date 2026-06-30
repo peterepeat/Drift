@@ -21,6 +21,7 @@
 import { generateWorld, makeRecord, makeSeedRecord, makeAnomalyRecord, ANOMALY_KINDS, makeCrystalRecord, makeCreatureRecord, makeFishRecord, makeMarkRecord, CREATURE_KINDS, reseedAction, SEED_VERSION, rng, makeNoise } from './seed.js';
 import { FLOW_SEED, FLOW_SCALE, FLOW_REACH } from '../public/flow.js'; // shared with the client visual
 import { POND_ASPECT, poolContaining as poolContainingIn, bankPoint } from '../public/shared/geometry.js'; // shared pond ellipse geometry (server + client + tests)
+import { stoneRadius } from '../public/shared/sizing.js'; // shared form-from-seed footprint (server + client + tests)
 import { CATALOG as TUNE_CATALOG, coerce as tuneCoerce } from './tuning.js'; // operator panel: full knob catalogue + value coercion
 const TUNE_KIND = Object.fromEntries(TUNE_CATALOG.map((c) => [c.key, c.kind]));
 
@@ -259,8 +260,7 @@ let STONE_EQ_R = 40;                     // "a decent stone" — at/above this t
 let STONE_CAP_R = 350;                   // the PLAYER hand-fuse ceiling: drop one rock on another and they merge up to here, then bounce. SEPARATE from what the gardener breaks down (GIANT_BREAK_R) — the giant no longer spares a hand-built rock.
 let GIANT_BREAK_R = 62;                   // the gardener breaks down any stone LARGER than this, back toward the middle (it spares nothing big). Raise above STONE_CAP_R to make it never touch hand-built rocks.
 // Stone footprint in world units — base size from seed; `o.r` overrides once fused/split.
-function stoneRadius(seed) { return 12 + rng(seed >>> 0)() * 34; }      // MUST match the client's seed-derived base
-function stoneRadiusOf(o) { return o.r != null ? o.r : stoneRadius(o.seed); }
+function stoneRadiusOf(o) { return o.r != null ? o.r : stoneRadius(o.seed); } // base from shared sizing; `r` once fused/split
 const PLANT_BASE_R = 9;                    // a plant's trunk-base clearance — set down on a rock, it settles beside (Unit ⑥)
 // ROCK WINS POSITION WARS: each tick, a free non-stone object overlapping a stone is eased
 // clear of it (the stone never moves). Capped per tick so a dense cluster spreads its

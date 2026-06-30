@@ -10,6 +10,7 @@ import { Audio } from './audio.js';
 import { flingStep, ema, nudge, spring, deflectCircles } from './physics.js';
 import { wanderAt, drawCreature, creatureR, drawFish, fishR } from './creatures.js';
 import { drawGiant } from './giant.js';
+import { stoneRadius, anomalyRadius, crystalRadius, seedScale, plantRadius } from './shared/sizing.js';
 
 // ---- tuning constants -------------------------------------------------------
 const Z0 = 1.0, ZMIN = 0.2, ZMAX = 4.0;     // zoom = CSS px per world unit
@@ -307,13 +308,8 @@ function updateLifts(now) {
 function isLifted(id) { return id === heldId || liftValue(id) > 0.002; }
 
 // ---- deterministic-from-seed sizing (never stored) --------------------------
-function stoneSize(o) { return o.r != null ? o.r : (12 + PG.rng(o.seed >>> 0)() * 34); } // base from seed; `r` once fused/split
-function seedScale(seed) { return 0.9 + PG.rng((seed ^ 0x9e3779b9) >>> 0)() * 0.9; }
-function anomalyR(o) { // luminous, ~18-32 wu; a fused hybrid grows with each kind it carries
-  const base = 18 + PG.rng(o.seed >>> 0)() * 14;
-  const n = (o.kinds && o.kinds.length) || 1;
-  return base * Math.min(1.7, 1 + 0.17 * (n - 1));
-}
+function stoneSize(o) { return o.r != null ? o.r : stoneRadius(o.seed); } // base from shared sizing; `r` once fused/split
+function anomalyR(o) { return anomalyRadius(o.seed, (o.kinds && o.kinds.length) || 1); } // ~18-32 wu; a fused hybrid grows with each kind
 // A plain anomaly draws its one kind; a fused hybrid layers each constituent kind
 // (offset in time + slightly shrunk, translucent) so its form reads as a luminous blend.
 function drawAnomalyForm(ctx, o, t, cx, cy, R) {
@@ -324,7 +320,7 @@ function drawAnomalyForm(ctx, o, t, cx, cy, R) {
   for (let i = 0; i < kinds.length; i++) PG.drawAnomaly(ctx, kinds[i], t + i * 1.7, cx, cy, R * (1 - i * 0.06));
   ctx.restore();
 }
-function crystalR(o) { return 6 + PG.rng(o.seed >>> 0)() * 7; }   // small, ~6-13 wu
+function crystalR(o) { return crystalRadius(o.seed); }   // small, ~6-13 wu
 // Smoothly-tweened lifecycle the renderer reads (eased toward server values so
 // the 60s growth steps don't pop). Falls back to the raw value before first tween.
 function shownMat(o) { return o._matShown != null ? o._matShown : (o.maturity || 0); }
@@ -337,7 +333,7 @@ function objRadius(o) {
   if (o.family === 'creature') return creatureR(o.seed >>> 0, o.kind || 'crawler');
   if (o.family === 'fish') return fishR(o.seed >>> 0);
   const mat = shownMat(o);
-  return mat < SPROUT_C ? 10 * seedScale(o.seed) : 10 + mat * 26; // plants present a larger tap target
+  return plantRadius(mat, o.seed, SPROUT_C); // plants present a larger tap target
 }
 // A creature's LIVE position: home (its stored x/y) + the deterministic wander
 // ANCHORED at wanderT0, so the offset is exactly zero at t0 and the creature sits ON

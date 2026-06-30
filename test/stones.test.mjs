@@ -3,13 +3,13 @@
 //   - double-click (`break`) a fused stone -> it splits into smaller stones
 //   - a stone dropped overlapping (off-centre) settles clear, never through
 //   - a stone handled GRIT_HANDLING times wears to grit and dissolves
-import { rng } from '../public/drift-procgen.js';
+import { stoneRadius } from '../public/shared/sizing.js';
 import { inPond } from '../public/shared/geometry.js';
 const PORT = process.env.PORT || 8787;
 const base = `http://127.0.0.1:${PORT}`;
 const WS = `ws://127.0.0.1:${PORT}/ws`;
 const TOK = 'stone-tok';
-const stoneR = (seed) => 12 + rng(seed >>> 0)() * 34; // MUST mirror the server's stoneRadius
+const stoneR = stoneRadius; // shared stone footprint (server + client + this test)
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 let pass = 0, fail = 0;
 const check = (c, label) => { console.log((c ? '  PASS ' : '  FAIL ') + label); c ? pass++ : fail++; };
