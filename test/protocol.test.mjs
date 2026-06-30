@@ -70,6 +70,21 @@ check(presB && presB.x === 10 && presB.y === 20, 'B receives presence warmth pos
 check(presB && presB.pid === A.pid && presB.token === undefined, 'presence carries the ephemeral pid, never the token');
 check(since(A, 'presence').length === 0, 'sender does NOT receive its own presence');
 
+// ---- hostile/unknown wire types must NOT dispatch or drop the connection ----
+// On a plain-object handler map, m.t values like '__proto__'/'constructor'/'toString'
+// reach inherited Object.prototype members ('__proto__' throws → webSocketError → the
+// client is dropped). The null-prototype map + typeof-function guard make them a clean
+// no-op. Guards the 3.7 dispatch hardening: B must survive all of these and still work.
+for (const t of ['__proto__', 'constructor', 'toString', 'valueOf', 'hasOwnProperty', 'definitelyNotAType']) {
+  B.send(JSON.stringify({ t, id: 'nope', x: 1, y: 1, ts: Date.now() }));
+}
+await wait(140);
+const liveTarget = wsB.objects[10];
+B.send(JSON.stringify({ t: 'pickup', id: liveTarget.id, token: 'tokB2', ts: Date.now() }));
+await wait(150);
+const ackHostile = lastOf(B, 'pickup_ack', liveTarget.id);
+check(ackHostile && ackHostile.ok === true, "after hostile prototype-chain m.t frames, B's connection survives and still dispatches a real pickup");
+
 // ---- disconnect-reclaim: held object drops when holder vanishes ----
 const target2 = wsA.objects[5];
 A.send(JSON.stringify({ t: 'pickup', id: target2.id, token: tokenA, ts: Date.now() }));

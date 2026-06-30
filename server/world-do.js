@@ -429,11 +429,13 @@ export class WorldRoom {
     // Inbound wire dispatch: one handler per MSG type (replaces the if/else ladder).
     // Built once here (private methods exist on the instance before the constructor
     // body runs); webSocketMessage looks up m.t and calls the handler with (ws,m,pid,now).
-    this.msgHandlers = {
+    // NULL-PROTOTYPE map so a hostile m.t ('constructor'/'toString'/'__proto__'/…) can't
+    // reach an inherited Object.prototype member — only the 9 registered types dispatch.
+    this.msgHandlers = Object.assign(Object.create(null), {
       [MSG.PICKUP]: this.#onPickup, [MSG.CARRY]: this.#onCarry, [MSG.PLACE]: this.#onPlace,
       [MSG.BREAK]: this.#onBreak, [MSG.DISSOLVE]: this.#onDissolve, [MSG.MARK]: this.#onMark,
       [MSG.GIANT_SKIP]: this.#onGiantSkip, [MSG.BEFRIEND]: this.#onBefriend, [MSG.PRESENCE_MOVE]: this.#onPresenceMove,
-    };
+    });
     this.state.blockConcurrencyWhile(async () => { await this.#load(); });
   }
 
@@ -993,7 +995,7 @@ export class WorldRoom {
   async webSocketMessage(ws, raw) {
     let m; try { m = JSON.parse(raw); } catch { return; }
     const handler = this.msgHandlers[m?.t];
-    if (!handler) return;                       // an unknown / malformed wire type is ignored
+    if (typeof handler !== 'function') return;  // an unknown / malformed wire type is ignored (typeof guards belt-and-suspenders with the null-proto map)
     await handler.call(this, ws, m, ws.deserializeAttachment()?.pid, Date.now());
   }
 
