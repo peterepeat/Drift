@@ -46,6 +46,7 @@ const A = await open();
 const B = await open();
 await wait(300);
 A.send(JSON.stringify({ t: 'mark', x: 820, y: 820, ts: Date.now() })); // a mark family via the wire
+await admin('/admin/creature?x=1200&y=1200'); // a RICH family spawned AFTER both clients connect → arrives as a genuine object_new (exercises the creature projection's kind/act branches through the object_new path, not just the bare mark)
 await wait(200);
 
 const ws0 = lastOf(A, 'world_state');
@@ -59,11 +60,15 @@ check(ws0.objects.every((o) => typeof o.held === 'boolean'), 'every object expos
 check(ws0.objects.every((o) => o.heldBy === undefined || o.held === true), 'heldBy only present while held');
 check(leak(ws0.giants) === null && (ws0.giants || []).length > 0, `the giants projection leaks no raw field (${leak(ws0.giants) || 'clean'})`);
 
-// object_new (the mark just sown, + the admin spawns observed by B from connect time)
+// object_new: the mark sown via the wire + the creature spawned AFTER connect — a genuine
+// object_new carrying the RICH creature projection (kind + the live `act` focus), not just
+// the simplest mark. (A pre-connect admin spawn reaches a late joiner via the world_state
+// snapshot, NEVER object_new — so a rich object_new must be triggered post-connect.)
 const news = A.msgs.filter((m) => m.t === 'object_new').map((m) => m.o);
 check(news.length > 0 && leak(news) === null, `object_new #pub leaks no raw field (${news.length} seen; ${leak(news) || 'clean'})`);
 check(offWhitelist(news) === null, `every object_new projection carries ONLY whitelisted keys (${offWhitelist(news) || 'clean'})`);
 check(news.some((o) => o.family === 'mark'), 'the sown mark reached the world (via object_new)');
+check(news.some((o) => o.family === 'creature' && o.kind && o.act), 'a creature spawned after connect arrives as a genuine object_new with its rich projection (kind + live act)');
 
 // object_state: a pickup broadcast to the OTHER client carries no identity
 const target = ws0.objects.find((o) => o.family === 'creature') || ws0.objects[0];

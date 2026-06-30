@@ -44,14 +44,21 @@ check(seedScale(42) >= 0.9 && seedScale(42) <= 1.8, 'seedScale is in [0.9, 1.8]'
 check(stoneRadius(42) === stoneRadius(42) && seedScale(42) === seedScale(42), 'sizers are deterministic for a given seed');
 
 // ---- wire protocol is one source, shared by server + client + tests ----
-// MSG is the union of the two directions; both sides reference these names, not
-// re-typed string literals.
-check(MSG === MSG && Object.keys(MSG).length === Object.keys(IN).length + Object.keys(OUT).length,
-  `MSG is the union of IN(${Object.keys(IN).length}) + OUT(${Object.keys(OUT).length}) message types`);
-check(['PICKUP', 'CARRY', 'PLACE', 'MARK', 'BEFRIEND', 'PRESENCE_MOVE'].every((k) => MSG[k] === IN[k]),
-  'every inbound client→server intent has an IN constant');
-check(['WORLD_STATE', 'OBJECT_STATE', 'OBJECT_NEW', 'OBJECT_GONE', 'PICKUP_ACK', 'SEASON', 'PRESENCE'].every((k) => MSG[k] === OUT[k]),
-  'every outbound server→client message has an OUT constant');
+// PIN the actual wire strings to their literal values. The client (public/client.js)
+// still hard-codes these literals on both send + handle, so a one-sided rename of a
+// MSG value must FAIL here — an identity assert like MSG[k]===IN[k] would not (MSG is
+// {...IN,...OUT}, so the two move together) and would silently pass a desync.
+check(MSG.PICKUP === 'pickup' && MSG.CARRY === 'carry' && MSG.PLACE === 'place' && MSG.BREAK === 'break'
+  && MSG.DISSOLVE === 'dissolve' && MSG.MARK === 'mark' && MSG.GIANT_SKIP === 'giant_skip'
+  && MSG.BEFRIEND === 'befriend' && MSG.PRESENCE_MOVE === 'presence_move',
+  'every inbound wire string is pinned to its literal value (the client sends these verbatim)');
+check(MSG.WORLD_STATE === 'world_state' && MSG.WORLD_PATCH === 'world_patch' && MSG.OBJECT_NEW === 'object_new'
+  && MSG.OBJECT_STATE === 'object_state' && MSG.OBJECT_GONE === 'object_gone' && MSG.PICKUP_ACK === 'pickup_ack'
+  && MSG.SEASON === 'season' && MSG.PRESENCE === 'presence' && MSG.PRESENCE_GONE === 'presence_gone',
+  'every outbound wire string is pinned to its literal value (the client handles these verbatim)');
+check(Object.keys(MSG).length === Object.keys(IN).length + Object.keys(OUT).length && Object.keys(MSG).length === 18,
+  `MSG is the union of IN(${Object.keys(IN).length}) + OUT(${Object.keys(OUT).length}) = 18 message types`);
+check(new Set(Object.values(MSG)).size === Object.keys(MSG).length, 'no two message types share a wire value (no collision an integration suite could mask)');
 check(Object.values(MSG).every((v) => typeof v === 'string'), 'every MSG value is a string the wire carries verbatim');
 check(Object.isFrozen(MSG) && Object.isFrozen(WIRE_OBJECT_FIELDS) && Object.isFrozen(FORBIDDEN_WIRE_FIELDS), 'the protocol tables are frozen (single source, no mutation)');
 
@@ -60,6 +67,7 @@ check(Object.isFrozen(MSG) && Object.isFrozen(WIRE_OBJECT_FIELDS) && Object.isFr
 // scrub a guaranteed no-op on a correctly built projection.
 check(FORBIDDEN_WIRE_FIELDS.every((k) => !isWireField(k)), 'no forbidden field is also whitelisted (blocklist ∩ whitelist = ∅)');
 check(FORBIDDEN_WIRE_FIELDS.includes('token') && FORBIDDEN_WIRE_FIELDS.includes('heldConn'), 'the session token + raw holder connection are forbidden on the wire');
+check(FORBIDDEN_WIRE_FIELDS.includes('last_eval') && FORBIDDEN_WIRE_FIELDS.includes('last_touched'), 'the per-object bookkeeping clocks (last_eval/last_touched) are forbidden on the wire');
 
 // wireLeak / forbiddenLeak / scrubForbidden behaviour
 const clean = { id: 1, family: 'stone', x: 0, y: 0, seed: 7, held: false, heldBy: '' };
@@ -68,10 +76,17 @@ check(forbiddenLeak({ ...clean, token: 'secret' }) === 'token', 'forbiddenLeak c
 check(forbiddenLeak({ ...clean, heat: 9 }) === 'heat', 'forbiddenLeak catches the thermal accumulator');
 check(wireLeak({ ...clean, bogus: 1 }) === 'bogus', 'wireLeak catches a non-whitelisted (schema-drift) field');
 check(forbiddenLeak({ ...clean, bogus: 1 }) === null, 'forbiddenLeak ignores a non-sensitive non-whitelisted field (that is schema, not identity)');
-const dirty = { ...clean, token: 'secret', heldConn: 'c9', heat: 5 };
+const dirty = { ...clean, token: 'secret', heldConn: 'c9', heat: 5, last_eval: 123, last_touched: 4 };
 const scrubbed = scrubForbidden(dirty);
 check(scrubbed === dirty && forbiddenLeak(scrubbed) === null, 'scrubForbidden strips every forbidden field in place');
 check(scrubbed.id === 1 && scrubbed.seed === 7 && scrubbed.heldBy === '', 'scrubForbidden leaves the whitelisted fields untouched');
+// The session token rides under `held` on a RAW record — a stray spread must NOT leak it.
+// scrubForbidden coerces a string `held` to its boolean wire form (the real token defense,
+// since `held` is whitelisted and the blocklist `token` entry never matches a record).
+const heldSpread = scrubForbidden({ ...clean, held: 'idy-secret-token', heldConn: 'c1' });
+check(heldSpread.held === true, 'scrubForbidden coerces a string `held` (where the raw token rides) to a boolean — the token never reaches the wire');
+check(scrubForbidden({ ...clean, held: '' }).held === false, 'an empty `held` coerces to false (nobody is carrying it)');
+check(wireLeak({ ...clean, last_eval: 1 }) === 'last_eval' && forbiddenLeak({ ...clean, last_eval: 1 }) === 'last_eval', 'last_eval is now caught by BOTH the whitelist and the blocklist paths');
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

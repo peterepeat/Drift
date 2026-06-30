@@ -51,14 +51,19 @@ const WIRE_SET = new Set(WIRE_OBJECT_FIELDS);
 export const isWireField = (k) => WIRE_SET.has(k);
 
 // ---- forbidden raw record fields (must NEVER reach the wire) ------------------
-// Server-internal bookkeeping that rides the in-memory / stored record: the
-// session token, the raw holder connection, and the thermal/aging/decay
-// accumulators. A projection carrying any of these is an invariant-#3 leak.
-// `scrubForbidden()` deletes them defensively at the projection site (a no-op
-// while #pub/#stateMsg build by listing — insurance against a future spread /
-// Object.assign that would otherwise copy the whole record onto the wire).
+// Server-internal bookkeeping that rides the in-memory / stored record: the raw
+// holder connection, the thermal/aging/decay accumulators, and the per-object eval
+// clock. A projection carrying any of these is an invariant-#3 leak.
+//
+// SUBTLE: the session TOKEN does not live under `token` on a record — it rides
+// under `held` (server-side `o.held = m.token`), a WHITELISTED field whose wire
+// form is a BOOLEAN. So the token's defense is scrubForbidden COERCING a string
+// `held` to boolean (below), not this blocklist; the `token` entry here only
+// guards a stray spread of a raw inbound message. `scrubForbidden()` applies both
+// defensively at the projection site — a no-op while #pub/#stateMsg build by
+// listing, insurance against a future spread / Object.assign of the whole record.
 export const FORBIDDEN_WIRE_FIELDS = Object.freeze([
-  'token', 'heldConn', 'heat', 'last_touched', 'held_at', 'shedAccum', 'decay',
+  'token', 'heldConn', 'heat', 'last_touched', 'last_eval', 'held_at', 'shedAccum', 'decay',
 ]);
 
 // The first forbidden key on a projection, or null if clean (the contract the
@@ -76,9 +81,13 @@ export const wireLeak = (o) => {
   if (o) for (const k in o) if (!WIRE_SET.has(k)) return k;
   return null;
 };
-// Defensively strip any forbidden field, in place; returns the same object so it
-// can wrap a projection's return. Pure no-op on a correctly built projection.
+// Defensively strip any forbidden field + coerce a string `held` (where the raw
+// session token rides) to its boolean wire form, in place; returns the same object
+// so it can wrap a projection's return. Pure no-op on a correctly built projection
+// (#pub/#stateMsg already list a boolean `held`); the real defense is for a future
+// spread of a raw record, which would otherwise carry the token string under `held`.
 export const scrubForbidden = (o) => {
   for (const k of FORBIDDEN_WIRE_FIELDS) if (k in o) delete o[k];
+  if (typeof o.held === 'string') o.held = o.held !== '';
   return o;
 };
