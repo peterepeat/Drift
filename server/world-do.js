@@ -22,6 +22,7 @@ import { generateWorld, makeRecord, makeSeedRecord, makeAnomalyRecord, ANOMALY_K
 import { FLOW_SEED, FLOW_SCALE, FLOW_REACH } from '../public/flow.js'; // shared with the client visual
 import { POND_ASPECT, poolContaining as poolContainingIn, bankPoint } from '../public/shared/geometry.js'; // shared pond ellipse geometry (server + client + tests)
 import { stoneRadius } from '../public/shared/sizing.js'; // shared form-from-seed footprint (server + client + tests)
+import { MSG, scrubForbidden } from '../public/shared/protocol.js'; // shared wire message-types + invariant-#3 field whitelist
 import { CATALOG as TUNE_CATALOG, coerce as tuneCoerce } from './tuning.js'; // operator panel: full knob catalogue + value coercion
 const TUNE_KIND = Object.fromEntries(TUNE_CATALOG.map((c) => [c.key, c.kind]));
 
@@ -807,11 +808,11 @@ export class WorldRoom {
     if (o.family === 'creature') p.act = (o.tameUntil && o.tameUntil > Date.now()) ? 'follow' : this.#creatureDrive(o); // its current focus, for the (debug) focus label — computed live, never stored
     if (o.family === 'stone' && o.r != null) p.r = o.r; // a fused/split stone's stored radius (shape still from seed)
     if (o.held !== '') p.heldBy = o.heldConn; // the holder's EPHEMERAL pid (same id presence carries) — links a carried thing to its carrier; never the token
-    return p;
+    return scrubForbidden(p); // invariant #3: defensively strip any raw record field (a no-op while we build by listing)
   }
   #stateMsg(o, now) {
     const m = {
-      t: 'object_state', id: o.id, x: o.x, y: o.y, handling: o.handling,
+      t: MSG.OBJECT_STATE, id: o.id, x: o.x, y: o.y, handling: o.handling,
       held: o.held !== '', maturity: o.maturity, aged: o.aged, ts: now,
       heldBy: o.held !== '' ? o.heldConn : '', // who's carrying it ('' = nobody) — for the felt-presence tether
     };
@@ -821,7 +822,7 @@ export class WorldRoom {
     if (o.family === 'creature') m.act = (o.tameUntil && o.tameUntil > now) ? 'follow' : this.#creatureDrive(o); // current focus, for the (debug) focus label — computed live, never stored
     if (o.family === 'stone' && o.r != null) m.r = o.r;   // a fused stone broadcasts its grown radius
     if (o.kinds && o.kinds.length > 1) m.kinds = o.kinds;  // a fused anomaly broadcasts its hybrid kinds (live form change)
-    return m;
+    return scrubForbidden(m); // invariant #3: defensively strip any raw record field
   }
   #worldState(pid, box) {
     const objects = [];
@@ -829,7 +830,7 @@ export class WorldRoom {
     // #inBox); the box-less full world stays a plain scan (old / test clients).
     const src = box ? this.#gridQueryBox(box) : this.objects.values();
     for (const o of src) { if (box && !this.#inBox(o, box)) continue; objects.push(this.#pub(o)); }
-    return { t: 'world_state', now: Date.now(), pid, season: this.season, pool: POOL, pools: POOLS, cog: { x: this.cog.x, y: this.cog.y }, bounds: this.bounds || this.#computeBounds(), giants: this.giants.map((g) => this.#giantPub(g)), objects };
+    return { t: MSG.WORLD_STATE, now: Date.now(), pid, season: this.season, pool: POOL, pools: POOLS, cog: { x: this.cog.x, y: this.cog.y }, bounds: this.bounds || this.#computeBounds(), giants: this.giants.map((g) => this.#giantPub(g)), objects };
   }
   // Half-extents of the whole object field (every object, not just the box) — the
   // client clamps its camera here so it can never wander far into empty space. A
@@ -942,7 +943,7 @@ export class WorldRoom {
       known.add(o.id);
       if (objects.length >= PATCH_MAX) break; // rest follow on the next viewport report
     }
-    if (objects.length) this.#send(ws, { t: 'world_patch', objects });
+    if (objects.length) this.#send(ws, { t: MSG.WORLD_PATCH, objects });
   }
 
   #send(ws, obj) { try { ws.send(JSON.stringify(obj)); } catch {} }
@@ -967,7 +968,7 @@ export class WorldRoom {
     this.objects.set(o.id, o);
     this.#gridAdd(o);
     await this.#persist(o);                       // the discrete spawn write
-    this.#bcast({ t: 'object_new', o: this.#pub(o) }, null);
+    this.#bcast({ t: MSG.OBJECT_NEW, o: this.#pub(o) }, null);
   }
   async #removeObject(o, extras = null) {
     this.#gridRemove(o);
@@ -977,7 +978,7 @@ export class WorldRoom {
     this.dirty.delete(o.id);
     await this.state.storage.delete('obj:' + o.id); // the discrete death write
     this.objWrites++;
-    this.#bcast({ t: 'object_gone', id: o.id, ...(extras || {}) }, null);
+    this.#bcast({ t: MSG.OBJECT_GONE, id: o.id, ...(extras || {}) }, null);
   }
 
   // ---- WebSocket message handling -------------------------------------------
@@ -986,22 +987,22 @@ export class WorldRoom {
     const pid = ws.deserializeAttachment()?.pid;
     const now = Date.now();
 
-    if (m.t === 'pickup') {
+    if (m.t === MSG.PICKUP) {
       const o = this.objects.get(m.id);
       if (!o) return;
       if (o.held === '') {
         // Single-threaded DO -> this read-then-write IS the atomic compare-and-set.
         o.held = m.token; o.heldConn = pid; o.held_at = now; o.last_touched = now;
         await this.#persist(o);
-        this.#send(ws, { t: 'pickup_ack', id: o.id, ok: true });
+        this.#send(ws, { t: MSG.PICKUP_ACK, id: o.id, ok: true });
         this.#bcast(this.#stateMsg(o, now), ws);
         this.#updateCog(o.x, o.y);
       } else {
-        this.#send(ws, { t: 'pickup_ack', id: o.id, ok: false });
+        this.#send(ws, { t: MSG.PICKUP_ACK, id: o.id, ok: false });
         this.#send(ws, this.#stateMsg(o, now));
       }
 
-    } else if (m.t === 'carry') {
+    } else if (m.t === MSG.CARRY) {
       const o = this.objects.get(m.id);
       if (!o || o.held !== m.token) return;
       if (!Number.isFinite(m.x) || !Number.isFinite(m.y)) return; // never store a corrupt position (a NaN serialises to null → 0,0)
@@ -1010,7 +1011,7 @@ export class WorldRoom {
       this.dirty.add(o.id);                     // carried position is unpersisted — let a checkpoint catch a long carry
       this.#bcast(this.#stateMsg(o, now), ws);
 
-    } else if (m.t === 'place') {
+    } else if (m.t === MSG.PLACE) {
       const o = this.objects.get(m.id);
       if (!o) return;
       if (o.held !== m.token) { this.#send(ws, this.#stateMsg(o, now)); return; } // not the holder
@@ -1103,7 +1104,7 @@ export class WorldRoom {
       this.#bcast(sm, null);
       this.#updateCog(o.x, o.y);
 
-    } else if (m.t === 'break') {
+    } else if (m.t === MSG.BREAK) {
       // Double-click a stone → split it into smaller stones (or grit if already tiny);
       // double-click a FUSED anomaly → split it back into its constituent kinds. No
       // ownership needed (anyone can break a free one), but not while it's held.
@@ -1116,13 +1117,13 @@ export class WorldRoom {
       await this.#removeObject(o, puff);
       for (const c of pieces) await this.#addObject(c);
 
-    } else if (m.t === 'dissolve') {
+    } else if (m.t === MSG.DISSOLVE) {
       // Only the current holder can dissolve an anomaly (the deliberate 10s hold).
       const o = this.objects.get(m.id);
       if (!o || o.family !== 'anomaly' || o.held !== m.token) return;
       await this.#removeObject(o);
 
-    } else if (m.t === 'mark') {
+    } else if (m.t === MSG.MARK) {
       // Double-click bare ground → leave a rock-shaped tinted stain (Wave S). Visible to
       // all, heals over ~10 min. Land only (not water); oldest evicted at the cap.
       if (!Number.isFinite(m.x) || !Number.isFinite(m.y)) return;
@@ -1135,11 +1136,11 @@ export class WorldRoom {
       const mk = makeMarkRecord(crypto.randomUUID(), (Math.random() * 4294967296) >>> 0, m.x, m.y, now);
       await this.#addObject(mk);
 
-    } else if (m.t === 'giant_skip') {
+    } else if (m.t === MSG.GIANT_SKIP) {
       // a friendly tap on the giant — it lets go of what it was about to do and ambles on
       for (const g of this.giants) { g.goal = null; g.stuck = 0; } // a friendly tap lets the gardeners amble on
 
-    } else if (m.t === 'befriend') {
+    } else if (m.t === MSG.BEFRIEND) {
       // sustained attention has bonded a creature to someone — it becomes tamed (follows the
       // nearest person for a good long while) so they have a companion to return to.
       const o = this.objects.get(m.id);
@@ -1148,10 +1149,10 @@ export class WorldRoom {
       await this.#persist(o);
       this.#bcast(this.#stateMsg(o, now), null);
 
-    } else if (m.t === 'presence_move') {
+    } else if (m.t === MSG.PRESENCE_MOVE) {
       this.lastSeen.set(pid, now);
       this.presencePos.set(pid, { x: m.x, y: m.y, ts: now });
-      this.#bcast({ t: 'presence', pid, x: m.x, y: m.y, ts: now }, ws);
+      this.#bcast({ t: MSG.PRESENCE, pid, x: m.x, y: m.y, ts: now }, ws);
       // The same heartbeat carries the viewport: page in any objects now in view.
       if (m.hw > 0 && m.hh > 0) {
         this.viewports.set(pid, { cx: m.x, cy: m.y, hw: m.hw, hh: m.hh });
@@ -1178,7 +1179,7 @@ export class WorldRoom {
         this.#bcast(this.#stateMsg(o, now), null);
       }
     }
-    this.#bcast({ t: 'presence_gone', pid }, null);
+    this.#bcast({ t: MSG.PRESENCE_GONE, pid }, null);
   }
 
   #updateCog(x, y) {
@@ -1489,7 +1490,7 @@ export class WorldRoom {
     }
     for (const g of this.giants) await this.#giantStep(g, now); // each gardener strolls a step + tends what it reaches
     this.bounds = this.#computeBounds(); // refresh the camera bound (the world grows/shrinks)
-    this.#bcast({ t: 'season', phase: this.season, bounds: this.bounds, giants: this.giants.map((g) => this.#giantPub(g)) }, null); // feel the clock turn + the gardeners' new spots (clients glide to them)
+    this.#bcast({ t: MSG.SEASON, phase: this.season, bounds: this.bounds, giants: this.giants.map((g) => this.#giantPub(g)) }, null); // feel the clock turn + the gardeners' new spots (clients glide to them)
 
     return { spawned: ctx.spawned.length, gone: ctx.gone.size, checkpointed, checkpointWrote };
   }

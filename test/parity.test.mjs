@@ -9,6 +9,7 @@ import { POND_ASPECT, inPond, poolContaining, bankPoint, POND_BANK_PAD } from '.
 import { POND_ASPECT as RENDER_POND_ASPECT } from '../public/render.js';
 import { stoneRadius, anomalyRadius, crystalRadius, seedScale } from '../public/shared/sizing.js';
 import { rng } from '../public/drift-procgen.js';
+import { MSG, IN, OUT, WIRE_OBJECT_FIELDS, FORBIDDEN_WIRE_FIELDS, isWireField, wireLeak, forbiddenLeak, scrubForbidden } from '../public/shared/protocol.js';
 
 let pass = 0, fail = 0;
 const check = (c, label) => { console.log((c ? '  PASS ' : '  FAIL ') + label); c ? pass++ : fail++; };
@@ -41,6 +42,36 @@ check(anomalyRadius(99, 3) > anomalyRadius(99, 1), 'a fused anomaly (more kinds)
 check(crystalRadius(99) >= 6 && crystalRadius(99) <= 13, 'crystalRadius reads ~6-13 wu');
 check(seedScale(42) >= 0.9 && seedScale(42) <= 1.8, 'seedScale is in [0.9, 1.8]');
 check(stoneRadius(42) === stoneRadius(42) && seedScale(42) === seedScale(42), 'sizers are deterministic for a given seed');
+
+// ---- wire protocol is one source, shared by server + client + tests ----
+// MSG is the union of the two directions; both sides reference these names, not
+// re-typed string literals.
+check(MSG === MSG && Object.keys(MSG).length === Object.keys(IN).length + Object.keys(OUT).length,
+  `MSG is the union of IN(${Object.keys(IN).length}) + OUT(${Object.keys(OUT).length}) message types`);
+check(['PICKUP', 'CARRY', 'PLACE', 'MARK', 'BEFRIEND', 'PRESENCE_MOVE'].every((k) => MSG[k] === IN[k]),
+  'every inbound client→server intent has an IN constant');
+check(['WORLD_STATE', 'OBJECT_STATE', 'OBJECT_NEW', 'OBJECT_GONE', 'PICKUP_ACK', 'SEASON', 'PRESENCE'].every((k) => MSG[k] === OUT[k]),
+  'every outbound server→client message has an OUT constant');
+check(Object.values(MSG).every((v) => typeof v === 'string'), 'every MSG value is a string the wire carries verbatim');
+check(Object.isFrozen(MSG) && Object.isFrozen(WIRE_OBJECT_FIELDS) && Object.isFrozen(FORBIDDEN_WIRE_FIELDS), 'the protocol tables are frozen (single source, no mutation)');
+
+// The whitelist and the forbidden list are DISJOINT — so scrubForbidden (a blocklist
+// strip) can never remove a legitimate wire field. This is what makes the runtime
+// scrub a guaranteed no-op on a correctly built projection.
+check(FORBIDDEN_WIRE_FIELDS.every((k) => !isWireField(k)), 'no forbidden field is also whitelisted (blocklist ∩ whitelist = ∅)');
+check(FORBIDDEN_WIRE_FIELDS.includes('token') && FORBIDDEN_WIRE_FIELDS.includes('heldConn'), 'the session token + raw holder connection are forbidden on the wire');
+
+// wireLeak / forbiddenLeak / scrubForbidden behaviour
+const clean = { id: 1, family: 'stone', x: 0, y: 0, seed: 7, held: false, heldBy: '' };
+check(wireLeak(clean) === null && forbiddenLeak(clean) === null, 'a clean projection passes both leak checks');
+check(forbiddenLeak({ ...clean, token: 'secret' }) === 'token', 'forbiddenLeak catches a raw token');
+check(forbiddenLeak({ ...clean, heat: 9 }) === 'heat', 'forbiddenLeak catches the thermal accumulator');
+check(wireLeak({ ...clean, bogus: 1 }) === 'bogus', 'wireLeak catches a non-whitelisted (schema-drift) field');
+check(forbiddenLeak({ ...clean, bogus: 1 }) === null, 'forbiddenLeak ignores a non-sensitive non-whitelisted field (that is schema, not identity)');
+const dirty = { ...clean, token: 'secret', heldConn: 'c9', heat: 5 };
+const scrubbed = scrubForbidden(dirty);
+check(scrubbed === dirty && forbiddenLeak(scrubbed) === null, 'scrubForbidden strips every forbidden field in place');
+check(scrubbed.id === 1 && scrubbed.seed === 7 && scrubbed.heldBy === '', 'scrubForbidden leaves the whitelisted fields untouched');
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
