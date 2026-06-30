@@ -115,6 +115,31 @@ const wEdge = await snap();
 const capped = radOf(byId(wEdge, BIG));
 check(!byId(wEdge, pool[35]) && capped <= STONE_CAP_R + 0.5 && capped >= 349, `the rock holds AT the cap, never past it (r ${capped.toFixed(0)} ≈ ${STONE_CAP_R})`);
 
+// 6b. BOUNCE: a stone dropped onto an ALREADY-CAPPED rock is NOT consumed into it (which
+// would just delete it for nothing) — it bounces off and settles clear, still a whole stone.
+const CAPPED = pool[15], BSPOT = { x: -22000, y: 22000 };
+await fetch(`${base}/admin/place?id=${CAPPED}&x=${BSPOT.x}&y=${BSPOT.y}&r=350`, { method: 'POST', headers: key2 }); // a rock AT the cap
+const dropper = pool[16];
+await move(dropper, BSPOT.x, BSPOT.y);                              // drop it dead-centre on the capped rock
+const w6b = await snap();
+const dr2 = byId(w6b, dropper), cap2 = byId(w6b, CAPPED);
+const bsep = dr2 ? Math.hypot(dr2.x - BSPOT.x, dr2.y - BSPOT.y) : 0;
+check(!!dr2 && !!cap2 && (cap2.r || 0) <= 350.5, `dropping on a capped rock neither grows nor vanishes it (dropper kept=${!!dr2}, cap r ${cap2 ? (cap2.r || 0).toFixed(0) : '?'})`);
+check(!!dr2 && bsep >= 350, `the dropped stone bounces off + settles clear of the capped rock (gap ${bsep.toFixed(0)} >= 350)`);
+
+// 6c. ROCK WINS POSITION WARS: a non-stone object overlapping a stone is eased OUT each tick
+// (the stone never moves). Drop a plant dead-centre on a rock, tick, and it's shouldered clear.
+const PW = { x: 22000, y: 22000 }, rockW = pool[5];
+await fetch(`${base}/admin/place?id=${rockW}&x=${PW.x}&y=${PW.y}&r=100`, { method: 'POST', headers: key2 }); // a r=100 rock
+const seedW = (await snap()).objects.find((o) => o.family === 'seed' && !o.held);
+await fetch(`${base}/admin/place?id=${seedW.id}&x=${PW.x}&y=${PW.y}`, { method: 'POST', headers: key2 }); // a plant dead-centre on it
+await tickG(1);
+const w6c = await snap();
+const rk6c = byId(w6c, rockW), pl6c = w6c.objects.find((o) => o.id === seedW.id);
+const sep6c = pl6c ? Math.hypot(pl6c.x - PW.x, pl6c.y - PW.y) : 0;
+check(!!rk6c && rk6c.x === PW.x && rk6c.y === PW.y, `the rock holds its ground — it never yields position`);
+check(!!pl6c && sep6c >= 100, `a plant overlapping a rock is shouldered clear each tick (gap ${sep6c.toFixed(0)} >= 100)`);
+
 // 7. NO ROCKS IN WATER: a stone dropped in a pool rolls out — the world keeps no free
 // stone sitting in any pool (place-time roll + the per-tick relocation pass).
 const waterPool = (await snap()).pool;                             // central pool {x,y,r}

@@ -277,6 +277,11 @@ const STONE_CAP_R = 350;                   // the ceiling: hand-fusing caps here
 function stoneRadius(seed) { return 12 + rng(seed >>> 0)() * 34; }      // MUST match the client's seed-derived base
 function stoneRadiusOf(o) { return o.r != null ? o.r : stoneRadius(o.seed); }
 const PLANT_BASE_R = 9;                    // a plant's trunk-base clearance — set down on a rock, it settles beside (Unit ⑥)
+// ROCK WINS POSITION WARS: each tick, a free non-stone object overlapping a stone is eased
+// clear of it (the stone never moves). Capped per tick so a dense cluster spreads its
+// resolution over several ticks rather than one fat broadcast (write-economy: broadcast+dirty).
+const STONE_PUSH_MAX = 96;                 // max non-stone objects a stone-collision pass eases clear per tick
+const STONE_PUSH_CLEAR = 14;               // body clearance for a non-plant object (creature/anomaly/crystal); plants use PLANT_BASE_R
 
 // ---- water: flow, drift & stone-channelling (Family 3, Phase 3) -------------
 // A slow persistent flow moves across the world. Its direction at a point is a
@@ -968,6 +973,7 @@ export class WorldRoom {
         this.#settleClearOfStones(o, PLANT_BASE_R);
         if (o.x !== px || o.y !== py) { const pond = poolContaining(o.x, o.y); if (pond) { const b = bankPoint(pond, o.x, o.y, o.seed); o.x = b.x; o.y = b.y; } }
       }
+      let bounced = false; // a stone dropped on an ALREADY-CAPPED rock bounces off instead of vanishing into it
       if (o.family === 'stone') {
         // Worn to grit by too much handling — a brief scatter, then gone (§4.3).
         if (o.handling >= GRIT_HANDLING) {
@@ -977,9 +983,11 @@ export class WorldRoom {
           this.#bcast({ t: 'object_gone', id: o.id, grit: true }, null);
           return;
         }
-        // Dropped onto another stone → FUSE: the target grows, this stone is consumed.
+        // Dropped onto another stone → FUSE (target grows, this one is consumed) — UNLESS the
+        // target is already AT the cap, in which case they BOUNCE (the dropper is kept + eased clear).
         const fused = this.#tryFuse(o, now);
-        if (fused) {
+        if (fused && fused.bounce) { bounced = true; }
+        else if (fused) {
           this.#gridRemove(o);
           this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id); this.dirty.delete(o.id);
           await this.state.storage.delete('obj:' + o.id); this.objWrites++;
@@ -996,7 +1004,7 @@ export class WorldRoom {
       const rollFrom = o.family === 'stone' ? this.#rollStoneFromWater(o) : null;
       this.#gridUpdate(o); // index the final position (after any settle-clear / roll)
       await this.#persist(o);
-      const sm = this.#stateMsg(o, now); if (rollFrom) sm.roll = 1;
+      const sm = this.#stateMsg(o, now); if (rollFrom) sm.roll = 1; if (bounced) sm.bounce = 1;
       this.#bcast(sm, null);
       this.#updateCog(o.x, o.y);
 
@@ -1332,6 +1340,20 @@ export class WorldRoom {
     // (→ gone, or a routed flee → changed). Self-balancing (cap + per-species floor).
     this.#socialCreatures(now, spawned, gone, changed);
 
+    // ROCK WINS POSITION WARS (Wave): a stone never yields ground. Any free non-stone object
+    // whose body overlaps a stone's footprint is eased OUT to just-clear — so a rock grown by
+    // fusing, or one a plant/creature has drifted into, shoulders the others aside instead of
+    // swallowing them. The stone itself never moves. Capped per tick; broadcast + dirtied via
+    // `changed` (the pond pass below then re-banks anything shoved into water), so no per-tick write.
+    let shoved = 0;
+    for (const o of this.objects.values()) {
+      if (shoved >= STONE_PUSH_MAX) break;
+      if (o.held !== '' || (o.family !== 'seed' && o.family !== 'creature' && o.family !== 'anomaly' && o.family !== 'crystal')) continue;
+      const px = o.x, py = o.y;
+      this.#settleClearOfStones(o, o.family === 'seed' ? PLANT_BASE_R : STONE_PUSH_CLEAR);
+      if (o.x !== px || o.y !== py) { this.#gridUpdate(o); if (!changed.includes(o)) changed.push(o); shoved++; }
+    }
+
     // No trees in water (Wave P): any free seed/plant sitting in a pond is nudged to
     // its bank — catches seeds that drifted in and any caught inside a pond's footprint
     // (e.g. a new pond placed over existing growth). Capped per tick; broadcast +
@@ -1430,6 +1452,9 @@ export class WorldRoom {
       if (d < stoneRadiusOf(s) && d < bestD) { bestD = d; target = s; } // dropped onto its footprint → fuse
     }
     if (!target) { this.#settleStoneClear(o); return null; }
+    // A target already AT the cap can't grow — fusing would just delete the dropped stone for
+    // nothing. They BOUNCE instead: ease the dropper clear and signal a recoil (kept whole).
+    if (stoneRadiusOf(target) >= STONE_CAP_R - 0.5) { this.#settleStoneClear(o); return { bounce: true }; }
     // area-combine, but CAPPED at the equilibrium ceiling — you can build a chunky rock,
     // not an ever-growing monolith. Never shrinks an already-large (legacy) boulder; the
     // giant is what walks those back down toward the middle.

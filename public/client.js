@@ -1380,15 +1380,17 @@ function onMessage(raw) {
       // it (never snap), so it drifts smoothly. Others ease a small water-drift hop and
       // snap larger jumps (place, initial).
       const easeCreature = o.family === 'creature' && !m.held && m.id !== heldId;
-      // A stone the server rolled out of water (m.roll) ALWAYS eases to the bank — a
-      // smooth roll, never a snap, however far it has to travel.
+      // A stone the server rolled out of water (m.roll), OR bounced off an already-capped
+      // rock (m.bounce), ALWAYS eases to its resting spot — a smooth roll/slide, never a snap.
       const roll = m.roll && m.id !== heldId;
-      if (roll || easeCreature || (!m.held && m.id !== heldId && dx * dx + dy * dy <= POS_EASE_MAX * POS_EASE_MAX)) {
+      const bounce = m.bounce && m.id !== heldId;
+      if (roll || bounce || easeCreature || (!m.held && m.id !== heldId && dx * dx + dy * dy <= POS_EASE_MAX * POS_EASE_MAX)) {
         o._tx = m.x; o._ty = m.y; // leave o.x/o.y to glide toward the target
-        if (roll) o._roll = 1;    // a slower, deliberate ease until it settles (updatePositions)
+        if (roll || bounce) o._roll = 1;    // a slower, deliberate ease until it settles (updatePositions)
       } else {
         o.x = m.x; o.y = m.y; o._tx = m.x; o._ty = m.y;
       }
+      if (bounce) Audio.event('land', { seed: o.seed, family: o.family, x: m.x }); // a soft clack as the maxed rock shoulders it off
       o.handling = m.handling; o.held = !!m.held;
       if (m.maturity != null) o.maturity = m.maturity;
       if (m.aged != null) o.aged = m.aged;
