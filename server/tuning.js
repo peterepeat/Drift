@@ -1,8 +1,9 @@
-// AUTO-GENERATED — every tuning knob (server + client) for the operator panel.
-// Source: the drift-tuning-catalog workflow; regenerate via scratchpad/gen-tuning.mjs.
-// `live:true` = a server scalar editable at runtime through /admin/tuning (the world-do.js
-// TUNE_REG must expose a matching get/set). Everything else is catalogued read-only (shown
-// with its default), pending the central-tuning-table refactor (debt candidate #5).
+// Every tuning knob (server + client) for the operator panel, with metadata.
+// Bootstrapped from a one-off catalogue pass, now maintained BY HAND: to add a knob, append
+// an entry here; to make it editable at runtime, also add a get/set to TUNE_REG in world-do.js
+// and set `live:true`. Everything else is catalogued read-only (shown with its default).
+// NOTE: this hand-maintained split (catalogue here, live wiring in world-do.js) is exactly what
+// the central-tuning-table refactor (REFACTOR-BACKLOG.md, candidate #5) is meant to unify.
 export const CATALOG = [
   {"key":"TICK_MS","where":"server","group":"misc","label":"Tick interval","default":"60000","curated":false,"kind":"ms","min":"1000","max":"600000","note":"the self-rescheduling world tick cadence (60s)","live":false},
   {"key":"HOLD_TIMEOUT_MS","where":"server","group":"misc","label":"Hold reclaim timeout","default":"45000","curated":false,"kind":"ms","min":"5000","max":"300000","note":"reclaim a hold if its connection vanished","live":false},

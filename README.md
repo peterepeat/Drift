@@ -63,7 +63,7 @@ None are required to run or deploy. The only optional secret:
 
 | Variable | Purpose |
 |----------|---------|
-| `ADMIN_KEY` | Gates the **forced** re-seed (`/admin/seed?force=1`). Set with `npx wrangler secret put ADMIN_KEY`. The safe, idempotent ensure-seed (`/admin/seed`) needs no key. |
+| `ADMIN_KEY` | Gates every mutating `/admin/*` route — the **forced** re-seed, the operator panel's actions, and live-tuning writes. Set with `npx wrangler secret put ADMIN_KEY` (run it **from this repo**, or pass `--name drift`). Unset ⇒ all mutations are `403` (inert by default in prod); read-only `/status` and `GET /admin/tuning` need no key. |
 
 ## Seeding the world
 
@@ -76,6 +76,14 @@ ADMIN_KEY=… node scripts/seed-world.js https://your.app --force   # wipe + re-
 ```
 
 The generator (`server/seed.js`) is deterministic from a fixed world seed, so a forced re-seed always reproduces the exact same 200 objects (same ids, positions, and procedural forms).
+
+## Operator panel, live tuning & debug labels
+
+A private control surface lives at **`/admin-peter`** (secret-by-URL static page; viewing is open, every action needs `ADMIN_KEY` pasted in). It shows live `/status`, a **fast-forward** speed selector (the world ticks every 60s — run it up to ~30000× to watch long-term emergence or as a load test, via `/admin/tick`), a guarded **reseed**, bulk **fill**, and a **tuning table**.
+
+The tuning table is the full **~198-knob catalogue** (`server/tuning.js`) — every server + client constant, grouped, curated-on-top, each with a labelled default, a reset, and a plain-English note. **17 high-impact server knobs are editable LIVE** (`GET`/`POST /admin/tuning`): the value is coerced, applied to the running world, and persisted to `meta:tuning` (re-applied on load). Live knobs are wired through a `TUNE_REG` of get/set-over-`let` closures in `world-do.js`, so editing one needs no read-site changes. (Extending live-edit to every knob — and migrating the loose module constants into this table — is the central-tuning-table refactor; see `REFACTOR-BACKLOG.md`, candidate #5.)
+
+**Debug focus labels:** open the world with `?focus=1` (or press **`f`**) to draw a small word under each creature and gardener naming its current focus (feed/drink/rest/roam/follow; a gardener's job, turning red `·stuck` when it's circling). Off by default — the world is otherwise wordless.
 
 ## Deploy
 
