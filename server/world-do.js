@@ -360,6 +360,31 @@ const TUNE_REG = {
   STONE_CAP_R: { get: () => STONE_CAP_R, set: (v) => { STONE_CAP_R = v; }, def: STONE_CAP_R },
 };
 
+// The per-tick write-economy ledger (invariant #1). Every #tick pass routes its
+// outcome through these verbs instead of hand-threading changed/gone/dirty arrays +
+// O(n) `.includes` guards — so "which objects take a discrete write vs. ride the
+// ~30-min checkpoint" lives in ONE named place a new pass can't silently get wrong.
+//   change(o)  — a broadcastable state delta; persisted at the checkpoint (deferred)
+//   reclaim(o) — an ownership release; must persist NOW (a missed-close can't revive)
+//   defer(o)   — sub-threshold drift: ride the checkpoint, no broadcast
+//   spawn(o) / remove(o) — a birth / death (a discrete write at commit)
+// Sets give O(1) dedupe; insertion order (= the old array order) drives the commit.
+class TickContext {
+  constructor(dirty) {
+    this._dirty = dirty;        // the DO's persistent dirty set (the checkpoint flushes it)
+    this.changed = new Set();
+    this.spawned = [];
+    this.gone = new Set();
+    this.reclaimed = new Set(); // ids in `changed` that persist NOW rather than defer
+  }
+  change(o) { this.changed.add(o); }
+  reclaim(o) { this.changed.add(o); this.reclaimed.add(o.id); }
+  defer(o) { this._dirty.add(o.id); }
+  spawn(o) { this.spawned.push(o); }
+  remove(o) { this.gone.add(o); }
+  isGone(o) { return this.gone.has(o); }
+}
+
 export class WorldRoom {
   constructor(state, env) {
     this.state = state;
@@ -1180,30 +1205,29 @@ export class WorldRoom {
   // recorded in the dirty set and flushed by the periodic checkpoint — broadcast
   // cadence is decoupled from write cadence (see the persistence note and #checkpoint).
   async #tick(now) {
-    const changed = [], spawned = [], gone = [];
-    const reclaimed = new Set(); // ids in `changed` that are an ownership release ⇒ persist now, don't defer
+    const ctx = new TickContext(this.dirty); // the per-tick write-economy ledger (invariant #1)
     // Season modulates how fast life grows and ages this tick.
     const sb = seasonBlend(this.season);
     const gMult = lerp(GROWTH_MULT[sb.cur], GROWTH_MULT[sb.next], sb.fade);
     const aMult = lerp(AGE_MULT[sb.cur], AGE_MULT[sb.next], sb.fade);
     // Thermal field first: it bends the flow (read during drift below) and slowly
     // grows stones in sustained-warm areas.
-    for (const s of this.#updateHeat(now, sb)) spawned.push(s);
+    for (const s of this.#updateHeat(now, sb)) ctx.spawn(s);
     const anomalies = [];
     for (const o of this.objects.values()) if (o.family === 'anomaly') anomalies.push(o);
     for (const o of this.objects.values()) {
       if (o.held !== '' && now - o.held_at > HOLD_TIMEOUT_MS) { // missed-close safety net
-        o.held = ''; o.heldConn = ''; o.held_at = 0; changed.push(o); reclaimed.add(o.id); // ownership ⇒ persist now
+        o.held = ''; o.heldConn = ''; o.held_at = 0; ctx.reclaim(o); // ownership ⇒ persist now
       }
       if (o.held !== '') continue;          // growth paused while held
       if (o.family === 'crystal') {         // crystals slowly dissolve (a brief flash, then gone)
         o.decay = Math.min(1, (o.decay || 0) + CRYSTAL_DECAY);
-        if (o.decay >= 1) gone.push(o);
-        else this.dirty.add(o.id);          // decay advances with no discrete write — the checkpoint must catch it
+        if (o.decay >= 1) ctx.remove(o);
+        else ctx.defer(o);                  // decay advances with no discrete write — the checkpoint must catch it
         continue;
       }
       if (o.family === 'mark') {            // ground marks heal and vanish after ~10 min (Wave S)
-        if (now - (o.created_at || now) >= MARK_LIFE_MS) gone.push(o);
+        if (now - (o.created_at || now) >= MARK_LIFE_MS) ctx.remove(o);
         continue;
       }
       if (o.family !== 'seed') continue;    // stones / anomalies have no time-based change here
@@ -1221,16 +1245,16 @@ export class WorldRoom {
         o.aged = Math.min(1, o.aged + AGE_RATE * aMult * (nearAnomaly ? ANOMALY_AGE_SLOW : 1));
         if (o.aged < SHED_MAX_AGED) {
           o.shedAccum += 1;
-          if (o.shedAccum >= SHED_TICKS && this.objects.size + spawned.length < this.maxObjects) {
+          if (o.shedAccum >= SHED_TICKS && this.objects.size + ctx.spawned.length < this.maxObjects) {
             o.shedAccum = 0; // reset whether or not it sheds — a crowded plant simply waits another cycle (no burst when the patch later clears)
-            if (Math.random() >= this.#shedSuppression(o)) spawned.push(this.#shed(o, now));
+            if (Math.random() >= this.#shedSuppression(o)) ctx.spawn(this.#shed(o, now));
           }
         }
         if (o.aged >= 1) {                  // dissolve: release final seeds, then gone
-          for (let k = 0; k < FINAL_SHED && this.objects.size + spawned.length < this.maxObjects; k++) {
-            spawned.push(this.#shed(o, now));
+          for (let k = 0; k < FINAL_SHED && this.objects.size + ctx.spawned.length < this.maxObjects; k++) {
+            ctx.spawn(this.#shed(o, now));
           }
-          gone.push(o);
+          ctx.remove(o);
         }
       }
 
@@ -1241,13 +1265,13 @@ export class WorldRoom {
           Math.abs(o.aged - mark.aged) >= MAT_BCAST_DELTA ||
           crossedSprout) {
         this.bcastMark.set(o.id, { maturity: o.maturity, aged: o.aged });
-        // !changed.includes guards against a double-push when a hold also timed out this tick
-        if (!gone.includes(o) && !changed.includes(o)) changed.push(o);
+        // guard against a double-handle when a hold also timed out this tick
+        if (!ctx.isGone(o)) ctx.change(o);
       }
       // Sub-threshold lifecycle change (incl. checkpoint-only heat) that no
       // discrete write captured: mark it so the next checkpoint can't lose it.
       if ((o.maturity !== beforeMat || o.aged !== beforeAged || o.heat !== beforeHeat || o.shedAccum !== beforeShed) &&
-          !changed.includes(o) && !gone.includes(o)) this.dirty.add(o.id);
+          !ctx.changed.has(o) && !ctx.isGone(o)) ctx.defer(o);
     }
 
     // Water drift: eligible free objects near the pool creep along the flow.
@@ -1255,24 +1279,24 @@ export class WorldRoom {
     // creep) but BROADCAST only once an object has crept POS_BCAST_DELTA —
     // otherwise a pool full of drifters would spam object_state every tick.
     for (const o of this.objects.values()) {
-      if (gone.includes(o) || !this.#driftEligible(o) ||
+      if (ctx.isGone(o) || !this.#driftEligible(o) ||
           Math.hypot(o.x - POOL.x, o.y - POOL.y) > POOL.r * FLOW_REACH) {
         // If it drifted some un-broadcast distance before becoming ineligible,
         // flush a final state so clients don't stay stuck up to POS_BCAST_DELTA behind.
         const m0 = this.driftMark.get(o.id);
-        if (m0 && (o.x !== m0.x || o.y !== m0.y) && !gone.includes(o) && !changed.includes(o)) changed.push(o);
+        if (m0 && (o.x !== m0.x || o.y !== m0.y) && !ctx.isGone(o)) ctx.change(o);
         this.driftMark.delete(o.id);
         continue;
       }
       const f = this.#flowAt(o.x, o.y, sb);
       o.x += f.vx * FLOW_SPEED; o.y += f.vy * FLOW_SPEED;
       this.#gridUpdate(o);                      // re-index the drifted object (no-op until it crosses a cell)
-      this.dirty.add(o.id);                     // the creep is unpersisted until a checkpoint flushes it
+      ctx.defer(o);                             // the creep is unpersisted until a checkpoint flushes it
       const mark = this.driftMark.get(o.id);
       if (!mark) { this.driftMark.set(o.id, { x: o.x, y: o.y }); continue; }
       if (Math.hypot(o.x - mark.x, o.y - mark.y) >= POS_BCAST_DELTA) {
         this.driftMark.set(o.id, { x: o.x, y: o.y });
-        if (!changed.includes(o)) changed.push(o);
+        ctx.change(o);
       }
     }
 
@@ -1283,28 +1307,25 @@ export class WorldRoom {
     // dirtied every tick (their last_touched is never read).
     for (const o of this.objects.values()) {
       if (o.family === 'anomaly' || o.family === 'creature' || o.family === 'fish' || o.family === 'mark' || o.held !== '') continue;
-      if (this.#heatAt(o.x, o.y) > WARM_EPS) { o.last_touched = now; this.dirty.add(o.id); continue; } // refresh is checkpoint-only
-      if (o.family === 'stone' && (now - o.last_touched) >= STONE_FADE_MS && !gone.includes(o)) {
-        gone.push(o);
-      }
+      if (this.#heatAt(o.x, o.y) > WARM_EPS) { o.last_touched = now; ctx.defer(o); continue; } // refresh is checkpoint-only
+      if (o.family === 'stone' && (now - o.last_touched) >= STONE_FADE_MS) ctx.remove(o);
     }
 
     // Ceiling (PRD §7.3): when the world is full, the longest-untouched (smallest
     // last_touched) objects are trimmed back to just under the cap so a packed
     // world keeps breathing. Anomalies and held objects are spared.
-    const effective = this.objects.size - gone.length;
+    const effective = this.objects.size - ctx.gone.size;
     if (effective >= this.maxObjects) {
-      const goneSet = new Set(gone.map((o) => o.id)); // O(1) membership at ceiling scale
       const cands = [];
       for (const o of this.objects.values()) {
-        if (o.family === 'anomaly' || o.family === 'creature' || o.family === 'fish' || o.family === 'mark' || o.held !== '' || goneSet.has(o.id)) continue;
+        if (o.family === 'anomaly' || o.family === 'creature' || o.family === 'fish' || o.family === 'mark' || o.held !== '' || ctx.isGone(o)) continue;
         cands.push(o);
       }
       cands.sort((a, b) => a.last_touched - b.last_touched); // longest-untouched first
       const trim = Math.min(cands.length, effective - (this.maxObjects - CEIL_TRIM));
       // A forced eviction is not a natural death — it does NOT release final seeds
       // (that would fight the very trim we're doing); the object just leaves.
-      for (let k = 0; k < trim; k++) gone.push(cands[k]);
+      for (let k = 0; k < trim; k++) ctx.remove(cands[k]);
     }
 
     // Prune stale presence so the warmth map can't grow unbounded from
@@ -1315,22 +1336,22 @@ export class WorldRoom {
 
     // Communion: where people tend a patch TOGETHER, the world blossoms (the reward
     // for bringing a friend). Presence-driven; the blooms spawn like any other object.
-    this.#communion(now, spawned);
+    this.#communion(now, ctx);
 
     // Rarely, a mature plant births an anomaly — only in generative seasons,
     // and only while the world holds fewer than a few. Seeing one is luck.
     if (anomalies.length < MAX_ANOMALIES && ANOMALY_SEASONS[sb.cur] &&
-        this.objects.size + spawned.length < this.maxObjects && Math.random() < ANOMALY_SPAWN_CHANCE) {
+        this.objects.size + ctx.spawned.length < this.maxObjects && Math.random() < ANOMALY_SPAWN_CHANCE) {
       const matures = [];
       for (const o of this.objects.values()) if (o.family === 'seed' && o.maturity >= 1 && o.aged < 0.5) matures.push(o);
-      if (matures.length) spawned.push(this.#spawnAnomaly(matures[Math.floor(Math.random() * matures.length)], now));
+      if (matures.length) ctx.spawn(this.#spawnAnomaly(matures[Math.floor(Math.random() * matures.length)], now));
     }
 
     // Crystalline formations grow at the pool's edge, up to a few.
     let crystalCount = 0;
     for (const o of this.objects.values()) if (o.family === 'crystal') crystalCount++;
-    if (crystalCount < CRYSTAL_CAP && this.objects.size + spawned.length < this.maxObjects && Math.random() < CRYSTAL_SPAWN_CHANCE) {
-      spawned.push(this.#spawnCrystal(now));
+    if (crystalCount < CRYSTAL_CAP && this.objects.size + ctx.spawned.length < this.maxObjects && Math.random() < CRYSTAL_SPAWN_CHANCE) {
+      ctx.spawn(this.#spawnCrystal(now));
     }
 
     // Creatures: ramp quickly to a baseline so the world feels inhabited, then top
@@ -1346,19 +1367,19 @@ export class WorldRoom {
     // Per-species floor FIRST: refill any kind that has thinned below its floor, so a
     // run of losses (or lopsided breeding) can never drive a species extinct.
     for (const k of CREATURE_KINDS) {
-      while ((kindCount[k] || 0) < MIN_PER_SPECIES && creatureCount + creAdded < MAX_CREATURES && this.objects.size + spawned.length < creRoom) {
-        spawned.push(this.#spawnCreature(now, null, k)); kindCount[k]++; creAdded++;
+      while ((kindCount[k] || 0) < MIN_PER_SPECIES && creatureCount + creAdded < MAX_CREATURES && this.objects.size + ctx.spawned.length < creRoom) {
+        ctx.spawn(this.#spawnCreature(now, null, k)); kindCount[k]++; creAdded++;
       }
     }
     // Then ramp toward the baseline and (chance-gated) top up toward the cap — each
     // refill is the MINORITY kind, so the world trends toward a balanced mix instead
     // of letting random spawns pile onto whichever species is already ahead.
     const minorityKind = () => CREATURE_KINDS.reduce((a, b) => (kindCount[a] || 0) <= (kindCount[b] || 0) ? a : b);
-    while (creatureCount + creAdded < MIN_CREATURES && this.objects.size + spawned.length < creRoom) {
-      const k = minorityKind(); spawned.push(this.#spawnCreature(now, null, k)); kindCount[k]++; creAdded++;
+    while (creatureCount + creAdded < MIN_CREATURES && this.objects.size + ctx.spawned.length < creRoom) {
+      const k = minorityKind(); ctx.spawn(this.#spawnCreature(now, null, k)); kindCount[k]++; creAdded++;
     }
-    if (creatureCount + creAdded < MAX_CREATURES && this.objects.size + spawned.length < creRoom && Math.random() < CREATURE_SPAWN_CHANCE) {
-      const k = minorityKind(); spawned.push(this.#spawnCreature(now, null, k)); kindCount[k]++;
+    if (creatureCount + creAdded < MAX_CREATURES && this.objects.size + ctx.spawned.length < creRoom && Math.random() < CREATURE_SPAWN_CHANCE) {
+      const k = minorityKind(); ctx.spawn(this.#spawnCreature(now, null, k)); kindCount[k]++;
     }
 
     // Fish (Wave Q): keep every pond stocked. Floor-fill to FISH_PER_POND, then a
@@ -1366,10 +1387,10 @@ export class WorldRoom {
     // pond that loses fish refills. (Pending fish count toward the per-pond cap so one
     // tick can't overfill.) Gated below the breathing room like creatures.
     const fishCounts = this.#fishCountByPond();
-    for (const s of spawned) if (s.family === 'fish') { for (let i = 0; i < POOLS.length; i++) { const p = POOLS[i]; const dx = s.x - p.x, dy = s.y - p.y; if (dx * dx + dy * dy <= p.r * p.r) { fishCounts[i]++; break; } } }
+    for (const s of ctx.spawned) if (s.family === 'fish') { for (let i = 0; i < POOLS.length; i++) { const p = POOLS[i]; const dx = s.x - p.x, dy = s.y - p.y; if (dx * dx + dy * dy <= p.r * p.r) { fishCounts[i]++; break; } } }
     for (let i = 0; i < POOLS.length; i++) {
-      while (fishCounts[i] < FISH_PER_POND && this.objects.size + spawned.length < creRoom) { spawned.push(this.#spawnFish(now, POOLS[i])); fishCounts[i]++; }
-      if (fishCounts[i] < FISH_MAX_PER_POND && this.objects.size + spawned.length < creRoom && Math.random() < FISH_SPAWN_CHANCE) { spawned.push(this.#spawnFish(now, POOLS[i])); fishCounts[i]++; }
+      while (fishCounts[i] < FISH_PER_POND && this.objects.size + ctx.spawned.length < creRoom) { ctx.spawn(this.#spawnFish(now, POOLS[i])); fishCounts[i]++; }
+      if (fishCounts[i] < FISH_MAX_PER_POND && this.objects.size + ctx.spawned.length < creRoom && Math.random() < FISH_SPAWN_CHANCE) { ctx.spawn(this.#spawnFish(now, POOLS[i])); fishCounts[i]++; }
     }
 
     // Goal-seeking drift (Wave G1): step each free creature's HOME toward what it
@@ -1390,12 +1411,12 @@ export class WorldRoom {
       if (!mx && !my) continue;                       // settled — the wander keeps it alive in place
       o.x += mx; o.y += my;
       this.#gridUpdate(o);
-      if (!changed.includes(o)) changed.push(o);     // broadcast the new home (clients ease it smoothly)
+      ctx.change(o);     // broadcast the new home (clients ease it smoothly)
     }
 
     // Social life (Wave G2): creatures sharing a patch mate (→ spawned) or clash
     // (→ gone, or a routed flee → changed). Self-balancing (cap + per-species floor).
-    this.#socialCreatures(now, spawned, gone, changed);
+    this.#socialCreatures(now, ctx);
 
     // ROCK WINS POSITION WARS (Wave): a stone never yields ground. Any free non-stone object
     // whose body overlaps a stone's footprint is eased OUT to just-clear — so a rock grown by
@@ -1408,7 +1429,7 @@ export class WorldRoom {
       if (o.held !== '' || (o.family !== 'seed' && o.family !== 'creature' && o.family !== 'anomaly' && o.family !== 'crystal')) continue;
       const px = o.x, py = o.y;
       this.#settleClearOfStones(o, o.family === 'seed' ? PLANT_BASE_R : STONE_PUSH_CLEAR);
-      if (o.x !== px || o.y !== py) { this.#gridUpdate(o); if (!changed.includes(o)) changed.push(o); shoved++; }
+      if (o.x !== px || o.y !== py) { this.#gridUpdate(o); ctx.change(o); shoved++; }
     }
 
     // No trees in water (Wave P): any free seed/plant sitting in a pond is nudged to
@@ -1432,7 +1453,7 @@ export class WorldRoom {
         const b = bankPoint(p, o.x, o.y, o.seed);
         o.x = b.x; o.y = b.y;
         this.#gridUpdate(o);
-        if (!changed.includes(o)) changed.push(o);
+        ctx.change(o);
       }
       relocated++;
     }
@@ -1442,12 +1463,12 @@ export class WorldRoom {
     // broadcast/persist decouple — write rate tracks the checkpoint cadence, not the
     // broadcast rate). A reclaimed hold is the exception: ownership writes now, so a
     // missed-close release can't silently revive after a pre-checkpoint eviction.
-    for (const o of changed) {
-      if (reclaimed.has(o.id)) await this.#persist(o); else this.dirty.add(o.id);
+    for (const o of ctx.changed) {
+      if (ctx.reclaimed.has(o.id)) await this.#persist(o); else ctx.defer(o);
       this.#bcast(this.#stateMsg(o, now), null);
     }
-    for (const o of spawned) await this.#addObject(o);
-    for (const o of gone) await this.#removeObject(o);
+    for (const o of ctx.spawned) await this.#addObject(o);
+    for (const o of ctx.gone) await this.#removeObject(o);
 
     this.season += SEASON_PER_TICK; // advance the world's own season clock (in memory every tick)
     await this.state.storage.put('meta:season', this.season); // one tiny key; cheap
@@ -1470,7 +1491,7 @@ export class WorldRoom {
     this.bounds = this.#computeBounds(); // refresh the camera bound (the world grows/shrinks)
     this.#bcast({ t: 'season', phase: this.season, bounds: this.bounds, giants: this.giants.map((g) => this.#giantPub(g)) }, null); // feel the clock turn + the gardeners' new spots (clients glide to them)
 
-    return { spawned: spawned.length, gone: gone.length, checkpointed, checkpointWrote };
+    return { spawned: ctx.spawned.length, gone: ctx.gone.size, checkpointed, checkpointWrote };
   }
 
   // Flush the dirty set to storage and stamp the checkpoint mark. Writes only the
@@ -1792,7 +1813,7 @@ export class WorldRoom {
   // burst of flowering plants (+ sometimes an anomaly) there, then rests on a cooldown.
   // In-memory + presence-driven (no storage); the blooms themselves are ordinary
   // spawned objects (ride the normal spawn write). Returns nothing; pushes to `spawned`.
-  #communion(now, spawned) {
+  #communion(now, ctx) {
     const live = [];
     for (const p of this.presencePos.values()) if (now - p.ts <= PRESENCE_STALE_MS) live.push(p);
     const active = new Set();
@@ -1804,9 +1825,9 @@ export class WorldRoom {
       if (active.has(key)) continue;     // one bloom-progress per patch per tick
       active.add(key);
       const c = (this.communion.get(key) || 0) + 1;
-      if (c >= COMMUNION_TICKS && this.objects.size + spawned.length < this.maxObjects - CEIL_TRIM) {
+      if (c >= COMMUNION_TICKS && this.objects.size + ctx.spawned.length < this.maxObjects - CEIL_TRIM) {
         this.communion.set(key, -COMMUNION_COOLDOWN);         // bloom, then rest
-        for (const o of this.#communionBloom(mx, my, now)) spawned.push(o);
+        for (const o of this.#communionBloom(mx, my, now)) ctx.spawn(o);
       } else this.communion.set(key, c);
     }
     // patches no longer shared cool off (negative = cooldown counts back up to 0)
@@ -2215,14 +2236,14 @@ export class WorldRoom {
   // pushes to `spawned`, a kill to `gone`, a rout (home jumps away) to `changed`.
   // Bounded: births stop at MAX_CREATURES; a kill never drops a kind below its floor
   // or the total below the baseline — so the population churns, never collapses.
-  #socialCreatures(now, spawned, gone, changed) {
+  #socialCreatures(now, ctx) {
     const creatures = [], kindCount = {};
     for (const o of this.objects.values()) {
       if (o.family !== 'creature' || o.held !== '') continue;
       creatures.push(o); kindCount[o.kind] = (kindCount[o.kind] || 0) + 1;
     }
     let total = creatures.length;
-    let pendingCre = 0; for (const s of spawned) if (s.family === 'creature') pendingCre++; // creature-only pending (floor refills) — NOT shed seeds/crystals/etc., so the mate cap is exact
+    let pendingCre = 0; for (const s of ctx.spawned) if (s.family === 'creature') pendingCre++; // creature-only pending (floor refills) — NOT shed seeds/crystals/etc., so the mate cap is exact
     const dead = new Set();
     for (const a of creatures) {
       if (dead.has(a.id)) continue;
@@ -2232,20 +2253,20 @@ export class WorldRoom {
         if (a.kind === b.kind) {
           if (d <= MATE_DIST && total + pendingCre < MAX_CREATURES &&  // count only pending CREATURES, not other lifecycle spawns this tick
               (kindCount[a.kind] || 0) < MAX_PER_SPECIES &&   // a kind can't breed past its ceiling — neither species hogs the cap
-              this.objects.size + spawned.length < this.maxObjects && Math.random() < MATE_CHANCE) {
-            spawned.push(this.#breed(a, b, now)); kindCount[a.kind] = (kindCount[a.kind] || 0) + 1; pendingCre++;
+              this.objects.size + ctx.spawned.length < this.maxObjects && Math.random() < MATE_CHANCE) {
+            ctx.spawn(this.#breed(a, b, now)); kindCount[a.kind] = (kindCount[a.kind] || 0) + 1; pendingCre++;
           }
         } else if (d <= FIGHT_DIST && Math.random() < FIGHT_CHANCE) {
           const loser = this.#strength(a) <= this.#strength(b) ? a : b;
           const winner = loser === a ? b : a;
           if (Math.random() < DEATH_CHANCE && (kindCount[loser.kind] || 0) > MIN_PER_SPECIES && total > MIN_CREATURES) {
-            dead.add(loser.id); gone.push(loser); kindCount[loser.kind]--; total--;
+            dead.add(loser.id); ctx.remove(loser); kindCount[loser.kind]--; total--;
             if (loser === a) { aFled = true; break; }
           } else {
             const fx = loser.x - winner.x, fy = loser.y - winner.y, fd = Math.hypot(fx, fy) || 1;
             loser.x += (fx / fd) * FLEE_DIST; loser.y += (fy / fd) * FLEE_DIST;
             this.#gridUpdate(loser);
-            if (!changed.includes(loser) && !gone.includes(loser)) changed.push(loser);
+            if (!ctx.isGone(loser)) ctx.change(loser);
             if (loser === a) { aFled = true; break; }   // a bolted — stop pairing it this tick
           }
         }
