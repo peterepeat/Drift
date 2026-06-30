@@ -10,7 +10,8 @@ import { Audio } from './audio.js';
 import { flingStep, ema, nudge, spring, deflectCircles } from './physics.js';
 import { wanderAt, drawCreature, creatureR, drawFish, fishR } from './creatures.js';
 import { drawGiant } from './giant.js';
-import { stoneRadius, anomalyRadius, crystalRadius, seedScale, plantRadius } from './shared/sizing.js';
+import { seedScale } from './shared/sizing.js';
+import { SPROUT_C, BIG_TREE_MAT, GIANT_R, shownMat, stoneSize, anomalyR, crystalR, formOf } from './forms.js';
 
 // ---- tuning constants -------------------------------------------------------
 const Z0 = 1.0, ZMIN = 0.2, ZMAX = 4.0;     // zoom = CSS px per world unit
@@ -23,7 +24,6 @@ const EDGE_MARGIN = 320;                      // how far past the furthest objec
 const EDGE_SOFT = 0.72;                        // fraction of the limit past which panning starts to resist
 const HIT_MIN = 26;                          // min tap radius in CSS px (accessibility)
 const HIT_PAD = 3, HIT_GROW = 1.18;          // grab area modestly exceeds the drawn form — easy to grab, but not so greedy it steals pans
-const BIG_TREE_MAT = 0.8;                     // plants this mature have ROOTED — immovable landmarks you can drag across to pan
 const LIFT_MS = 300, SETTLE_MS = 260;        // pickup / place timings (spec)
 const CARRY_SEND_MS = 50;                    // throttle for streaming a carried object
 const THROW_MIN = 180;                       // release speed (world units/s) below which a drag just places — no fling
@@ -37,8 +37,7 @@ const P_IN = 1500, P_OUT = 2500, P_IDLE = 2000; // bloom fade-in / fade-out / id
 // carried object to whoever is carrying it, so it reads that a PERSON is moving it.
 const SHARED_RADIUS = 620;                   // world units within which two presences share warmth
 const SHARED_BOOST = 3.2;                     // strength of the extra between-them bloom (intensifies the shared patch)
-const SPROUT_C = 0.14;                        // maturity below this renders as a seed (mirrors server)
-const GIANT_R = 150;                          // the journeyer's overall height in world units (~the old 5× creature mass)
+// SPROUT_C / BIG_TREE_MAT / GIANT_R now live in forms.js (the client form-const home)
 const GIANT_EASE = 0.4;                       // per-second retention for the giant's correction toward each broadcast spot
 const GIANT_VIS_SPEED = 13;                   // world u/s it WALKS along its heading between ticks (≈ GIANT_STEP/tick) — brisk, continuous motion (not rushed, never parked)
 const FOOT_FADE_MS = 4200;                    // a footprint fades this fast (so the giant doesn't track prints all over the world)
@@ -307,9 +306,7 @@ function updateLifts(now) {
 // (locally or remotely) or while it is settling. The world pass skips these.
 function isLifted(id) { return id === heldId || liftValue(id) > 0.002; }
 
-// ---- deterministic-from-seed sizing (never stored) --------------------------
-function stoneSize(o) { return o.r != null ? o.r : stoneRadius(o.seed); } // base from shared sizing; `r` once fused/split
-function anomalyR(o) { return anomalyRadius(o.seed, (o.kinds && o.kinds.length) || 1); } // ~18-32 wu; a fused hybrid grows with each kind
+// ---- deterministic-from-seed forms (footprints + render flags now in forms.js) ----
 // A plain anomaly draws its one kind; a fused hybrid layers each constituent kind
 // (offset in time + slightly shrunk, translucent) so its form reads as a luminous blend.
 function drawAnomalyForm(ctx, o, t, cx, cy, R) {
@@ -320,21 +317,10 @@ function drawAnomalyForm(ctx, o, t, cx, cy, R) {
   for (let i = 0; i < kinds.length; i++) PG.drawAnomaly(ctx, kinds[i], t + i * 1.7, cx, cy, R * (1 - i * 0.06));
   ctx.restore();
 }
-function crystalR(o) { return crystalRadius(o.seed); }   // small, ~6-13 wu
-// Smoothly-tweened lifecycle the renderer reads (eased toward server values so
-// the 60s growth steps don't pop). Falls back to the raw value before first tween.
-function shownMat(o) { return o._matShown != null ? o._matShown : (o.maturity || 0); }
+// Smoothly-tweened lifecycle the renderer reads (eased toward server values so the
+// 60s growth steps don't pop). shownMat lives in forms.js (the footprint needs it).
 function shownAged(o) { return o._agedShown != null ? o._agedShown : (o.aged || 0); }
-function objRadius(o) {
-  if (o.family === 'stone') return stoneSize(o);
-  if (o.family === 'anomaly') return anomalyR(o);
-  if (o.family === 'crystal') return crystalR(o);
-  if (o.family === 'giant') return GIANT_R * 0.5; // footprint for depth-sort (it draws its own shadow; never hit-tested)
-  if (o.family === 'creature') return creatureR(o.seed >>> 0, o.kind || 'crawler');
-  if (o.family === 'fish') return fishR(o.seed >>> 0);
-  const mat = shownMat(o);
-  return plantRadius(mat, o.seed, SPROUT_C); // plants present a larger tap target
-}
+function objRadius(o) { return formOf(o.family).sizeFn(o); } // per-family footprint — see forms.js
 // A creature's LIVE position: home (its stored x/y) + the deterministic wander
 // ANCHORED at wanderT0, so the offset is exactly zero at t0 and the creature sits ON
 // its home the instant it's placed — then drifts out on a new route (no snap). Heading
@@ -415,10 +401,7 @@ function posOf(o) {
 }
 // The biggest trees have ROOTED — they're immovable landmarks (never grabbed; you
 // drag straight across them to pan). Everything else can be picked up.
-function isMovable(o) {
-  if (o.family === 'seed') return shownMat(o) < BIG_TREE_MAT;
-  return true;
-}
+function isMovable(o) { return formOf(o.family).movable(o); } // a rooted big tree can't be lifted — see forms.js
 function stoneGeom(o) {
   const er = Math.min(0.95, o.handling * 0.04); // handling erodes the stone (PRD §3.2)
   if (!o._sg || o._sgEr !== er || o._sgR !== (o.r || 0)) { o._sg = PG.makeStone(o.seed >>> 0, stoneSize(o), er); o._sgEr = er; o._sgR = o.r || 0; } // regen on fuse/split
@@ -451,7 +434,7 @@ function paintObject(o, cx, cy, ang = 0) {
 // for a high upper-left light; plants root at their base, compact things sit below
 // centre. Anomalies (luminous, floating) and fliers (airborne) cast none/less.
 function paintGroundShadow(o, cx, cy, rad) {
-  if (o.family === 'anomaly' || o.family === 'fish' || o.family === 'giant') return; // fish are under the water; the giant draws its own foot shadow
+  if (!formOf(o.family).castsShadow) return; // anomalies float, fish are under the water, the giant draws its own foot shadow
   const rooted = o.family === 'seed' && shownMat(o) >= SPROUT_C;   // a plant roots at cy; everything else sits below centre
   const flier = o.family === 'creature' && (o.kind === 'flier');
   const baseY = rooted ? cy + rad * 0.12 : cy + rad * 0.42;
@@ -528,7 +511,7 @@ function drawObjectWorld(o) {
   // LOD only when over the detail budget (frameLodCut > 0, set in the cull pass): the
   // smallest-on-screen overflow draws as a cheap blob, everything else full. Plus a hard
   // sub-pixel floor (a thing under ~1.5px is invisible anyway). Anomalies/fish/giant: always full.
-  if (o.family !== 'anomaly' && o.family !== 'fish' && o.family !== 'giant') {
+  if (!formOf(o.family).alwaysFull) { // anomalies/fish/giant always draw full (never LOD-blobbed)
     const px = rad * camera.z;
     if (px < 1.5 || (frameLodCut > 0 && px < frameLodCut)) { drawLOD(o, cx, cy, rad); return; }
   }
@@ -967,7 +950,7 @@ function hitTest(w) {
   let pick = null, best = -Infinity;
   for (const o of objects.values()) {
     if (o.held) continue;
-    if (o.family === 'fish' || o.family === 'mark') continue; // fish swim free, marks are ground stains — neither pickable
+    if (!formOf(o.family).pickable) continue; // fish swim free, marks are ground stains — neither pickable
     const p = posOf(o);
     const d = Math.hypot(p.x - w.x, p.y - w.y);
     if (d > hitRadius(o)) continue;
@@ -1586,7 +1569,7 @@ function frame(now) {
   frameLodCut = 0;
   if (list.length > Q.detailBudget) {
     const sizes = [];
-    for (const o of list) { if (o.family === 'anomaly' || o.family === 'fish' || o.family === 'giant') continue; sizes.push(objRadius(o) * (o._depthScale || 1) * camera.z); }
+    for (const o of list) { if (formOf(o.family).alwaysFull) continue; sizes.push(objRadius(o) * (o._depthScale || 1) * camera.z); }
     if (sizes.length > Q.detailBudget) { sizes.sort((a, b) => b - a); frameLodCut = sizes[Q.detailBudget] || 0; }
   }
   // painter's depth by ground line; ties broken by id for a stable, deterministic order

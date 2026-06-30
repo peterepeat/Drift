@@ -7,8 +7,10 @@
 // desyncing what the world treats as water from what the client paints.
 import { POND_ASPECT, inPond, poolContaining, bankPoint, POND_BANK_PAD } from '../public/shared/geometry.js';
 import { POND_ASPECT as RENDER_POND_ASPECT } from '../public/render.js';
-import { stoneRadius, anomalyRadius, crystalRadius, seedScale } from '../public/shared/sizing.js';
+import { stoneRadius, anomalyRadius, crystalRadius, seedScale, plantRadius } from '../public/shared/sizing.js';
 import { rng } from '../public/drift-procgen.js';
+import { FORM, formOf, SPROUT_C, BIG_TREE_MAT, GIANT_R, stoneSize, anomalyR, crystalR, shownMat } from '../public/forms.js';
+import { creatureR, fishR } from '../public/creatures.js';
 import { MSG, IN, OUT, WIRE_OBJECT_FIELDS, FORBIDDEN_WIRE_FIELDS, isWireField, wireLeak, forbiddenLeak, scrubForbidden } from '../public/shared/protocol.js';
 import { FAMILIES, FAMILY_NAMES, familyOf } from '../public/shared/families.js';
 
@@ -123,6 +125,48 @@ check(['stone', 'anomaly', 'fish'].every((f) => !FAMILIES[f].grows && !FAMILIES[
 check(Object.isFrozen(FAMILIES) && Object.values(FAMILIES).every((e) => Object.isFrozen(e)), 'the family table + every entry are frozen');
 check(familyOf('stone') === FAMILIES.stone && familyOf('giant').drifts === false && familyOf('nonsense').tended === false,
   'familyOf returns the entry, and an unknown family gets the inert all-false default (never undefined → no tick crash)');
+
+// ---- forms.js: the CLIENT render registry (render half of the keystone) ----
+// First automated coverage of the client form layer (it was un-importable before).
+// Pins the per-family render flags + the footprint dispatch against the old client
+// branches, so a render-contract drift fails CI instead of only showing in-browser.
+check(SPROUT_C === 0.14 && GIANT_R === 150 && BIG_TREE_MAT === 0.8, 'client form consts hold (SPROUT_C=0.14 mirrors the server SPROUT; GIANT_R=150; BIG_TREE_MAT=0.8)');
+const FORM_EXPECTED = {
+  //          castsShadow  alwaysFull  pickable
+  stone:    [ true,        false,      true  ],
+  seed:     [ true,        false,      true  ],
+  anomaly:  [ false,       true,       true  ],
+  crystal:  [ true,        false,      true  ],
+  creature: [ true,        false,      true  ],
+  fish:     [ false,       true,       false ],
+  mark:     [ false,       false,      false ],
+  giant:    [ false,       true,       false ],
+};
+let formOk = true, formWhy = '';
+for (const [fam, [cs, af, pk]] of Object.entries(FORM_EXPECTED)) {
+  const f = formOf(fam);
+  if (f.castsShadow !== cs) { formOk = false; formWhy = `${fam}.castsShadow`; }
+  if (f.alwaysFull !== af) { formOk = false; formWhy = `${fam}.alwaysFull`; }
+  if (f.pickable !== pk) { formOk = false; formWhy = `${fam}.pickable`; }
+}
+check(formOk, `every drawable family's render flags match the old client branches (${formWhy || 'all match'})`);
+check(['anomaly', 'fish', 'giant'].every((f) => formOf(f).alwaysFull) && ['stone', 'seed', 'crystal', 'creature', 'mark'].every((f) => !formOf(f).alwaysFull), 'only anomaly/fish/giant skip LOD + the detail budget (always full)');
+check(!formOf('fish').pickable && !formOf('mark').pickable && ['stone', 'seed', 'anomaly', 'crystal', 'creature'].every((f) => formOf(f).pickable), 'fish + marks are not hit-tested; the object families are');
+// sizeFn — form-from-seed footprints, identical to the old objRadius dispatch
+check(formOf('stone').sizeFn({ seed: 1234 }) === stoneRadius(1234) && formOf('stone').sizeFn({ seed: 1, r: 42 }) === 42, 'stone footprint = stoneRadius(seed), or the stored r once fused/split');
+check(formOf('crystal').sizeFn({ seed: 7 }) === crystalRadius(7), 'crystal footprint = crystalRadius(seed)');
+check(formOf('anomaly').sizeFn({ seed: 7, kinds: ['a', 'b'] }) === anomalyRadius(7, 2) && formOf('anomaly').sizeFn({ seed: 7 }) === anomalyRadius(7, 1), 'anomaly footprint grows with the fused kind count');
+check(formOf('giant').sizeFn({}) === GIANT_R * 0.5, 'giant footprint = GIANT_R / 2');
+check(formOf('creature').sizeFn({ seed: 9, kind: 'flier' }) === creatureR(9, 'flier'), 'creature footprint = creatureR(seed, kind)');
+check(formOf('fish').sizeFn({ seed: 9 }) === fishR(9), 'fish footprint = fishR(seed)');
+check(formOf('seed').sizeFn({ seed: 5, maturity: 0.5 }) === plantRadius(0.5, 5, SPROUT_C), 'seed/plant footprint = plantRadius(shownMat, seed, SPROUT_C)');
+check(formOf('seed').sizeFn({ seed: 5, _matShown: 0.9, maturity: 0.2 }) === plantRadius(0.9, 5, SPROUT_C), 'the footprint reads the TWEENED maturity (_matShown), not the raw value');
+// movable — a rooted big tree can't be lifted
+check(formOf('seed').movable({ maturity: 0.5 }) === true && formOf('seed').movable({ maturity: 0.85 }) === false, 'a seed is movable until it roots (maturity >= BIG_TREE_MAT)');
+check(formOf('stone').movable({}) === true && formOf('giant').movable({}) === true, 'non-plant families are always movable');
+check(shownMat({ maturity: 0.3 }) === 0.3 && shownMat({ _matShown: 0.7, maturity: 0.3 }) === 0.7, 'shownMat prefers the tweened value, falls back to the raw maturity');
+check(Object.values(FORM).every((e) => Object.isFrozen(e)), 'every FORM entry is frozen (an immutable render contract)');
+check(formOf('nonsense').castsShadow === true && formOf('nonsense').pickable === true && formOf('nonsense').alwaysFull === false, 'an unknown family gets the plant-like default (no crash, matches the old fall-through)');
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
