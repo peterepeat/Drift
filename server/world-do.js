@@ -20,6 +20,8 @@
 // =============================================================================
 import { generateWorld, makeRecord, makeSeedRecord, makeAnomalyRecord, ANOMALY_KINDS, makeCrystalRecord, makeCreatureRecord, makeFishRecord, makeMarkRecord, CREATURE_KINDS, reseedAction, SEED_VERSION, rng, makeNoise } from './seed.js';
 import { FLOW_SEED, FLOW_SCALE, FLOW_REACH } from '../public/flow.js'; // shared with the client visual
+import { CATALOG as TUNE_CATALOG, coerce as tuneCoerce } from './tuning.js'; // operator panel: full knob catalogue + value coercion
+const TUNE_KIND = Object.fromEntries(TUNE_CATALOG.map((c) => [c.key, c.kind]));
 
 const TICK_MS = 60000;
 const HOLD_TIMEOUT_MS = 45000;            // reclaim a hold if its connection vanished
@@ -27,9 +29,9 @@ const COG_ALPHA = 0.2;                    // centre-of-gravity EMA weight
 
 // ---- growth tuning (per 60s tick) ------------------------------------------
 const SPROUT = 0.14;                      // maturity below this is still a seed
-const GROW_BASE = 0.0016;                 // maturity/tick unattended (~10h seed->full)
-const GROW_WARM = 0.055;                  // extra maturity/tick at heat=1 (~18min warm)
-const AGE_RATE = 0.0045;                  // aged/tick once mature (~hours of maturity)
+let GROW_BASE = 0.0016;                 // maturity/tick unattended (~10h seed->full)
+let GROW_WARM = 0.055;                  // extra maturity/tick at heat=1 (~18min warm)
+let AGE_RATE = 0.0045;                  // aged/tick once mature (~hours of maturity)
 const HEAT_DECAY = 0.80;                  // heat retained per tick when no warmth
 const HEAT_GAIN = 0.36;                   // heat added per nearby presence per tick
 const HEAT_RADIUS = 240;                  // world units a presence warms
@@ -94,7 +96,7 @@ const CHECKPOINT_MS = 30 * 60 * 1000;      // dirty-flush cadence (~30 min)
 // crossfades to the next over its last ~30%. Seasons modulate growth/aging
 // rates and the whole-frame colour grade — never the rules of interaction.
 const SEASON_KEYS = ['growing', 'turning', 'resting', 'rising'];
-const SEASON_PER_TICK = 4 / 480;          // full 4-season cycle ~8h of ticks (~2h/season)
+let SEASON_PER_TICK = 4 / 480;          // full 4-season cycle ~8h of ticks (~2h/season)
 const GROWTH_MULT = { growing: 1.0, turning: 0.25, resting: 0.0, rising: 0.6 };
 const AGE_MULT = { growing: 0.7, turning: 1.4, resting: 0.3, rising: 0.8 };
 const lerp = (a, b, t) => a + (b - a) * t;
@@ -109,8 +111,8 @@ const COMMUNION_R = 300;                  // two presences within this share a p
 const COMMUNION_TICKS = 2;                // sustained ticks of togetherness before it blooms
 const COMMUNION_COOLDOWN = 4;             // ticks a bloomed patch rests before it can bloom again
 // ---- anomalies (Family 4): rare, luminous, no lifecycle ---------------------
-const MAX_ANOMALIES = 4;                  // the world holds at most a few — seeing one is luck
-const ANOMALY_SPAWN_CHANCE = 0.03;        // per tick, when conditions allow
+let MAX_ANOMALIES = 4;                  // the world holds at most a few — seeing one is luck
+let ANOMALY_SPAWN_CHANCE = 0.03;        // per tick, when conditions allow
 const ANOMALY_SEASONS = { growing: true, rising: true }; // "new creation possible"
 const ANOMALY_RADIUS = 200;               // world units an anomaly influences
 const ANOMALY_GROW_BOOST = 0.02;          // extra maturity/tick for seeds near an anomaly
@@ -213,8 +215,8 @@ const MAX_PER_SPECIES = 60;               // ...nor past this (== MAX_CREATURES/
 // purposeful drift rather than a teleport. Authority stays server-side; motion stays
 // deterministic + zero per-frame sync. Held creatures are left alone.
 const CREATURE_DRIVES = ['feed', 'drink', 'rest', 'roam'];
-const CREATURE_STEP = 46;                 // world units the home migrates toward a goal per tick
-const CREATURE_SEEK_R = 720;              // how far a creature looks for an attractor
+let CREATURE_STEP = 46;                 // world units the home migrates toward a goal per tick
+let CREATURE_SEEK_R = 720;              // how far a creature looks for an attractor
 const CREATURE_ARRIVE = 42;               // stop this near the goal (graze/rest beside it, don't pile on)
 const CREATURE_DRIVE_TICKS = 5;           // a creature holds one drive ~this many ticks before it shifts
 // SPREAD (declustering at the SOURCE): each creature carries a stable, SEEDED affinity for every
@@ -222,7 +224,7 @@ const CREATURE_DRIVE_TICKS = 5;           // a creature holds one drive ~this ma
 // onto the single nearest one (the pile-up). A creature will favour "its" tree up to this many
 // world units farther than the true-nearest — one pile becomes a scatter across the grove.
 // (0 ⇒ pure nearest, the old behaviour. Deterministic ⇒ zero per-frame sync, no client change.)
-const CREATURE_PREF_SPREAD = 260;
+let CREATURE_PREF_SPREAD = 260;
 // ANTI-CROWD (Wave: declustering): a creature is pushed off its neighbours each tick so
 // the population spreads into a living scatter instead of piling into one dense blob.
 // Radius < MATE_DIST so two CAN still close enough to breed — it only stops the pile-up.
@@ -236,7 +238,7 @@ const CURIOSITY_STANDOFF = 95;            // it stops this far off (curious, not
 // OBSERVABLE while it follows you (its HOME drifts toward you each tick, at its own brisk-but-
 // natural pace — NOT glued to your viewport) and glows warm-red, the glow fading as the bond
 // wanes so you can SEE it end (then it drifts back to its own life). Re-attend to refresh.
-const BEFRIEND_MS = 6 * 60 * 1000;        // a bond lasts ~6 min — long enough to be a companion, short enough that its whole arc (form → follow → fade) is watchable
+let BEFRIEND_MS = 6 * 60 * 1000;        // a bond lasts ~6 min — long enough to be a companion, short enough that its whole arc (form → follow → fade) is watchable
 const CREATURE_FOLLOW_R = 1500;           // a bonded creature follows a person within this (beyond it, it just stays put + lives — no snap)
 const CREATURE_FOLLOW_STANDOFF = 70;      // ...and settles this close to its person
 const CREATURE_FOLLOW_STEP = 130;         // home units it closes toward its person per tick (≈3× a normal drive step — keeps up, but at its own pace, not glued)
@@ -246,8 +248,8 @@ const GIANT_STEP = 800;                   // world units it covers per tick — 
 const GIANT_MAX_HOPS = 5;                  // a tick resolves up to this many waypoints before settling — so a giant never burns a whole 60s tick standing still doing nothing
 const GIANT_TENDS_PER_TICK = 2;            // it can finish up to this many tending jobs in one tick (2× throughput in a cluster) — half the time per job, while its body animates calmly
 const GIANT_STUCK_TICKS = 4;              // no PROGRESS toward the goal this many ticks (e.g. a goal it can only circle) → give up + reroute (enough patience to round a pond first)
-const GIANT_REACH = 64;                   // close enough to tend its goal
-const GIANT_SIGHT = 1300;                 // how far it looks for something to tend (wide, so a big boulder is noticed from afar)
+let GIANT_REACH = 64;                   // close enough to tend its goal
+let GIANT_SIGHT = 1300;                 // how far it looks for something to tend (wide, so a big boulder is noticed from afar)
 const GIANT_ROAM = 2600;                  // legacy stroll radius (now it explores the whole world via the bounds — see #giantPickGoal)
 const GIANT_YIELD = 0.8;                   // a giant LEAVES a job to its companion if the companion is within this fraction of its own distance to it — so the closer one takes it and the pair spread out (no two-on-one pile-ups)
 const GIANT_PERSONAL = 500;                // if the two come within this, the one farther from its own territory peels off home — they keep room between them (no standing on top of each other)
@@ -265,14 +267,14 @@ const GIANT_SOW_CLEAR = 220;             // it SOWS a seed where there's no plan
 // at the floor a break is a NO-OP (the stone persists, never vanishes from breaking). A
 // fused/split stone carries a stored radius `r` (absent ⇒ the seed-derived base size);
 // the SHAPE is still regenerated from the seed.
-const GRIT_HANDLING = 26;                 // handled this many times, a stone is worn to grit and gone
+let GRIT_HANDLING = 26;                 // handled this many times, a stone is worn to grit and gone
 const MAX_STONE_R = 360;                  // floor for the fuse/settle grid-query bound (this.maxStoneR) — kept ≥ STONE_CAP_R so neighbour scans always cover the biggest rock
-const MIN_STONE_R = 8;                     // the smallest a stone breaks down to (≈2 √2-steps below the old 16 — a much smaller pebble); below ~MIN×1.35 (≈11) a break does nothing (the stone stays, never breaks to nothing)
+let MIN_STONE_R = 8;                     // the smallest a stone breaks down to (≈2 √2-steps below the old 16 — a much smaller pebble); below ~MIN×1.35 (≈11) a break does nothing (the stone stays, never breaks to nothing)
 // EQUILIBRIUM: the giant merges PEBBLES (r < EQ) it finds paired up, and breaks down only
 // BOULDERS LARGER than the (now generous) CAP — so a hand-built monolith up to CAP is left
 // standing, while a runaway boulder past it is walked back toward the middle.
-const STONE_EQ_R = 40;                     // "a decent stone" — at/above this the giant leaves it be (won't fuse it bigger)
-const STONE_CAP_R = 350;                   // the ceiling: hand-fusing caps here (≈5 √2-steps above the old 62 — a deliberate big rock), and the giant breaks down only stones LARGER than this
+let STONE_EQ_R = 40;                     // "a decent stone" — at/above this the giant leaves it be (won't fuse it bigger)
+let STONE_CAP_R = 350;                   // the ceiling: hand-fusing caps here (≈5 √2-steps above the old 62 — a deliberate big rock), and the giant breaks down only stones LARGER than this
 // Stone footprint in world units — base size from seed; `o.r` overrides once fused/split.
 function stoneRadius(seed) { return 12 + rng(seed >>> 0)() * 34; }      // MUST match the client's seed-derived base
 function stoneRadiusOf(o) { return o.r != null ? o.r : stoneRadius(o.seed); }
@@ -351,6 +353,29 @@ function seasonBlend(phase) {
   return { cur: SEASON_KEYS[i], next: SEASON_KEYS[(i + 1) % 4], fade: f };
 }
 
+// ---- runtime tuning registry (operator panel /admin/tuning) ----------------
+// The subset of knobs editable LIVE. Each captures its DEFAULT (for reset) plus a get/set
+// over the module binding, so the read-sites everywhere else stay untouched. The full
+// catalogue + metadata lives in server/tuning.js; this is just the live wiring.
+const TUNE_REG = {
+  GROW_BASE: { get: () => GROW_BASE, set: (v) => { GROW_BASE = v; }, def: GROW_BASE },
+  GROW_WARM: { get: () => GROW_WARM, set: (v) => { GROW_WARM = v; }, def: GROW_WARM },
+  AGE_RATE: { get: () => AGE_RATE, set: (v) => { AGE_RATE = v; }, def: AGE_RATE },
+  SEASON_PER_TICK: { get: () => SEASON_PER_TICK, set: (v) => { SEASON_PER_TICK = v; }, def: SEASON_PER_TICK },
+  MAX_ANOMALIES: { get: () => MAX_ANOMALIES, set: (v) => { MAX_ANOMALIES = v; }, def: MAX_ANOMALIES },
+  ANOMALY_SPAWN_CHANCE: { get: () => ANOMALY_SPAWN_CHANCE, set: (v) => { ANOMALY_SPAWN_CHANCE = v; }, def: ANOMALY_SPAWN_CHANCE },
+  CREATURE_STEP: { get: () => CREATURE_STEP, set: (v) => { CREATURE_STEP = v; }, def: CREATURE_STEP },
+  CREATURE_SEEK_R: { get: () => CREATURE_SEEK_R, set: (v) => { CREATURE_SEEK_R = v; }, def: CREATURE_SEEK_R },
+  CREATURE_PREF_SPREAD: { get: () => CREATURE_PREF_SPREAD, set: (v) => { CREATURE_PREF_SPREAD = v; }, def: CREATURE_PREF_SPREAD },
+  BEFRIEND_MS: { get: () => BEFRIEND_MS, set: (v) => { BEFRIEND_MS = v; }, def: BEFRIEND_MS },
+  GIANT_REACH: { get: () => GIANT_REACH, set: (v) => { GIANT_REACH = v; }, def: GIANT_REACH },
+  GIANT_SIGHT: { get: () => GIANT_SIGHT, set: (v) => { GIANT_SIGHT = v; }, def: GIANT_SIGHT },
+  GRIT_HANDLING: { get: () => GRIT_HANDLING, set: (v) => { GRIT_HANDLING = v; }, def: GRIT_HANDLING },
+  MIN_STONE_R: { get: () => MIN_STONE_R, set: (v) => { MIN_STONE_R = v; }, def: MIN_STONE_R },
+  STONE_EQ_R: { get: () => STONE_EQ_R, set: (v) => { STONE_EQ_R = v; }, def: STONE_EQ_R },
+  STONE_CAP_R: { get: () => STONE_CAP_R, set: (v) => { STONE_CAP_R = v; }, def: STONE_CAP_R },
+};
+
 export class WorldRoom {
   constructor(state, env) {
     this.state = state;
@@ -407,6 +432,8 @@ export class WorldRoom {
     this.season = (await this.state.storage.get('meta:season')) || 0;
     this.heat = (await this.state.storage.get('field:heat')) || null; // rebuilt lazily if absent
     this.lastCheckpoint = (await this.state.storage.get('meta:checkpoint')) || 0;
+    this.tuneOverrides = (await this.state.storage.get('meta:tuning')) || {}; // operator-panel overrides, re-applied over the defaults each load
+    for (const [k, v] of Object.entries(this.tuneOverrides)) if (TUNE_REG[k]) TUNE_REG[k].set(v);
     // Seed a fresh world, OR reseed once if this world was left by an older generator
     // (version-gated; stamps the new version so it never loops). This is how a
     // deployed generator change reaches the live world — no admin key, no wipe route.
@@ -522,6 +549,28 @@ export class WorldRoom {
         this.#send(ws, state);
       }
       return Response.json({ ok: true, seeded: n, was: before, forced: force });
+    }
+
+    // Operator tuning panel. GET = read the whole catalogue (no key, values only). POST
+    // ?key=&value= sets one LIVE knob; it's coerced, applied to the running world, and the
+    // override persisted (re-applied on every load). Gated for any mutation.
+    if (url.pathname === '/admin/tuning') {
+      if (request.method === 'GET') return Response.json(this.#tuningState());
+      if (!this.#adminOk(request)) return Response.json({ ok: false, error: 'forbidden' }, { status: 403 });
+      const key = url.searchParams.get('key'), reg = TUNE_REG[key];
+      if (!reg) return Response.json({ ok: false, error: 'unknown or non-live knob' }, { status: 400 });
+      const v = tuneCoerce(TUNE_KIND[key], url.searchParams.get('value'));
+      if (typeof v !== 'number' || !Number.isFinite(v)) return Response.json({ ok: false, error: 'bad value' }, { status: 400 });
+      reg.set(v); this.tuneOverrides[key] = v; await this.state.storage.put('meta:tuning', this.tuneOverrides);
+      return Response.json({ ok: true, key, value: String(reg.get()) });
+    }
+    if (url.pathname === '/admin/tuning/reset') {   // POST ?key= resets one knob; no key resets ALL to defaults
+      if (!this.#adminOk(request)) return Response.json({ ok: false, error: 'forbidden' }, { status: 403 });
+      const key = url.searchParams.get('key');
+      if (key) { const reg = TUNE_REG[key]; if (!reg) return Response.json({ ok: false, error: 'unknown knob' }, { status: 400 }); reg.set(reg.def); delete this.tuneOverrides[key]; }
+      else { for (const k of Object.keys(TUNE_REG)) TUNE_REG[k].set(TUNE_REG[k].def); this.tuneOverrides = {}; }
+      await this.state.storage.put('meta:tuning', this.tuneOverrides);
+      return Response.json({ ok: true, key: key || 'all', value: (key && TUNE_REG[key]) ? String(TUNE_REG[key].get()) : undefined });
     }
 
     // Ops/testing only: advance the world by N ticks immediately. Gated by ADMIN_KEY.
@@ -725,6 +774,17 @@ export class WorldRoom {
 
   #adminOk(request) {
     return this.env.ADMIN_KEY && request.headers.get('x-admin-key') === this.env.ADMIN_KEY;
+  }
+
+  // The operator-panel tuning view: every catalogued knob with its current value (live knobs
+  // report the running value; the rest report their code default) and whether it's overridden.
+  #tuningState() {
+    return { knobs: TUNE_CATALOG.map((c) => ({
+      key: c.key, where: c.where, group: c.group, label: c.label, default: c.default,
+      curated: c.curated, kind: c.kind, min: c.min, max: c.max, note: c.note, live: c.live,
+      value: (c.live && TUNE_REG[c.key]) ? String(TUNE_REG[c.key].get()) : c.default,
+      overridden: !!(this.tuneOverrides && this.tuneOverrides[c.key] !== undefined),
+    })) };
   }
 
   // Public projection of an object (FORM derived from seed; no visual data).

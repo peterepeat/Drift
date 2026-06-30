@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="robots" content="noindex, nofollow" />
+<title>Drift · operator</title>
+<style>
+  :root {
+    --bg: #14130f; --panel: #1c1b16; --panel2: #232118; --line: #34312a;
+    --ink: #e8e3d6; --dim: #9a948420; --mut: #9a9484; --accent: #c8b88a;
+    --warn: #d98a6a; --danger: #d96a6a; --ok: #9bbf7a; --blue: #82bee9;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  a { color: var(--blue); }
+  .wrap { max-width: 920px; margin: 0 auto; padding: 22px 18px 80px; }
+  h1 { font-size: 15px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--accent); margin: 0 0 2px; }
+  .sub { color: var(--mut); margin: 0 0 18px; font-size: 12px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px 16px; margin: 0 0 14px; }
+  section > h2 { font-size: 12px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--mut); margin: 0 0 12px; display: flex; align-items: center; gap: 8px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  button { font: inherit; color: var(--ink); background: var(--panel2); border: 1px solid var(--line);
+    border-radius: 7px; padding: 6px 12px; cursor: pointer; transition: border-color .15s, background .15s; }
+  button:hover { border-color: var(--accent); }
+  button.danger { color: var(--danger); border-color: #4a2c2c; }
+  button.danger:hover { background: #2a1b1b; border-color: var(--danger); }
+  button.go { color: var(--ok); border-color: #2f3f24; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  input, select { font: inherit; color: var(--ink); background: #100f0c; border: 1px solid var(--line);
+    border-radius: 6px; padding: 5px 8px; }
+  input[type=number] { width: 96px; }
+  input[type=password], input.k { width: 240px; }
+  .stat { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; }
+  .stat .b { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  .stat .b .n { font-size: 19px; color: var(--ink); }
+  .stat .b .l { font-size: 11px; color: var(--mut); letter-spacing: .06em; }
+  .note { color: var(--mut); font-size: 11.5px; margin: 8px 0 0; }
+  .danger-note { color: var(--warn); }
+  .log { background: #100f0c; border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px;
+    margin-top: 10px; min-height: 20px; color: var(--mut); font-size: 12px; white-space: pre-wrap;
+    max-height: 130px; overflow: auto; }
+  .pill { font-size: 11px; padding: 1px 7px; border-radius: 20px; border: 1px solid var(--line); color: var(--mut); }
+  .grp { margin: 12px 0 0; }
+  .grp > .gh { color: var(--accent); font-size: 12px; letter-spacing: .08em; text-transform: uppercase;
+    cursor: pointer; user-select: none; padding: 5px 0; border-top: 1px solid var(--line); }
+  .grp.star > .gh { color: var(--ok); }
+  .knob { display: grid; grid-template-columns: 1fr 110px 84px 58px; gap: 8px; align-items: center;
+    padding: 4px 0; border-bottom: 1px dotted var(--dim); }
+  .knob .kl { color: var(--ink); }
+  .knob .kl small { color: var(--mut); display: block; font-size: 10.5px; }
+  .knob .kd { color: var(--mut); font-size: 11px; text-align: right; }
+  .knob.dirty input { border-color: var(--accent); }
+  .knob.nolive input { opacity: .6; }
+  .hidden { display: none; }
+  .keybar { position: sticky; top: 0; background: var(--bg); padding: 8px 0 10px; z-index: 5;
+    border-bottom: 1px solid var(--line); margin-bottom: 14px; }
+  .keybar .ok { color: var(--ok); } .keybar .no { color: var(--warn); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Drift · operator</h1>
+  <p class="sub">A private control surface for the one live world. Viewing is open; every change needs the admin key.</p>
+
+  <div class="keybar row">
+    <span>admin key</span>
+    <input class="k" id="key" type="password" placeholder="paste ADMIN_KEY" autocomplete="off" />
+    <button id="keysave">remember</button>
+    <span id="keystat" class="note"></span>
+  </div>
+
+  <section>
+    <h2>World <span class="pill" id="conn">—</span></h2>
+    <div class="stat" id="stat"></div>
+    <p class="note">Auto-refreshes from <code>/status</code> (no key needed). Season cycles growing → turning → resting → rising.</p>
+  </section>
+
+  <section>
+    <h2>Fast-forward <span class="pill">accelerated tick</span></h2>
+    <div class="row">
+      <button data-n="10">+10 ticks</button>
+      <button data-n="100">+100 ticks</button>
+      <button data-n="500">+500 ticks</button>
+      <button id="ffrun" class="go">▶ run continuously</button>
+      <span class="note" id="ffrate"></span>
+    </div>
+    <p class="note">One tick = 60s of world time. Continuous mode runs 200 ticks/s (≈12000× real-time) — great for watching long-term emergence and as a load test. It's the whole shared world, but that's just you. Cumulative <code>objWrites</code> shown so you can watch the write cost.</p>
+    <div class="log" id="fflog"></div>
+  </section>
+
+  <section>
+    <h2>Focus labels <span class="pill">debug</span></h2>
+    <div class="row">
+      <a id="focuslink" href="/?focus=1" target="_blank"><button>open world with focus labels ↗</button></a>
+      <span class="note">A word under each creature naming its focus (feed/drink/rest/roam/follow). Press <b>f</b> in-world to toggle.</span>
+    </div>
+  </section>
+
+  <section>
+    <h2>Load test <span class="pill">fill</span></h2>
+    <div class="row">
+      <span>spawn</span>
+      <input id="filln" type="number" value="2000" min="1" max="20000" />
+      <span>dormant seeds toward the ceiling</span>
+      <button id="fillgo">fill</button>
+    </div>
+    <div class="log" id="filllog"></div>
+  </section>
+
+  <section style="border-color:#4a2c2c">
+    <h2 style="color:var(--danger)">Reseed <span class="pill" style="border-color:#4a2c2c;color:var(--danger)">destructive · irreversible</span></h2>
+    <p class="note danger-note">A reseed DELETES every object anyone has built and regenerates the world from scratch. There is no undo. The season clock and checkpoint survive; everything placed is gone.</p>
+    <div class="row">
+      <input id="reseedc" class="k" placeholder='type RESEED to confirm' autocomplete="off" />
+      <button id="reseedgo" class="danger" disabled>reseed the world</button>
+    </div>
+    <div class="log" id="reseedlog"></div>
+  </section>
+
+  <section>
+    <h2>Tuning <span class="pill" id="tunestat">—</span></h2>
+    <div class="row" style="margin-bottom:8px">
+      <input id="tunefilter" placeholder="filter knobs…" style="width:200px" />
+      <button id="tunereload">reload</button>
+      <button id="tuneresetall" class="danger">reset ALL to defaults</button>
+    </div>
+    <div id="tune"></div>
+    <p class="note">Server simulation knobs apply live to the running world. Client render/feel knobs marked <span class="pill">reload</span> take effect when a world tab reloads. Every knob shows its default and a reset.</p>
+  </section>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const keyEl = $('#key');
+try { keyEl.value = localStorage.getItem('drift_admin_key') || ''; } catch {}
+$('#keysave').onclick = () => { try { localStorage.setItem('drift_admin_key', keyEl.value.trim()); } catch {} reflectKey(); };
+function reflectKey() { $('#keystat').innerHTML = keyEl.value.trim() ? '<span style="color:var(--ok)">key set — changes enabled</span>' : '<span style="color:var(--warn)">no key — viewing only</span>'; }
+keyEl.oninput = reflectKey; reflectKey();
+const KEY = () => ({ 'x-admin-key': keyEl.value.trim() });
+function log(el, msg, cls) { const e = $(el); e.innerHTML = '<span style="color:var(--' + (cls || 'mut') + ')">' + msg + '</span>'; }
+
+async function post(path) {
+  if (!keyEl.value.trim()) throw new Error('paste the admin key first');
+  const r = await fetch(path, { method: 'POST', headers: KEY() });
+  if (r.status === 403) throw new Error('403 — wrong admin key');
+  if (!r.ok) throw new Error(r.status + ' ' + (await r.text()).slice(0, 120));
+  return r.json();
+}
+
+// ---- status ----------------------------------------------------------------
+const SEASONS = ['growing', 'turning', 'resting', 'rising'];
+async function refresh() {
+  try {
+    const r = await fetch('/status'); const s = await r.json();
+    $('#conn').textContent = 'live'; $('#conn').style.color = 'var(--ok)';
+    const seasonName = SEASONS[Math.floor(s.season) % 4];
+    const ttl = Math.max(0, Math.round((s.alarmAt - s.now) / 1000));
+    $('#stat').innerHTML = box('objects', s.objects) + box('creatures', s.creatures)
+      + box('season', seasonName + ' <small style="color:var(--mut)">' + s.season.toFixed(1) + '</small>')
+      + box('seedVersion', s.seedVersion) + box('next tick', ttl + 's');
+  } catch (e) { $('#conn').textContent = 'offline'; $('#conn').style.color = 'var(--warn)'; }
+}
+function box(l, n) { return '<div class="b"><div class="n">' + n + '</div><div class="l">' + l + '</div></div>'; }
+refresh(); setInterval(refresh, 3000);
+
+// ---- fast-forward ----------------------------------------------------------
+let ffWrites = 0, ffTicks = 0;
+async function tick(n) {
+  try {
+    const r = await post('/admin/tick?n=' + n);
+    ffTicks += n; ffWrites += (r.objWrites || 0);
+    log('#fflog', '+' + n + ' ticks · season ' + (r.season != null ? r.season.toFixed(1) : '?')
+      + ' · this burst objWrites ' + (r.objWrites ?? '?') + ' · session ticks ' + ffTicks + ' / objWrites ' + ffWrites, 'ok');
+    refresh();
+  } catch (e) { log('#fflog', e.message, 'warn'); throw e; }
+}
+document.querySelectorAll('[data-n]').forEach((b) => b.onclick = () => tick(+b.dataset.n));
+let ffTimer = null;
+$('#ffrun').onclick = function () {
+  if (ffTimer) { clearInterval(ffTimer); ffTimer = null; this.textContent = '▶ run continuously'; this.classList.add('go'); $('#ffrate').textContent = ''; return; }
+  this.textContent = '⏸ stop'; this.classList.remove('go'); $('#ffrate').textContent = '≈12000× — running…';
+  ffTimer = setInterval(() => tick(200).catch(() => { clearInterval(ffTimer); ffTimer = null; $('#ffrun').textContent = '▶ run continuously'; $('#ffrun').classList.add('go'); $('#ffrate').textContent = ''; }), 1000);
+};
+
+// ---- fill (load test) ------------------------------------------------------
+$('#fillgo').onclick = async () => {
+  try { const n = +$('#filln').value; const r = await post('/admin/fill?n=' + n);
+    log('#filllog', 'spawned ' + (r.spawned ?? n) + ' · objects now ' + (r.objects ?? '?'), 'ok'); refresh();
+  } catch (e) { log('#filllog', e.message, 'warn'); }
+};
+
+// ---- reseed (guarded) ------------------------------------------------------
+const rc = $('#reseedc'), rg = $('#reseedgo');
+rc.oninput = () => { rg.disabled = rc.value.trim() !== 'RESEED'; };
+rg.onclick = async () => {
+  if (!confirm('Really DELETE the entire world and regenerate it? This cannot be undone.')) return;
+  try { await post('/admin/seed?force=1'); log('#reseedlog', 'world reseeded — every object regenerated', 'ok'); rc.value = ''; rg.disabled = true; refresh(); }
+  catch (e) { log('#reseedlog', e.message, 'warn'); }
+};
+
+// ---- tuning ----------------------------------------------------------------
+let knobs = [];
+async function loadTuning() {
+  try {
+    const r = await fetch('/admin/tuning'); if (!r.ok) throw new Error('' + r.status);
+    const data = await r.json(); knobs = data.knobs || [];
+    $('#tunestat').textContent = knobs.length + ' knobs'; $('#tunestat').style.color = 'var(--mut)';
+    renderTuning();
+  } catch (e) {
+    $('#tunestat').textContent = 'backend not deployed'; $('#tunestat').style.color = 'var(--warn)';
+    $('#tune').innerHTML = '<p class="note">Tuning backend not reachable — the running world may predate the tuning routes (redeploy), or it\'s restarting. Hit reload.</p>';
+  }
+}
+function renderTuning() {
+  const q = $('#tunefilter').value.trim().toLowerCase();
+  const shown = knobs.filter((k) => !q || (k.key + ' ' + k.label + ' ' + (k.note || '')).toLowerCase().includes(q));
+  const live = shown.filter((k) => k.live);
+  const curated = shown.filter((k) => !k.live && k.curated);
+  const rest = shown.filter((k) => !k.live && !k.curated);
+  const groups = {};
+  for (const k of rest) (groups[k.group] = groups[k.group] || []).push(k);
+  let html = '';
+  if (live.length) html += grpHtml('⚡ editable live', live, true, true);
+  if (curated.length) html += grpHtml('★ common (code-level)', curated, false, false);
+  for (const g of Object.keys(groups).sort()) html += grpHtml(g, groups[g], false, false);
+  $('#tune').innerHTML = html || '<p class="note">no knobs match</p>';
+  $('#tune').querySelectorAll('.knob').forEach(wire);
+}
+function grpHtml(name, ks, star, open) {
+  return '<div class="grp' + (star ? ' star' : '') + '"><div class="gh" data-toggle>' + (open ? '▾ ' : '▸ ') + name + ' (' + ks.length + ')</div>'
+    + '<div class="gbody' + (open ? '' : ' hidden') + '">' + ks.map(knobHtml).join('') + '</div></div>';
+}
+function knobHtml(k) {
+  const live = k.live !== false;
+  return '<div class="knob' + (live ? '' : ' nolive') + (k.overridden ? ' dirty' : '') + '" data-key="' + k.key + '">'
+    + '<div class="kl">' + k.label + (live ? '' : ' <span class="pill">code-level</span>') + '<small>' + (k.note || '') + '</small></div>'
+    + '<input value="' + esc(k.value) + '" data-input ' + (live ? '' : 'disabled') + ' />'
+    + '<div class="kd">def ' + esc(k.default) + '</div>'
+    + '<button data-reset ' + (live ? '' : 'disabled') + '>reset</button></div>';
+}
+function esc(v) { return String(v).replace(/"/g, '&quot;').replace(/</g, '&lt;'); }
+function wire(row) {
+  const key = row.dataset.key, input = row.querySelector('[data-input]');
+  const orig = input.value;
+  input.addEventListener('input', () => row.classList.toggle('dirty', input.value !== orig));
+  input.addEventListener('change', async () => {
+    try { await post('/admin/tuning?key=' + encodeURIComponent(key) + '&value=' + encodeURIComponent(input.value));
+      row.classList.remove('dirty'); refresh();
+    } catch (e) { alert(e.message); }
+  });
+  row.querySelector('[data-reset]').onclick = async () => {
+    try { const r = await post('/admin/tuning/reset?key=' + encodeURIComponent(key));
+      if (r && r.value != null) input.value = r.value; row.classList.remove('dirty');
+    } catch (e) { alert(e.message); }
+  };
+}
+$('#tune').addEventListener('click', (e) => { const t = e.target.closest('[data-toggle]'); if (!t) return;
+  const body = t.nextElementSibling; body.classList.toggle('hidden'); t.textContent = (body.classList.contains('hidden') ? '▸ ' : '▾ ') + t.textContent.slice(2); });
+$('#tunefilter').oninput = renderTuning;
+$('#tunereload').onclick = loadTuning;
+$('#tuneresetall').onclick = async () => {
+  if (!confirm('Reset ALL knobs to their defaults?')) return;
+  try { await post('/admin/tuning/reset'); loadTuning(); } catch (e) { alert(e.message); }
+};
+loadTuning();
+</script>
+</body>
+</html>
