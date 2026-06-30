@@ -80,6 +80,113 @@ check(st && offWhitelist([st]) === null, `the object_state delta carries ONLY wh
 check(st && st.held === true && st.token === undefined && st.heldConn === undefined, 'a pickup broadcast carries boolean held + NO token/heldConn');
 check(st && st.heldBy === A.pid, "the carried object is tagged with the carrier's EPHEMERAL pid (heldBy), not the token");
 
+// object_state OPTIONAL-FIELD deltas (roll/bounce/glowUntil+glowHue/tameUntil/kinds): drive each
+// real interaction over the wire so offWhitelist() runs against a delta that ACTUALLY carries the
+// optional field — otherwise a future un-whitelisted key stamped on one of these paths ships green.
+// A is the dropper; capture on B. Giants OFF so they can't fuse/move our stones mid-test. Each
+// interaction sits on its own far-apart, DRY coord (all outside every pond) so they can't cross-trigger.
+await admin('/admin/giant?off=1');
+const pond0 = ws0.pools[0]; // the central pond {0,0,r:350} — a stone dropped here rolls to the bank
+// the latest post-connect object_new of a family (+ optional kind) near a coord (spawned objects
+// arrive as object_new on A); kind disambiguates two objects too close for the coord tolerance.
+const newOf = (ws, fam, near, tol = 40, kind = null) =>
+  [...ws.msgs].reverse().find((m) => m.t === 'object_new' && m.o && m.o.family === fam
+    && (!kind || m.o.kind === kind)
+    && (!near || (Math.abs(m.o.x - near.x) <= tol && Math.abs(m.o.y - near.y) <= tol)))?.o;
+
+// (1) roll=1 — a free seed stone dropped into open water rolls to the bank (#onPlace → #rollStoneFromWater).
+//     The drop must land in OPEN water clear of any free stone, else the stone FUSES instead of rolling
+//     (the central pond's heart clusters seed stones, so the bare centre isn't reliably clear) — find a
+//     clear in-pond point from ws0 (deterministic, robust to seed/sizing changes).
+const stones = ws0.objects.filter((o) => o.family === 'stone' && o.held === false);
+const ry0 = pond0.r * 0.7; // the pond is a squashed ellipse (POND_ASPECT)
+let rollDrop = null;
+for (const [dx, dy] of [[0, 0], [0, 130], [0, -130], [150, 0], [-150, 0], [90, 90], [-90, -90], [90, -90], [180, 0]]) {
+  const x = pond0.x + dx, y = pond0.y + dy;
+  if ((dx * dx) / (pond0.r * pond0.r) + (dy * dy) / (ry0 * ry0) <= 0.85 && !stones.some((s) => Math.hypot(s.x - x, s.y - y) < 60)) { rollDrop = { x, y }; break; }
+}
+check(stones.length >= 3, `the seed gives >=3 free stones to drive roll/bounce (${stones.length})`);
+check(!!rollDrop, 'found an open-water point in the central pond for the roll drop (clear of seed stones)');
+if (stones.length >= 3 && rollDrop) {
+  const sRoll = stones[0].id, sBounce = stones[1].id, sBouncer = stones[2].id;
+  await admin(`/admin/place?id=${sRoll}&x=-2000&y=-2000`); // park on dry ground first
+  await wait(80);
+  A.send(JSON.stringify({ t: 'pickup', id: sRoll, token: 'idy-roll', ts: Date.now() }));
+  await wait(120);
+  A.send(JSON.stringify({ t: 'place', id: sRoll, token: 'idy-roll', x: rollDrop.x, y: rollDrop.y, ts: Date.now() }));
+  await wait(180);
+  const stR = lastOf(B, 'object_state', sRoll);
+  check(stR && stR.roll === 1, `a stone dropped in the central pond broadcasts roll=1 (${stR ? stR.roll : 'no delta'})`);
+  check(stR && offWhitelist([stR]) === null, `the roll delta carries ONLY whitelisted keys (${stR ? offWhitelist([stR]) || 'clean' : 'no delta'})`);
+  check(stR && leak([stR]) === null, `the roll delta leaks no raw field (${stR ? leak([stR]) || 'clean' : 'no delta'})`);
+
+  // (2) bounce=1 — a stone dropped onto an AT-CAP stone bounces off (kept), not consumed
+  await admin(`/admin/place?id=${sBounce}&x=-2000&y=2000&r=350`); // r=350 >= STONE_CAP_R-0.5 → at cap
+  await admin(`/admin/place?id=${sBouncer}&x=-2000&y=2000`);
+  await wait(80);
+  A.send(JSON.stringify({ t: 'pickup', id: sBouncer, token: 'idy-bnc', ts: Date.now() }));
+  await wait(120);
+  A.send(JSON.stringify({ t: 'place', id: sBouncer, token: 'idy-bnc', x: -2000, y: 2000, ts: Date.now() }));
+  await wait(180);
+  const stB = lastOf(B, 'object_state', sBouncer);
+  check(stB && stB.bounce === 1, `a stone dropped on an at-cap stone broadcasts bounce=1 (${stB ? stB.bounce : 'no delta'})`);
+  check(stB && offWhitelist([stB]) === null, `the bounce delta carries ONLY whitelisted keys (${stB ? offWhitelist([stB]) || 'clean' : 'no delta'})`);
+  check(stB && leak([stB]) === null, `the bounce delta leaks no raw field (${stB ? leak([stB]) || 'clean' : 'no delta'})`);
+}
+
+// (3) glowUntil+glowHue — a rotor (non-heart) anomaly dropped onto a free creature glows IT (the creature)
+await admin('/admin/creature?x=1500&y=1500&kind=flier');
+await admin('/admin/anomaly?x=1500&y=1500&kind=rotor');
+await wait(200);
+const glowCreature = newOf(A, 'creature', { x: 1500, y: 1500 }), glowAnom = newOf(A, 'anomaly', { x: 1500, y: 1500 });
+check(!!(glowCreature && glowAnom), 'spawned a creature + rotor anomaly for the glow path');
+if (glowCreature && glowAnom) {
+  A.send(JSON.stringify({ t: 'pickup', id: glowAnom.id, token: 'idy-glow', ts: Date.now() }));
+  await wait(120);
+  A.send(JSON.stringify({ t: 'place', id: glowAnom.id, token: 'idy-glow', x: 1500, y: 1500, ts: Date.now() }));
+  await wait(180);
+  const gst = lastOf(B, 'object_state', glowCreature.id); // the buff lands on the CREATURE, not the anomaly
+  check(gst && typeof gst.glowUntil === 'number' && gst.glowUntil > Date.now() && typeof gst.glowHue === 'number',
+    `a glowed creature broadcasts glowUntil+glowHue (${gst ? `${gst.glowUntil},${gst.glowHue}` : 'no delta'})`);
+  check(gst && offWhitelist([gst]) === null, `the glow delta carries ONLY whitelisted keys (${gst ? offWhitelist([gst]) || 'clean' : 'no delta'})`);
+  check(gst && leak([gst]) === null, `the glow delta leaks no raw field (${gst ? leak([gst]) || 'clean' : 'no delta'})`);
+}
+
+// (4) tameUntil — a heart anomaly dropped onto a free creature tames it
+await admin('/admin/creature?x=-1500&y=1500&kind=flier');
+await admin('/admin/anomaly?x=-1500&y=1500&kind=heart');
+await wait(200);
+const tameCreature = newOf(A, 'creature', { x: -1500, y: 1500 }), tameAnom = newOf(A, 'anomaly', { x: -1500, y: 1500 });
+check(!!(tameCreature && tameAnom), 'spawned a creature + heart anomaly for the tame path');
+if (tameCreature && tameAnom) {
+  A.send(JSON.stringify({ t: 'pickup', id: tameAnom.id, token: 'idy-tame', ts: Date.now() }));
+  await wait(120);
+  A.send(JSON.stringify({ t: 'place', id: tameAnom.id, token: 'idy-tame', x: -1500, y: 1500, ts: Date.now() }));
+  await wait(180);
+  const tst = lastOf(B, 'object_state', tameCreature.id);
+  check(tst && typeof tst.tameUntil === 'number' && tst.tameUntil > Date.now(), `a tamed creature broadcasts tameUntil (${tst ? tst.tameUntil : 'no delta'})`);
+  check(tst && offWhitelist([tst]) === null, `the tame delta carries ONLY whitelisted keys (${tst ? offWhitelist([tst]) || 'clean' : 'no delta'})`);
+  check(tst && leak([tst]) === null, `the tame delta leaks no raw field (${tst ? leak([tst]) || 'clean' : 'no delta'})`);
+}
+
+// (5) kinds — fuse two DISTINCT-kind anomalies; the survivor broadcasts a hybrid kinds[] (len>1)
+await admin('/admin/anomaly?x=-1000&y=-1000&kind=point'); // survivor/target
+await admin('/admin/anomaly?x=-1010&y=-1000&kind=heart'); // dropped (distinct kind; dx=10 < ANOM_TOUCH_R=76)
+await wait(200);
+const fuseTarget = newOf(A, 'anomaly', { x: -1000, y: -1000 }, 40, 'point'), fuseDrop = newOf(A, 'anomaly', { x: -1010, y: -1000 }, 40, 'heart');
+check(!!(fuseTarget && fuseDrop && fuseTarget.id !== fuseDrop.id), 'spawned a point + heart anomaly for the kinds-fuse path');
+if (fuseTarget && fuseDrop && fuseTarget.id !== fuseDrop.id) {
+  A.send(JSON.stringify({ t: 'pickup', id: fuseDrop.id, token: 'idy-fuse', ts: Date.now() }));
+  await wait(120);
+  A.send(JSON.stringify({ t: 'place', id: fuseDrop.id, token: 'idy-fuse', x: -1000, y: -1000, ts: Date.now() }));
+  await wait(180);
+  const fst = lastOf(B, 'object_state', fuseTarget.id); // kinds rides the SURVIVOR (the dropped one is consumed)
+  check(fst && Array.isArray(fst.kinds) && fst.kinds.length > 1, `a fused anomaly broadcasts a hybrid kinds[] (${fst ? JSON.stringify(fst.kinds) : 'no delta'})`);
+  check(fst && offWhitelist([fst]) === null, `the fused delta carries ONLY whitelisted keys (${fst ? offWhitelist([fst]) || 'clean' : 'no delta'})`);
+  check(fst && leak([fst]) === null, `the fused delta leaks no raw field (${fst ? leak([fst]) || 'clean' : 'no delta'})`);
+  check(!!lastOf(B, 'object_gone', fuseDrop.id), 'the dropped anomaly is consumed (object_gone), not a kinds delta');
+}
+
 A.close(); B.close();
 await wait(100);
 console.log(`\n${pass} passed, ${fail} failed`);
