@@ -875,6 +875,22 @@ export class WorldRoom {
     }
     return out;
   }
+  // The single record within radius r of (x,y) passing `filter` that MINIMISES
+  // `score` (default: Euclidean distance) — the "scan #gridNear, keep the closest
+  // passing the exact test" idiom in ONE place, so the < tie-break can't drift
+  // between copies. The disc test (d > r) re-tightens the cell-aligned superset; a
+  // caller needing a per-candidate acceptance (e.g. "within the target's own
+  // footprint") puts it in `filter`. Returns the best record, or null.
+  #gridNearest(x, y, r, filter, score = null) {
+    let best = null, bestScore = Infinity;
+    for (const o of this.#gridNear(x, y, r, filter)) {
+      const d = Math.hypot(o.x - x, o.y - y);
+      if (d > r) continue;
+      const sc = score ? score(o, d) : d;
+      if (sc < bestScore) { bestScore = sc; best = o; }
+    }
+    return best;
+  }
   // Records whose cell overlaps box, as a cell-aligned SUPERSET — the caller
   // applies the exact #inBox test to tighten to the rectangle.
   #gridQueryBox(b) {
@@ -1481,12 +1497,8 @@ export class WorldRoom {
   // (in which case it's settled clear so it doesn't overlap a neighbour).
   #tryFuse(o, now) {
     const ro = stoneRadiusOf(o);
-    let target = null, bestD = Infinity;
-    for (const s of this.#gridNear(o.x, o.y, ro + this.maxStoneR, (s) => s.family === 'stone')) {
-      if (s.id === o.id || s.held !== '') continue;
-      const d = Math.hypot(s.x - o.x, s.y - o.y);
-      if (d < stoneRadiusOf(s) && d < bestD) { bestD = d; target = s; } // dropped onto its footprint → fuse
-    }
+    // the nearest free stone whose own footprint the drop landed within → fuse into it
+    const target = this.#gridNearest(o.x, o.y, ro + this.maxStoneR, (s) => s.family === 'stone' && s.id !== o.id && s.held === '' && Math.hypot(s.x - o.x, s.y - o.y) < stoneRadiusOf(s));
     if (!target) { this.#settleStoneClear(o); return null; }
     // A target already AT the cap can't grow — fusing would just delete the dropped stone for
     // nothing. They BOUNCE instead: ease the dropper clear and signal a recoil (kept whole).
@@ -1531,12 +1543,8 @@ export class WorldRoom {
   // the grown target, or null (merging the same kinds would destroy a wonder for
   // nothing, so we leave both standing).
   #tryFuseAnomaly(o, now) {
-    let target = null, best = Infinity;
-    for (const a of this.#gridNear(o.x, o.y, ANOM_TOUCH_R, (a) => a.family === 'anomaly' && a.held === '')) {
-      if (a.id === o.id) continue;
-      const d = Math.hypot(a.x - o.x, a.y - o.y);
-      if (d <= ANOM_TOUCH_R && d < best) { best = d; target = a; }
-    }
+    // nearest OTHER free anomaly within touch range → fuse the dropped one into it
+    const target = this.#gridNearest(o.x, o.y, ANOM_TOUCH_R, (a) => a.family === 'anomaly' && a.held === '' && a.id !== o.id);
     if (!target) return null;
     const uniq = [];
     for (const k of [...this.#anomalyKindsOf(target), ...this.#anomalyKindsOf(o)]) if (!uniq.includes(k)) uniq.push(k);
@@ -1562,13 +1570,7 @@ export class WorldRoom {
   // The nearest free PLANT or CREATURE within ANOM_TOUCH_R of (x,y) — what an anomaly
   // dropped here would work its power on (ripen/burst a plant; glow/tame a creature).
   #anomalyTargetNear(x, y, self) {
-    let target = null, best = Infinity;
-    for (const o of this.#gridNear(x, y, ANOM_TOUCH_R, (o) => (o.family === 'seed' || o.family === 'creature') && o.held === '')) {
-      if (o === self) continue;
-      const d = Math.hypot(o.x - x, o.y - y);
-      if (d <= ANOM_TOUCH_R && d < best) { best = d; target = o; }
-    }
-    return target;
+    return this.#gridNearest(x, y, ANOM_TOUCH_R, (o) => (o.family === 'seed' || o.family === 'creature') && o.held === '' && o !== self);
   }
   // The plant powers (ripen/burst) a kinds-list confers — a heart contributes none.
   #plantPowers(kinds) { const s = new Set(); for (const k of kinds) { const p = ANOMALY_POWER[k]; if (p) s.add(p); } return s; }
@@ -1599,12 +1601,7 @@ export class WorldRoom {
   }
   // The nearest free ANOMALY within ANOM_TOUCH_R of (x,y).
   #anomalyNear(x, y) {
-    let an = null, best = Infinity;
-    for (const a of this.#gridNear(x, y, ANOM_TOUCH_R, (a) => a.family === 'anomaly' && a.held === '')) {
-      const d = Math.hypot(a.x - x, a.y - y);
-      if (d <= ANOM_TOUCH_R && d < best) { best = d; an = a; }
-    }
-    return an;
+    return this.#gridNearest(x, y, ANOM_TOUCH_R, (a) => a.family === 'anomaly' && a.held === '');
   }
   // BURST: a grown tree shatters into a scatter of fresh saplings (kept out of water).
   async #burstPlant(target, now) {
@@ -1951,14 +1948,9 @@ export class WorldRoom {
     // affinity in [0,1), so two creatures near the same tree usually favour DIFFERENT nearby
     // trees and the crowd spreads across the grove. A lone creature still usually takes the
     // nearest; the affinity only tips the balance among trees within ~CREATURE_PREF_SPREAD.
-    let best = null, bestScore = Infinity;
-    for (const o of this.#gridNear(c.x, c.y, CREATURE_SEEK_R, (o) => wantPlant ? (o.family === 'seed' && o.maturity >= SPROUT) : o.family === 'stone')) {
-      const d = Math.hypot(o.x - c.x, o.y - c.y);
-      if (d > CREATURE_SEEK_R) continue;
-      const aff = rng((Math.imul(c.seed >>> 0, 2654435761) ^ (o.seed >>> 0)) >>> 0)(); // stable per (creature,target), every tick
-      const score = d - aff * CREATURE_PREF_SPREAD;
-      if (score < bestScore) { bestScore = score; best = o; }
-    }
+    const best = this.#gridNearest(c.x, c.y, CREATURE_SEEK_R,
+      (o) => wantPlant ? (o.family === 'seed' && o.maturity >= SPROUT) : o.family === 'stone',
+      (o, d) => d - rng((Math.imul(c.seed >>> 0, 2654435761) ^ (o.seed >>> 0)) >>> 0)() * CREATURE_PREF_SPREAD); // stable per (creature,target) affinity nudge
     return best ? { x: best.x, y: best.y } : null;
   }
 
