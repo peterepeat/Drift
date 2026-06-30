@@ -739,6 +739,7 @@ export class WorldRoom {
     if (o.wanderT0 != null) p.wanderT0 = o.wanderT0; // the shared wander anchor (creatures + fish)
     if (o.glowUntil) { p.glowUntil = o.glowUntil; p.glowHue = o.glowHue; } // anomaly glow buff (rainbow + 2× speed)
     if (o.tameUntil) p.tameUntil = o.tameUntil; // tamed (follows the nearest person)
+    if (o.family === 'creature') p.act = (o.tameUntil && o.tameUntil > Date.now()) ? 'follow' : this.#creatureDrive(o); // its current focus, for the (debug) focus label — computed live, never stored
     if (o.family === 'stone' && o.r != null) p.r = o.r; // a fused/split stone's stored radius (shape still from seed)
     if (o.held !== '') p.heldBy = o.heldConn; // the holder's EPHEMERAL pid (same id presence carries) — links a carried thing to its carrier; never the token
     return p;
@@ -752,6 +753,7 @@ export class WorldRoom {
     if (o.wanderT0 != null) m.wanderT0 = o.wanderT0; // re-anchor on the wire so a placed creature/fish continues smoothly for everyone
     if (o.glowUntil) { m.glowUntil = o.glowUntil; m.glowHue = o.glowHue; } // anomaly glow buff
     if (o.tameUntil) m.tameUntil = o.tameUntil; // tamed (follows the nearest person)
+    if (o.family === 'creature') m.act = (o.tameUntil && o.tameUntil > now) ? 'follow' : this.#creatureDrive(o); // current focus, for the (debug) focus label — computed live, never stored
     if (o.family === 'stone' && o.r != null) m.r = o.r;   // a fused stone broadcasts its grown radius
     if (o.kinds && o.kinds.length > 1) m.kinds = o.kinds;  // a fused anomaly broadcasts its hybrid kinds (live form change)
     return m;

@@ -114,6 +114,12 @@ const QUALITY_TIERS = [
 ];
 let qTier = 0, Q = QUALITY_TIERS[0];
 let frameMsEMA = 16.7, qLastChangeMs = 0, qHotFrames = 0, qCoolFrames = 0, qPrevNow = 0;
+// FOCUS LABELS (debug/troubleshooting): a tiny word under each creature naming its current
+// focus. The world is deliberately wordless, so this is OFF by default — turn it on with
+// ?focus=1 in the URL (the admin panel links here) or by pressing 'f'. The only text in Drift.
+let showFocus = new URLSearchParams(location.search).has('focus');
+const ACT_COLOR = { feed: 'rgba(150,210,120,0.95)', drink: 'rgba(130,190,235,0.95)', rest: 'rgba(225,200,150,0.95)', roam: 'rgba(200,195,185,0.9)', follow: 'rgba(240,150,150,0.96)' };
+addEventListener('keydown', (e) => { if (e.key === 'f' || e.key === 'F') showFocus = !showFocus; });
 const Q_COOLDOWN_MS = 4000;  // min ms between tier changes (don't thrash)
 const Q_DOWN_MS = 27;        // smoothed frame time worse than this (~<37fps) for a sustained spell → go leaner
 const Q_UP_MS = 14;          // ...better than this (~>71fps) for a longer spell → go richer
@@ -1392,6 +1398,7 @@ function onMessage(raw) {
       }
       if (bounce) Audio.event('land', { seed: o.seed, family: o.family, x: m.x }); // a soft clack as the maxed rock shoulders it off
       o.handling = m.handling; o.held = !!m.held;
+      if (m.act != null) o.act = m.act; // current focus word (debug label)
       if (m.maturity != null) o.maturity = m.maturity;
       if (m.aged != null) o.aged = m.aged;
       if (m.wanderT0 != null) o.wanderT0 = m.wanderT0; // a placed creature re-anchored its wander
@@ -1685,6 +1692,19 @@ function frame(now) {
     ctx.restore();
   }
   for (let i = feedRushes.length - 1; i >= 0; i--) { const fr = feedRushes[i]; if (now - fr.start > Math.min(FEED_RUSH_CAP_MS, (fr.eatT + FEED_RELEASE) * 1000)) feedRushes.splice(i, 1); } // expire once the bug is eaten + the fish have eased back
+
+  // FOCUS LABELS (debug): the world's only text — a small word under each on-screen creature
+  // naming its current focus (feed/drink/rest/roam/follow). Screen space, so zoom-independent.
+  if (showFocus) {
+    ctx.font = '600 10px ui-monospace, SFMono-Regular, monospace';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    for (const o of list) {
+      if (o.family !== 'creature' || !o.act) continue;
+      const p = creaturePos(o), s = worldToScreen(p.x, p.y);
+      ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillText(o.act, s.x + 0.7, s.y + 13.7); // a soft shadow for legibility on any ground
+      ctx.fillStyle = ACT_COLOR[o.act] || 'rgba(240,236,228,0.95)'; ctx.fillText(o.act, s.x, s.y + 13);
+    }
+  }
 
   if (Q.grade) paintSeasonGrade(ctx, vw, vh, seasonPhase); // season composite (crossfaded), last
 

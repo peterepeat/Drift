@@ -46,6 +46,7 @@ const c = creatures(await snap()).find((o) => o.id === sp.creature.id);
 check(c && c.family === 'creature' && c.kind === 'crawler', 'a creature exposes family=creature and its kind');
 check(c.x === 120 && c.y === -40, 'a creature spawns with a home at the given point');
 check(typeof c.wanderT0 === 'number' && c.wanderT0 > 0, 'a creature carries a wander anchor (wanderT0) for smooth placement');
+check(c && typeof c.act === 'string' && ['feed', 'drink', 'rest', 'roam', 'follow'].includes(c.act), `a creature exposes its current focus for the debug label (act=${c && c.act})`);
 
 // 4. pickable + placeable: its home moves to where it is set down, and the wander
 // RE-ANCHORS (wanderT0 advances) so it continues from the drop point, not a snap.
