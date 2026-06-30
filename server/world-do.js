@@ -426,6 +426,14 @@ export class WorldRoom {
     this.season = 0;               // monotonic season phase (floor % 4 = current season)
     this.bounds = null;            // {x,y} half-extents of the object field — the client clamps its camera to this (no wandering into the void)
     this.communion = new Map();    // midpoint-cell -> sustained-togetherness ticks (negative = cooldown); in-memory, never persisted
+    // Inbound wire dispatch: one handler per MSG type (replaces the if/else ladder).
+    // Built once here (private methods exist on the instance before the constructor
+    // body runs); webSocketMessage looks up m.t and calls the handler with (ws,m,pid,now).
+    this.msgHandlers = {
+      [MSG.PICKUP]: this.#onPickup, [MSG.CARRY]: this.#onCarry, [MSG.PLACE]: this.#onPlace,
+      [MSG.BREAK]: this.#onBreak, [MSG.DISSOLVE]: this.#onDissolve, [MSG.MARK]: this.#onMark,
+      [MSG.GIANT_SKIP]: this.#onGiantSkip, [MSG.BEFRIEND]: this.#onBefriend, [MSG.PRESENCE_MOVE]: this.#onPresenceMove,
+    };
     this.state.blockConcurrencyWhile(async () => { await this.#load(); });
   }
 
@@ -984,180 +992,195 @@ export class WorldRoom {
   // ---- WebSocket message handling -------------------------------------------
   async webSocketMessage(ws, raw) {
     let m; try { m = JSON.parse(raw); } catch { return; }
-    const pid = ws.deserializeAttachment()?.pid;
-    const now = Date.now();
+    const handler = this.msgHandlers[m?.t];
+    if (!handler) return;                       // an unknown / malformed wire type is ignored
+    await handler.call(this, ws, m, ws.deserializeAttachment()?.pid, Date.now());
+  }
 
-    if (m.t === MSG.PICKUP) {
-      const o = this.objects.get(m.id);
-      if (!o) return;
-      if (o.held === '') {
-        // Single-threaded DO -> this read-then-write IS the atomic compare-and-set.
-        o.held = m.token; o.heldConn = pid; o.held_at = now; o.last_touched = now;
-        await this.#persist(o);
-        this.#send(ws, { t: MSG.PICKUP_ACK, id: o.id, ok: true });
-        this.#bcast(this.#stateMsg(o, now), ws);
-        this.#updateCog(o.x, o.y);
-      } else {
-        this.#send(ws, { t: MSG.PICKUP_ACK, id: o.id, ok: false });
-        this.#send(ws, this.#stateMsg(o, now));
-      }
-
-    } else if (m.t === MSG.CARRY) {
-      const o = this.objects.get(m.id);
-      if (!o || o.held !== m.token) return;
-      if (!Number.isFinite(m.x) || !Number.isFinite(m.y)) return; // never store a corrupt position (a NaN serialises to null → 0,0)
-      o.x = m.x; o.y = m.y;                    // in-memory only; persisted on place / reclaim
-      this.#gridUpdate(o);                      // keep a carried object findable at its current spot
-      this.dirty.add(o.id);                     // carried position is unpersisted — let a checkpoint catch a long carry
+  // pickup: claim a free object. Single-threaded DO → this read-then-write IS the CAS.
+  async #onPickup(ws, m, pid, now) {
+    const o = this.objects.get(m.id);
+    if (!o) return;
+    if (o.held === '') {
+      o.held = m.token; o.heldConn = pid; o.held_at = now; o.last_touched = now;
+      await this.#persist(o);
+      this.#send(ws, { t: MSG.PICKUP_ACK, id: o.id, ok: true });
       this.#bcast(this.#stateMsg(o, now), ws);
-
-    } else if (m.t === MSG.PLACE) {
-      const o = this.objects.get(m.id);
-      if (!o) return;
-      if (o.held !== m.token) { this.#send(ws, this.#stateMsg(o, now)); return; } // not the holder
-      if (Number.isFinite(m.x) && Number.isFinite(m.y)) { o.x = m.x; o.y = m.y; } // corrupt coords → release in place, don't teleport to 0,0
-      o.held = ''; o.heldConn = ''; o.held_at = 0;
-      o.handling += 1; o.last_touched = now; // a placed object has just been tended
-      if (o.family === 'creature') {
-        o.wanderT0 = now; // re-anchor: it wanders on a NEW route from where it was set down
-        // A ground bug dropped into a pond becomes FISH FOOD (Wave Q): it sinks (a
-        // splash) and a fish rises if the pond has room — drop a bug, feed the water.
-        const pond = o.kind === 'crawler' ? poolContaining(o.x, o.y) : null;
-        if (pond) {
-          await this.#removeObject(o, { splash: true, x: o.x, y: o.y });
-          const counts = this.#fishCountByPond(), idx = POOLS.indexOf(pond);
-          if (idx >= 0 && counts[idx] < FISH_MAX_PER_POND) {
-            const f = this.#spawnFish(now, pond);
-            await this.#addObject(f);
-          }
-          return;
-        }
-        // Dropped onto an anomaly → its creature power(s): a heart TAMES, any other GLOWS
-        // (a hybrid can do both). o falls through to the generic persist/broadcast below,
-        // which carries the buff fields to everyone.
-        const an = this.#anomalyNear(o.x, o.y);
-        if (an) this.#anomalyWorkCreature(this.#anomalyKindsOf(an), o, now);
-      }
-      // Disturbing a pre-sprout seed resets its growth — it must be left be to take.
-      if (o.family === 'seed' && o.maturity < SPROUT) { o.maturity = 0; o.heat = 0; }
-      // Anomaly powers (Wave R): drop an anomaly ONTO a plant, or a plant ONTO an
-      // anomaly, and the anomaly's power works on the plant (by kind). The anomaly
-      // itself is never consumed — it persists, a reusable wonder.
-      if (o.family === 'anomaly') {
-        // Dropped onto another anomaly → FUSE into one hybrid: kinds unioned, form
-        // blended, powers combined. Mirrors stone fusing; the dropped one is consumed.
-        const fused = this.#tryFuseAnomaly(o, now);
-        if (fused) {
-          await this.#removeObject(o, { fused: fused.id });
-          await this.#persist(fused);
-          this.#bcast(this.#stateMsg(fused, now), null);
-          return;
-        }
-        const kinds = this.#anomalyKindsOf(o);
-        const target = this.#anomalyTargetNear(o.x, o.y, o);
-        if (target && target.family === 'seed') {
-          await this.#anomalyWorkSeed(kinds, target, now, false); // ripen and/or burst by the anomaly's combined powers
-        } else if (target && target.family === 'creature') { // a creature beneath it → tame and/or glow
-          this.#anomalyWorkCreature(kinds, target, now);
-          await this.#persist(target); this.#bcast(this.#stateMsg(target, now), null);
-        }
-        // the anomaly settles at its spot — falls through to the persist/broadcast below
-      } else if (o.family === 'seed') {
-        const an = this.#anomalyNear(o.x, o.y);
-        if (an && await this.#anomalyWorkSeed(this.#anomalyKindsOf(an), o, now, true)) return; // o was burst (consumed); else it ripened in place and falls through
-      }
-      // A plant set down ON a rock settles beside it — never a flat card on top (Unit ⑥).
-      // If THAT nudge pushed it into a pond, ease it back to the bank (don't strand a
-      // plant in water). Only when the settle actually moved it — a plant dropped
-      // straight into open water keeps its existing behaviour (the tick relocates it).
-      if (o.family === 'seed') {
-        const px = o.x, py = o.y;
-        this.#settleClearOfStones(o, PLANT_BASE_R);
-        if (o.x !== px || o.y !== py) { const pond = poolContaining(o.x, o.y); if (pond) { const b = bankPoint(pond, o.x, o.y, o.seed); o.x = b.x; o.y = b.y; } }
-      }
-      let bounced = false; // a stone dropped on an ALREADY-CAPPED rock bounces off instead of vanishing into it
-      if (o.family === 'stone') {
-        // Worn to grit by too much handling — a brief scatter, then gone (§4.3).
-        if (o.handling >= GRIT_HANDLING) {
-          await this.#removeObject(o, { grit: true });
-          return;
-        }
-        // Dropped onto another stone → FUSE (target grows, this one is consumed) — UNLESS the
-        // target is already AT the cap, in which case they BOUNCE (the dropper is kept + eased clear).
-        const fused = this.#tryFuse(o, now);
-        if (fused && fused.bounce) { bounced = true; }
-        else if (fused) {
-          await this.#removeObject(o, { fused: fused.id });
-          await this.#persist(fused);
-          this.#bcast(this.#stateMsg(fused, now), null);
-          this.#updateCog(fused.x, fused.y);
-          return;
-        }
-      }
-      // No rocks in water: a stone left in a pool rolls to the nearest bank. We set its
-      // authoritative resting spot now and flag the broadcast so the client eases it
-      // there as a roll (rather than snapping). Land objects are unaffected.
-      const rollFrom = o.family === 'stone' ? this.#rollStoneFromWater(o) : null;
-      this.#gridUpdate(o); // index the final position (after any settle-clear / roll)
-      await this.#persist(o);
-      const sm = this.#stateMsg(o, now); if (rollFrom) sm.roll = 1; if (bounced) sm.bounce = 1;
-      this.#bcast(sm, null);
       this.#updateCog(o.x, o.y);
+    } else {
+      this.#send(ws, { t: MSG.PICKUP_ACK, id: o.id, ok: false });
+      this.#send(ws, this.#stateMsg(o, now));
+    }
+  }
 
-    } else if (m.t === MSG.BREAK) {
-      // Double-click a stone → split it into smaller stones (or grit if already tiny);
-      // double-click a FUSED anomaly → split it back into its constituent kinds. No
-      // ownership needed (anyone can break a free one), but not while it's held.
-      const o = this.objects.get(m.id);
-      if (!o || o.held !== '') return;
-      let pieces = null, puff = null;
-      if (o.family === 'stone') { pieces = this.#breakStone(o, now); puff = { grit: true }; } // a dust puff
-      else if (o.family === 'anomaly' && this.#anomalyKindsOf(o).length > 1) { pieces = this.#breakAnomaly(o, now); puff = { burst: true, x: o.x, y: o.y }; } // a soft ripple
-      if (!pieces || !pieces.length) return; // nothing breakable here (a too-small stone just stays — never breaks to nothing)
-      await this.#removeObject(o, puff);
-      for (const c of pieces) await this.#addObject(c);
+  // carry: stream a held object's position (in-memory only; persisted on place / reclaim).
+  async #onCarry(ws, m, pid, now) {
+    const o = this.objects.get(m.id);
+    if (!o || o.held !== m.token) return;
+    if (!Number.isFinite(m.x) || !Number.isFinite(m.y)) return; // never store a corrupt position (a NaN serialises to null → 0,0)
+    o.x = m.x; o.y = m.y;                    // in-memory only; persisted on place / reclaim
+    this.#gridUpdate(o);                      // keep a carried object findable at its current spot
+    this.dirty.add(o.id);                     // carried position is unpersisted — let a checkpoint catch a long carry
+    this.#bcast(this.#stateMsg(o, now), ws);
+  }
 
-    } else if (m.t === MSG.DISSOLVE) {
-      // Only the current holder can dissolve an anomaly (the deliberate 10s hold).
-      const o = this.objects.get(m.id);
-      if (!o || o.family !== 'anomaly' || o.held !== m.token) return;
-      await this.#removeObject(o);
-
-    } else if (m.t === MSG.MARK) {
-      // Double-click bare ground → leave a rock-shaped tinted stain (Wave S). Visible to
-      // all, heals over ~10 min. Land only (not water); oldest evicted at the cap.
-      if (!Number.isFinite(m.x) || !Number.isFinite(m.y)) return;
-      if (poolContaining(m.x, m.y)) return; // marks settle on land, not on the water
-      let count = 0, oldest = null;
-      for (const o of this.objects.values()) if (o.family === 'mark') { count++; if (!oldest || o.created_at < oldest.created_at) oldest = o; }
-      if (count >= MARK_MAX && oldest) { // make room: evict the oldest mark
-        await this.#removeObject(oldest);
+  // place: release a held object at the drop point + run the on-drop interactions
+  // (fish-food, anomaly powers, stone fuse/grit/roll). The family blocks each either
+  // consume/relocate o (early return) or fall through to a shared persist+broadcast
+  // tail. (The per-family split lands with the FAMILIES registry — candidate #8.)
+  async #onPlace(ws, m, pid, now) {
+    const o = this.objects.get(m.id);
+    if (!o) return;
+    if (o.held !== m.token) { this.#send(ws, this.#stateMsg(o, now)); return; } // not the holder
+    if (Number.isFinite(m.x) && Number.isFinite(m.y)) { o.x = m.x; o.y = m.y; } // corrupt coords → release in place, don't teleport to 0,0
+    o.held = ''; o.heldConn = ''; o.held_at = 0;
+    o.handling += 1; o.last_touched = now; // a placed object has just been tended
+    if (o.family === 'creature') {
+      o.wanderT0 = now; // re-anchor: it wanders on a NEW route from where it was set down
+      // A ground bug dropped into a pond becomes FISH FOOD (Wave Q): it sinks (a
+      // splash) and a fish rises if the pond has room — drop a bug, feed the water.
+      const pond = o.kind === 'crawler' ? poolContaining(o.x, o.y) : null;
+      if (pond) {
+        await this.#removeObject(o, { splash: true, x: o.x, y: o.y });
+        const counts = this.#fishCountByPond(), idx = POOLS.indexOf(pond);
+        if (idx >= 0 && counts[idx] < FISH_MAX_PER_POND) {
+          const f = this.#spawnFish(now, pond);
+          await this.#addObject(f);
+        }
+        return;
       }
-      const mk = makeMarkRecord(crypto.randomUUID(), (Math.random() * 4294967296) >>> 0, m.x, m.y, now);
-      await this.#addObject(mk);
-
-    } else if (m.t === MSG.GIANT_SKIP) {
-      // a friendly tap on the giant — it lets go of what it was about to do and ambles on
-      for (const g of this.giants) { g.goal = null; g.stuck = 0; } // a friendly tap lets the gardeners amble on
-
-    } else if (m.t === MSG.BEFRIEND) {
-      // sustained attention has bonded a creature to someone — it becomes tamed (follows the
-      // nearest person for a good long while) so they have a companion to return to.
-      const o = this.objects.get(m.id);
-      if (!o || o.family !== 'creature' || o.held !== '') return;
-      o.tameUntil = now + BEFRIEND_MS;
-      await this.#persist(o);
-      this.#bcast(this.#stateMsg(o, now), null);
-
-    } else if (m.t === MSG.PRESENCE_MOVE) {
-      this.lastSeen.set(pid, now);
-      this.presencePos.set(pid, { x: m.x, y: m.y, ts: now });
-      this.#bcast({ t: MSG.PRESENCE, pid, x: m.x, y: m.y, ts: now }, ws);
-      // The same heartbeat carries the viewport: page in any objects now in view.
-      if (m.hw > 0 && m.hh > 0) {
-        this.viewports.set(pid, { cx: m.x, cy: m.y, hw: m.hw, hh: m.hh });
-        this.#streamInterest(ws, pid, this.#boxFrom(m.x, m.y, m.hw, m.hh));
+      // Dropped onto an anomaly → its creature power(s): a heart TAMES, any other GLOWS
+      // (a hybrid can do both). o falls through to the generic persist/broadcast below,
+      // which carries the buff fields to everyone.
+      const an = this.#anomalyNear(o.x, o.y);
+      if (an) this.#anomalyWorkCreature(this.#anomalyKindsOf(an), o, now);
+    }
+    // Disturbing a pre-sprout seed resets its growth — it must be left be to take.
+    if (o.family === 'seed' && o.maturity < SPROUT) { o.maturity = 0; o.heat = 0; }
+    // Anomaly powers (Wave R): drop an anomaly ONTO a plant, or a plant ONTO an
+    // anomaly, and the anomaly's power works on the plant (by kind). The anomaly
+    // itself is never consumed — it persists, a reusable wonder.
+    if (o.family === 'anomaly') {
+      // Dropped onto another anomaly → FUSE into one hybrid: kinds unioned, form
+      // blended, powers combined. Mirrors stone fusing; the dropped one is consumed.
+      const fused = this.#tryFuseAnomaly(o, now);
+      if (fused) {
+        await this.#removeObject(o, { fused: fused.id });
+        await this.#persist(fused);
+        this.#bcast(this.#stateMsg(fused, now), null);
+        return;
       }
+      const kinds = this.#anomalyKindsOf(o);
+      const target = this.#anomalyTargetNear(o.x, o.y, o);
+      if (target && target.family === 'seed') {
+        await this.#anomalyWorkSeed(kinds, target, now, false); // ripen and/or burst by the anomaly's combined powers
+      } else if (target && target.family === 'creature') { // a creature beneath it → tame and/or glow
+        this.#anomalyWorkCreature(kinds, target, now);
+        await this.#persist(target); this.#bcast(this.#stateMsg(target, now), null);
+      }
+      // the anomaly settles at its spot — falls through to the persist/broadcast below
+    } else if (o.family === 'seed') {
+      const an = this.#anomalyNear(o.x, o.y);
+      if (an && await this.#anomalyWorkSeed(this.#anomalyKindsOf(an), o, now, true)) return; // o was burst (consumed); else it ripened in place and falls through
+    }
+    // A plant set down ON a rock settles beside it — never a flat card on top (Unit ⑥).
+    // If THAT nudge pushed it into a pond, ease it back to the bank (don't strand a
+    // plant in water). Only when the settle actually moved it — a plant dropped
+    // straight into open water keeps its existing behaviour (the tick relocates it).
+    if (o.family === 'seed') {
+      const px = o.x, py = o.y;
+      this.#settleClearOfStones(o, PLANT_BASE_R);
+      if (o.x !== px || o.y !== py) { const pond = poolContaining(o.x, o.y); if (pond) { const b = bankPoint(pond, o.x, o.y, o.seed); o.x = b.x; o.y = b.y; } }
+    }
+    let bounced = false; // a stone dropped on an ALREADY-CAPPED rock bounces off instead of vanishing into it
+    if (o.family === 'stone') {
+      // Worn to grit by too much handling — a brief scatter, then gone (§4.3).
+      if (o.handling >= GRIT_HANDLING) {
+        await this.#removeObject(o, { grit: true });
+        return;
+      }
+      // Dropped onto another stone → FUSE (target grows, this one is consumed) — UNLESS the
+      // target is already AT the cap, in which case they BOUNCE (the dropper is kept + eased clear).
+      const fused = this.#tryFuse(o, now);
+      if (fused && fused.bounce) { bounced = true; }
+      else if (fused) {
+        await this.#removeObject(o, { fused: fused.id });
+        await this.#persist(fused);
+        this.#bcast(this.#stateMsg(fused, now), null);
+        this.#updateCog(fused.x, fused.y);
+        return;
+      }
+    }
+    // No rocks in water: a stone left in a pool rolls to the nearest bank. We set its
+    // authoritative resting spot now and flag the broadcast so the client eases it
+    // there as a roll (rather than snapping). Land objects are unaffected.
+    const rollFrom = o.family === 'stone' ? this.#rollStoneFromWater(o) : null;
+    this.#gridUpdate(o); // index the final position (after any settle-clear / roll)
+    await this.#persist(o);
+    const sm = this.#stateMsg(o, now); if (rollFrom) sm.roll = 1; if (bounced) sm.bounce = 1;
+    this.#bcast(sm, null);
+    this.#updateCog(o.x, o.y);
+  }
+
+  // break: double-click a stone → split into smaller stones (or grit if already tiny);
+  // double-click a FUSED anomaly → split back into its constituent kinds. No ownership
+  // needed (anyone can break a free one), but not while it's held.
+  async #onBreak(ws, m, pid, now) {
+    const o = this.objects.get(m.id);
+    if (!o || o.held !== '') return;
+    let pieces = null, puff = null;
+    if (o.family === 'stone') { pieces = this.#breakStone(o, now); puff = { grit: true }; } // a dust puff
+    else if (o.family === 'anomaly' && this.#anomalyKindsOf(o).length > 1) { pieces = this.#breakAnomaly(o, now); puff = { burst: true, x: o.x, y: o.y }; } // a soft ripple
+    if (!pieces || !pieces.length) return; // nothing breakable here (a too-small stone just stays — never breaks to nothing)
+    await this.#removeObject(o, puff);
+    for (const c of pieces) await this.#addObject(c);
+  }
+
+  // dissolve: only the current holder can dissolve an anomaly (the deliberate 10s hold).
+  async #onDissolve(ws, m, pid, now) {
+    const o = this.objects.get(m.id);
+    if (!o || o.family !== 'anomaly' || o.held !== m.token) return;
+    await this.#removeObject(o);
+  }
+
+  // mark: double-click bare ground → leave a rock-shaped tinted stain (Wave S). Visible
+  // to all, heals over ~10 min. Land only (not water); oldest evicted at the cap.
+  async #onMark(ws, m, pid, now) {
+    if (!Number.isFinite(m.x) || !Number.isFinite(m.y)) return;
+    if (poolContaining(m.x, m.y)) return; // marks settle on land, not on the water
+    let count = 0, oldest = null;
+    for (const o of this.objects.values()) if (o.family === 'mark') { count++; if (!oldest || o.created_at < oldest.created_at) oldest = o; }
+    if (count >= MARK_MAX && oldest) { // make room: evict the oldest mark
+      await this.#removeObject(oldest);
+    }
+    const mk = makeMarkRecord(crypto.randomUUID(), (Math.random() * 4294967296) >>> 0, m.x, m.y, now);
+    await this.#addObject(mk);
+  }
+
+  // giant_skip: a friendly tap on a giant — it lets go of what it was about to do and ambles on.
+  async #onGiantSkip(ws, m, pid, now) {
+    for (const g of this.giants) { g.goal = null; g.stuck = 0; } // a friendly tap lets the gardeners amble on
+  }
+
+  // befriend: sustained attention has bonded a creature to someone — it becomes tamed
+  // (follows the nearest person for a good long while) so they have a companion to return to.
+  async #onBefriend(ws, m, pid, now) {
+    const o = this.objects.get(m.id);
+    if (!o || o.family !== 'creature' || o.held !== '') return;
+    o.tameUntil = now + BEFRIEND_MS;
+    await this.#persist(o);
+    this.#bcast(this.#stateMsg(o, now), null);
+  }
+
+  // presence_move: a warmth heartbeat (broadcast to others, never the sender) that also
+  // carries the viewport, so we page in any objects now in view (interest streaming).
+  async #onPresenceMove(ws, m, pid, now) {
+    this.lastSeen.set(pid, now);
+    this.presencePos.set(pid, { x: m.x, y: m.y, ts: now });
+    this.#bcast({ t: MSG.PRESENCE, pid, x: m.x, y: m.y, ts: now }, ws);
+    if (m.hw > 0 && m.hh > 0) {
+      this.viewports.set(pid, { cx: m.x, cy: m.y, hw: m.hw, hh: m.hh });
+      this.#streamInterest(ws, pid, this.#boxFrom(m.x, m.y, m.hw, m.hh));
     }
   }
 
