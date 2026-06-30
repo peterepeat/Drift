@@ -1341,9 +1341,10 @@ export class WorldRoom {
     // tended/alive and never fade — and skipping creatures keeps them from being
     // dirtied every tick (their last_touched is never read).
     for (const o of this.objects.values()) {
-      if (familyOf(o.family).tended || o.held !== '') continue; // anomaly/creature/fish/mark are alive — never faded, never dirtied
+      const fam = familyOf(o.family);
+      if (fam.tended || o.held !== '') continue; // anomaly/creature/fish/mark are alive — never faded, never dirtied
       if (this.#heatAt(o.x, o.y) > WARM_EPS) { o.last_touched = now; ctx.defer(o); continue; } // refresh is checkpoint-only
-      if (familyOf(o.family).fades && (now - o.last_touched) >= STONE_FADE_MS) ctx.remove(o); // only a forgotten stone crumbles to grit
+      if (fam.fades && (now - o.last_touched) >= STONE_FADE_MS) ctx.remove(o); // only a forgotten stone crumbles to grit
     }
 
     // Ceiling (PRD §7.3): when the world is full, the longest-untouched (smallest
