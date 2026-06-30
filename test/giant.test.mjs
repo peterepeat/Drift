@@ -72,18 +72,20 @@ await tickG(10);                               // it cycles its finders → with
 const sAfter = (await snap()).objects.filter((o) => near(o, SOW, 1600)).length;
 check(sAfter > sBefore, `the giant sows life where it's scarce (${sBefore} -> ${sAfter})`);
 
-// 7. EQUILIBRIUM (stones) — it BREAKS DOWN a boulder back toward the middle. Hand-fusing
-// now caps at a generous size, so we forge one directly (admin place ?r=) PAST that cap.
+// 7. EQUILIBRIUM (stones) — it BREAKS DOWN a boulder back toward the middle, sparing nothing
+// big. The player can hand-build up to STONE_CAP_R (350), but the gardener breaks anything
+// over GIANT_BREAK_R (62) — so we forge a MID-SIZE rock (150) it would once have left alone.
 const BOULDER = { x: -11000, y: -11000 };
 const st = (await snap()).objects.find((o) => o.family === 'stone' && !o.held);
-await fetch(`${base}/admin/place?id=${st.id}&x=${BOULDER.x}&y=${BOULDER.y}&r=400`, { method: 'POST', headers: key }).then((r) => r.json());
+await fetch(`${base}/admin/place?id=${st.id}&x=${BOULDER.x}&y=${BOULDER.y}&r=150`, { method: 'POST', headers: key }).then((r) => r.json());
 await setGiant(BOULDER.x, BOULDER.y);
 const nearB = (w) => w.objects.filter((o) => o.family === 'stone' && Math.hypot(o.x - BOULDER.x, o.y - BOULDER.y) < 600);
-const hadBoulder = nearB(await snap()).some((o) => (o.r || 0) > 350);
-await tickG(2);                                    // it reaches the boulder and breaks it down
+const hadBoulder = nearB(await snap()).some((o) => (o.r || 0) > 130);
+await tickG(2);                                    // it reaches the rock and breaks it down
 const afterB = nearB(await snap());
-const stillBoulder = afterB.some((o) => (o.r || 0) > 350);
-check(hadBoulder && !stillBoulder && afterB.length >= 2, `the giant breaks a boulder back toward the middle (1 boulder -> ${afterB.length} smaller stones, none over the cap)`);
+const stillBoulder = afterB.some((o) => (o.r || 0) > 130);
+check(hadBoulder && !stillBoulder && afterB.length >= 2, `the gardener breaks down even a mid-size rock — it spares nothing big (1 -> ${afterB.length} smaller stones)`);
+check(typeof (await snap()).giants[0].act === 'string', 'a gardener exposes its current focus (act) for the label');
 
 // 8. SPREAD — the two gardeners don't pile onto the same spot. Stacked together with a
 // patch of work just off to one side, the nearer one claims it and the other yields the

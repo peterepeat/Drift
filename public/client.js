@@ -1419,7 +1419,7 @@ function onMessage(raw) {
       if (Array.isArray(m.giants)) { // the gardeners stepped — glide toward their new spots
         for (let i = 0; i < m.giants.length; i++) {
           const mg = m.giants[i];
-          if (giants[i]) { const g = giants[i]; g._tx = mg.x; g._ty = mg.y; g.hx = mg.hx; g.hy = mg.hy; g.walk = mg.walk; g.tending = mg.tending; }
+          if (giants[i]) { const g = giants[i]; g._tx = mg.x; g._ty = mg.y; g.hx = mg.hx; g.hy = mg.hy; g.walk = mg.walk; g.tending = mg.tending; g.act = mg.act; g.stuck = mg.stuck; }
           else giants[i] = { ...mg, _tx: mg.x, _ty: mg.y };
         }
       }
@@ -1703,6 +1703,13 @@ function frame(now) {
       const p = creaturePos(o), s = worldToScreen(p.x, p.y);
       ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillText(o.act, s.x + 0.7, s.y + 13.7); // a soft shadow for legibility on any ground
       ctx.fillStyle = ACT_COLOR[o.act] || 'rgba(240,236,228,0.95)'; ctx.fillText(o.act, s.x, s.y + 13);
+    }
+    // the gardeners share their focus too (and flag when stuck — for diagnosing the wander)
+    for (const g of giants) {
+      if (g._tx == null || !g.act) continue;
+      const s = worldToScreen(g.x, g.y), word = g.act + (g.stuck >= 2 ? ' ·stuck' : ''), yo = GIANT_R * camera.z * 0.5 + 8;
+      ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillText(word, s.x + 0.7, s.y + yo + 0.7);
+      ctx.fillStyle = g.stuck >= 2 ? 'rgba(240,150,150,0.98)' : 'rgba(190,225,170,0.96)'; ctx.fillText(word, s.x, s.y + yo);
     }
   }
 

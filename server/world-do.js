@@ -248,6 +248,7 @@ const GIANT_STEP = 800;                   // world units it covers per tick — 
 const GIANT_MAX_HOPS = 5;                  // a tick resolves up to this many waypoints before settling — so a giant never burns a whole 60s tick standing still doing nothing
 const GIANT_TENDS_PER_TICK = 2;            // it can finish up to this many tending jobs in one tick (2× throughput in a cluster) — half the time per job, while its body animates calmly
 const GIANT_STUCK_TICKS = 4;              // no PROGRESS toward the goal this many ticks (e.g. a goal it can only circle) → give up + reroute (enough patience to round a pond first)
+const GIANT_AVOID_TICKS = 30;            // after giving up a stuck goal, don't re-pick THAT object for this many ticks — breaks the re-pick-the-same-unreachable-goal oscillation
 let GIANT_REACH = 64;                   // close enough to tend its goal
 let GIANT_SIGHT = 1300;                 // how far it looks for something to tend (wide, so a big boulder is noticed from afar)
 const GIANT_ROAM = 2600;                  // legacy stroll radius (now it explores the whole world via the bounds — see #giantPickGoal)
@@ -274,7 +275,8 @@ let MIN_STONE_R = 8;                     // the smallest a stone breaks down to 
 // BOULDERS LARGER than the (now generous) CAP — so a hand-built monolith up to CAP is left
 // standing, while a runaway boulder past it is walked back toward the middle.
 let STONE_EQ_R = 40;                     // "a decent stone" — at/above this the giant leaves it be (won't fuse it bigger)
-let STONE_CAP_R = 350;                   // the ceiling: hand-fusing caps here (≈5 √2-steps above the old 62 — a deliberate big rock), and the giant breaks down only stones LARGER than this
+let STONE_CAP_R = 350;                   // the PLAYER hand-fuse ceiling: drop one rock on another and they merge up to here, then bounce. SEPARATE from what the gardener breaks down (GIANT_BREAK_R) — the giant no longer spares a hand-built rock.
+let GIANT_BREAK_R = 62;                   // the gardener breaks down any stone LARGER than this, back toward the middle (it spares nothing big). Raise above STONE_CAP_R to make it never touch hand-built rocks.
 // Stone footprint in world units — base size from seed; `o.r` overrides once fused/split.
 function stoneRadius(seed) { return 12 + rng(seed >>> 0)() * 34; }      // MUST match the client's seed-derived base
 function stoneRadiusOf(o) { return o.r != null ? o.r : stoneRadius(o.seed); }
@@ -370,6 +372,7 @@ const TUNE_REG = {
   BEFRIEND_MS: { get: () => BEFRIEND_MS, set: (v) => { BEFRIEND_MS = v; }, def: BEFRIEND_MS },
   GIANT_REACH: { get: () => GIANT_REACH, set: (v) => { GIANT_REACH = v; }, def: GIANT_REACH },
   GIANT_SIGHT: { get: () => GIANT_SIGHT, set: (v) => { GIANT_SIGHT = v; }, def: GIANT_SIGHT },
+  GIANT_BREAK_R: { get: () => GIANT_BREAK_R, set: (v) => { GIANT_BREAK_R = v; }, def: GIANT_BREAK_R },
   GRIT_HANDLING: { get: () => GRIT_HANDLING, set: (v) => { GRIT_HANDLING = v; }, def: GRIT_HANDLING },
   MIN_STONE_R: { get: () => MIN_STONE_R, set: (v) => { MIN_STONE_R = v; }, def: MIN_STONE_R },
   STONE_EQ_R: { get: () => STONE_EQ_R, set: (v) => { STONE_EQ_R = v; }, def: STONE_EQ_R },
@@ -2042,7 +2045,7 @@ export class WorldRoom {
         // so it won't quit mid-route.
         const after = Math.hypot(g.goal.x - g.x, g.goal.y - g.y);
         if (after < (g.bestDist != null ? g.bestDist : Infinity) - GIANT_STEP * 0.25) { g.bestDist = after; g.stuck = 0; }
-        else if (++g.stuck >= GIANT_STUCK_TICKS) { g.goal = null; g.stuck = 0; g.bestDist = Infinity; }
+        else if (++g.stuck >= GIANT_STUCK_TICKS) { if (!g.avoid) g.avoid = new Map(); if (g.goal.id) g.avoid.set(g.goal.id, this.season / SEASON_PER_TICK + GIANT_AVOID_TICKS); g.goal = null; g.stuck = 0; g.bestDist = Infinity; } // blacklist the unreachable goal a while so we don't immediately re-pick it
         return; // walking this tick
       }
       // arrived
@@ -2064,7 +2067,7 @@ export class WorldRoom {
     if (goal.kind === 'thin') return o.family === 'seed' && this.#giantOvercrowded(o);
     if (goal.kind === 'fillhole') return o.family === 'mark';
     if (goal.kind === 'tendstone') return o.family === 'stone' && stoneRadiusOf(o) < STONE_EQ_R && !!this.#giantStonePartner(o);
-    if (goal.kind === 'breakstone') return o.family === 'stone' && stoneRadiusOf(o) > STONE_CAP_R;
+    if (goal.kind === 'breakstone') return o.family === 'stone' && stoneRadiusOf(o) > GIANT_BREAK_R;
     return false;
   }
   // A patient force toward balance: it CYCLES its attention so over time it does a variety
@@ -2073,6 +2076,7 @@ export class WorldRoom {
   // the density-throttled shedding; the giant actively reduces the surplus.)
   #giantPickGoal(g) {
     g.cycle = (g.cycle || 0) + 1;
+    if (g.avoid) { const t = this.season / SEASON_PER_TICK; for (const [id, exp] of g.avoid) if (exp <= t) g.avoid.delete(id); } // expire stale avoid entries
     // GIVE EACH OTHER ROOM: when the two crowd the same spot, the one FARTHER from its own
     // territory peels off toward home (the nearer-home one keeps working) — so a co-located
     // pair fans back out instead of standing on top of each other.
@@ -2096,7 +2100,7 @@ export class WorldRoom {
     add(this.#giantFindFillhole(g), 1.4);
     add(this.#giantFindStone(g), 0.6);                         // merging pebbles is low-stakes
     const boulder = this.#giantFindBoulder(g);
-    if (boulder) { const bo = this.objects.get(boulder.id); const br = bo ? stoneRadiusOf(bo) : STONE_CAP_R; add(boulder, 4.5 + (br - STONE_CAP_R) / 9); } // a ridiculous boulder is an URGENT job — scales steeply with how far past the cap
+    if (boulder) { const bo = this.objects.get(boulder.id); const br = bo ? stoneRadiusOf(bo) : GIANT_BREAK_R; add(boulder, 4.5 + (br - GIANT_BREAK_R) / 9); } // a big boulder is an URGENT job — scales steeply with how far past the break threshold
     if (cands.length) { cands.sort((p, q) => q.score - p.score); return cands[0].goal; }
     // THEN, with nothing pressing nearby: sow life into a barren patch, or pause by the
     // water / beside a creature. (So in a dense grove it tends; out in the open it seeds.)
@@ -2125,6 +2129,7 @@ export class WorldRoom {
     let best = null, bd = GIANT_SIGHT;
     for (const o of this.#gridNear(g.x, g.y, GIANT_SIGHT, filter)) {
       if (o.id === claimed) continue;
+      if (g.avoid && g.avoid.get(o.id) > this.season / SEASON_PER_TICK) continue; // recently gave up on this one (unreachable) — leave it be for a while
       const d = Math.hypot(o.x - g.x, o.y - g.y);
       if (d >= bd) continue;
       if (sib && Math.hypot(o.x - sx, o.y - sy) < d * GIANT_YIELD) continue; // the companion is clearly closer — leave it to them
@@ -2141,7 +2146,7 @@ export class WorldRoom {
   #giantFindStone(g) { return this.#giantNearest(g, 'tendstone', (o) => o.family === 'stone' && o.held === '' && stoneRadiusOf(o) < STONE_EQ_R, (o) => !!this.#giantStonePartner(o)); }
   // EQUILIBRIUM (stones, the break half): find a BOULDER (grown past the cap — e.g. a
   // legacy uncapped pile) and break it back down toward the middle.
-  #giantFindBoulder(g) { return this.#giantNearest(g, 'breakstone', (o) => o.family === 'stone' && o.held === '' && stoneRadiusOf(o) > STONE_CAP_R); }
+  #giantFindBoulder(g) { return this.#giantNearest(g, 'breakstone', (o) => o.family === 'stone' && o.held === '' && stoneRadiusOf(o) > GIANT_BREAK_R); }
   // SOW: breed life back where it's scarce — find a nearby SPARSE spot (no plant within
   // GIANT_SOW_CLEAR) and seed it. With THIN (cull the dense), this is the giant moving
   // life from where there's too much to where there's too little — a sway toward balance.
@@ -2213,7 +2218,7 @@ export class WorldRoom {
       this.#bcast({ t: 'object_gone', id: o.id }, null);
     } else if (goal.kind === 'breakstone') {
       // EQUILIBRIUM: break a boulder back down into middling pieces (mirrors a hand-break).
-      const o = this.objects.get(goal.id); if (!o || o.held !== '' || o.family !== 'stone' || stoneRadiusOf(o) <= STONE_CAP_R) return;
+      const o = this.objects.get(goal.id); if (!o || o.held !== '' || o.family !== 'stone' || stoneRadiusOf(o) <= GIANT_BREAK_R) return;
       const pieces = this.#breakStone(o, now); if (!pieces.length) return;
       this.#gridRemove(o); this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id); this.dirty.delete(o.id);
       await this.state.storage.delete('obj:' + o.id); this.objWrites++;
@@ -2231,7 +2236,7 @@ export class WorldRoom {
     // drink + watch: no mutation — the giant simply pauses a beat (walk=0); the visual is
     // the journeyer at the water's edge / standing beside a creature, watching.
   }
-  #giantPub(g) { return { x: g.x, y: g.y, hx: g.hx, hy: g.hy, walk: g.walk || 0, tending: g.tending || 0 }; }
+  #giantPub(g) { return { x: g.x, y: g.y, hx: g.hx, hy: g.hy, walk: g.walk || 0, tending: g.tending || 0, act: g.goal ? g.goal.kind : 'roam', stuck: g.stuck || 0 }; }
 
   // A creature's "strength" = its drawn size (mirrors public/creatures.js creatureR):
   // in a clash the smaller one is the loser. Server-only (it decides + broadcasts the

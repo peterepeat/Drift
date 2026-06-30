@@ -86,10 +86,18 @@
       <button data-n="10">+10 ticks</button>
       <button data-n="100">+100 ticks</button>
       <button data-n="500">+500 ticks</button>
-      <button id="ffrun" class="go">▶ run continuously</button>
-      <span class="note" id="ffrate"></span>
+      <label style="margin-left:10px">speed
+        <select id="ffspeed">
+          <option value="0">paused</option>
+          <option value="2">≈120× (2 ticks/s)</option>
+          <option value="10">≈600× (10/s)</option>
+          <option value="50">≈3000× (50/s)</option>
+          <option value="200">≈12000× (200/s)</option>
+          <option value="500">≈30000× (500/s · max)</option>
+        </select>
+      </label>
     </div>
-    <p class="note">One tick = 60s of world time. Continuous mode runs 200 ticks/s (≈12000× real-time) — great for watching long-term emergence and as a load test. It's the whole shared world, but that's just you. Cumulative <code>objWrites</code> shown so you can watch the write cost.</p>
+    <p class="note">One tick = 60s of world time. Pick a speed to run continuously (the world advances for everyone, but that's just you) — great for watching long-term emergence, and a load test at the top end. Cumulative <code>objWrites</code> shown so you can watch the write cost.</p>
     <div class="log" id="fflog"></div>
   </section>
 
@@ -181,10 +189,10 @@ async function tick(n) {
 }
 document.querySelectorAll('[data-n]').forEach((b) => b.onclick = () => tick(+b.dataset.n));
 let ffTimer = null;
-$('#ffrun').onclick = function () {
-  if (ffTimer) { clearInterval(ffTimer); ffTimer = null; this.textContent = '▶ run continuously'; this.classList.add('go'); $('#ffrate').textContent = ''; return; }
-  this.textContent = '⏸ stop'; this.classList.remove('go'); $('#ffrate').textContent = '≈12000× — running…';
-  ffTimer = setInterval(() => tick(200).catch(() => { clearInterval(ffTimer); ffTimer = null; $('#ffrun').textContent = '▶ run continuously'; $('#ffrun').classList.add('go'); $('#ffrate').textContent = ''; }), 1000);
+$('#ffspeed').onchange = function () {
+  if (ffTimer) { clearInterval(ffTimer); ffTimer = null; }
+  const n = +this.value;
+  if (n > 0) ffTimer = setInterval(() => tick(n).catch(() => { clearInterval(ffTimer); ffTimer = null; $('#ffspeed').value = '0'; }), 1000); // stop on error (e.g. bad key)
 };
 
 // ---- fill (load test) ------------------------------------------------------
