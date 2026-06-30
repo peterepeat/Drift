@@ -266,14 +266,13 @@ const GIANT_SOW_CLEAR = 220;             // it SOWS a seed where there's no plan
 // fused/split stone carries a stored radius `r` (absent ⇒ the seed-derived base size);
 // the SHAPE is still regenerated from the seed.
 const GRIT_HANDLING = 26;                 // handled this many times, a stone is worn to grit and gone
-const MAX_STONE_R = 88;                   // floor for the fuse/settle grid-query bound (this.maxStoneR)
-const MIN_STONE_R = 16;                   // the smallest a stone breaks down to — still clearly visible; below ~MIN×1.35 a break does nothing (the stone stays, never breaks to nothing)
-// EQUILIBRIUM: stones drift toward a middling size rather than merging without bound.
-// The giant merges PEBBLES (r < EQ) it finds paired up, and breaks down BOULDERS
-// (r > CAP) it finds — a patient two-way force toward the middle. Hand-fusing still
-// builds a chunky rock, but only up to CAP; past that the world won't let it grow.
+const MAX_STONE_R = 360;                  // floor for the fuse/settle grid-query bound (this.maxStoneR) — kept ≥ STONE_CAP_R so neighbour scans always cover the biggest rock
+const MIN_STONE_R = 8;                     // the smallest a stone breaks down to (≈2 √2-steps below the old 16 — a much smaller pebble); below ~MIN×1.35 (≈11) a break does nothing (the stone stays, never breaks to nothing)
+// EQUILIBRIUM: the giant merges PEBBLES (r < EQ) it finds paired up, and breaks down only
+// BOULDERS LARGER than the (now generous) CAP — so a hand-built monolith up to CAP is left
+// standing, while a runaway boulder past it is walked back toward the middle.
 const STONE_EQ_R = 40;                     // "a decent stone" — at/above this the giant leaves it be (won't fuse it bigger)
-const STONE_CAP_R = 62;                    // the ceiling: hand-fusing caps here, and the giant breaks down anything larger back toward the middle
+const STONE_CAP_R = 350;                   // the ceiling: hand-fusing caps here (≈5 √2-steps above the old 62 — a deliberate big rock), and the giant breaks down only stones LARGER than this
 // Stone footprint in world units — base size from seed; `o.r` overrides once fused/split.
 function stoneRadius(seed) { return 12 + rng(seed >>> 0)() * 34; }      // MUST match the client's seed-derived base
 function stoneRadiusOf(o) { return o.r != null ? o.r : stoneRadius(o.seed); }

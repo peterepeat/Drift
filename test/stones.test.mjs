@@ -98,16 +98,22 @@ const gapSR = Math.hypot(sd.x - rk2.x, sd.y - rk2.y);
 check(gapSR >= rRk + PLANT_BASE_R - 1.5, `a plant dropped on a rock settles beside it, not through it (gap ${gapSR.toFixed(1)} >= ${(rRk + PLANT_BASE_R).toFixed(1)})`);
 
 // 6. EQUILIBRIUM: hand-fusing builds a CHUNKY rock but CAPS — it never grows into an
-// unbounded monolith. (The giant breaks down anything bigger; see giant.test.mjs.)
-const STONE_CAP_R = 62;                                            // mirrors the server const
+// UNBOUNDED monolith. The cap is now generous (a deliberate big rock is allowed, ≈5 steps
+// above the old 62); the giant breaks down only stones LARGER than the cap (see giant.test.mjs).
+const STONE_CAP_R = 350;                                           // mirrors the server const
+const key2 = { 'x-admin-key': 'local-dev-key' };
 const BIG = pool[20], SPOT = { x: 14000, y: -14000 };
 await move(BIG, SPOT.x, SPOT.y);
 for (let i = 21; i <= 34; i++) await move(pool[i], SPOT.x, SPOT.y); // pile 14 more onto it
 const bigR = radOf(byId(await snap(), BIG));
-check(bigR > 46 && bigR <= STONE_CAP_R + 0.5, `a much-merged rock grows chunky but holds at the cap (r ${bigR.toFixed(0)} ≈ ${STONE_CAP_R})`);
-await move(pool[35], SPOT.x, SPOT.y);                              // pile one more onto the capped rock
+check(bigR > 62, `hand-fusing grows a rock well past the OLD 62 ceiling (r ${bigR.toFixed(0)})`);
+// Force it just under the new cap and fuse a full-size stone on → it holds AT the cap, not past:
+await fetch(`${base}/admin/place?id=${BIG}&x=${SPOT.x}&y=${SPOT.y}&r=349`, { method: 'POST', headers: key2 });
+await fetch(`${base}/admin/place?id=${pool[35]}&x=${SPOT.x + 4000}&y=${SPOT.y}&r=46`, { method: 'POST', headers: key2 });
+await move(pool[35], SPOT.x, SPOT.y);                              // pile the full-size stone onto the near-cap rock
 const wEdge = await snap();
-check(!byId(wEdge, pool[35]) && radOf(byId(wEdge, BIG)) <= STONE_CAP_R + 0.5, `more stones still merge in, but the rock won't grow past the cap (r ${radOf(byId(wEdge, BIG)).toFixed(0)})`);
+const capped = radOf(byId(wEdge, BIG));
+check(!byId(wEdge, pool[35]) && capped <= STONE_CAP_R + 0.5 && capped >= 349, `the rock holds AT the cap, never past it (r ${capped.toFixed(0)} ≈ ${STONE_CAP_R})`);
 
 // 7. NO ROCKS IN WATER: a stone dropped in a pool rolls out — the world keeps no free
 // stone sitting in any pool (place-time roll + the per-tick relocation pass).
@@ -123,15 +129,21 @@ check(drowned.length === 0, `no rocks sit in any pool after a drop + tick (${dro
 const r6 = byId(w7, ROCK);
 check(!r6 || !inWater(r6), 'the rock dropped in the pool rolled out to the bank');
 
-// 8. BREAK never deletes a rock: at the floor size a double-click is a NO-OP — the stone
-// stays (it used to crumble to nothing). Force a floor-size stone, break it, confirm it's
-// still there, whole.
-const key2 = { 'x-admin-key': 'local-dev-key' };
-await fetch(`${base}/admin/place?id=${pool[7]}&x=-16000&y=16000&r=16`, { method: 'POST', headers: key2 });
+// 8. BREAK never deletes a rock: at the FLOOR size a double-click is a NO-OP — the stone
+// stays (it used to crumble to nothing). The floor is now smaller (MIN_STONE_R 8), so a
+// rock that used to BE the floor (r 16) now splits — proving the floor dropped.
+// (a) a floor-size rock (r 8) is unbreakable — the double-click leaves it whole:
+await fetch(`${base}/admin/place?id=${pool[7]}&x=-16000&y=16000&r=8`, { method: 'POST', headers: key2 });
 const r8 = radOf(byId(await snap(), pool[7]));
 ctl.send(JSON.stringify({ t: 'break', id: pool[7], token: TOK, ts: Date.now() })); await wait(150);
 const after8 = byId(await snap(), pool[7]);
-check(!!after8 && radOf(after8) === r8, `a floor-size rock is no longer breakable — a double-click leaves it whole (r ${r8.toFixed(0)})`);
+check(!!after8 && radOf(after8) === r8, `a floor-size rock (r 8) is no longer breakable — a double-click leaves it whole (r ${r8.toFixed(0)})`);
+// (b) a rock at the OLD floor (r 16) now DOES break — the floor dropped from 16 to 8:
+await fetch(`${base}/admin/place?id=${pool[10]}&x=19000&y=-19000&r=16`, { method: 'POST', headers: key2 });
+const r16 = radOf(byId(await snap(), pool[10]));
+ctl.send(JSON.stringify({ t: 'break', id: pool[10], token: TOK, ts: Date.now() })); await wait(150);
+const after16 = byId(await snap(), pool[10]);
+check(!after16 && r16 === 16, `a rock at the old floor (r 16) now splits into pieces — the floor dropped to 8 (was r ${r16.toFixed(0)})`);
 
 ctl.close();
 console.log(`\n${pass} passed, ${fail} failed`);

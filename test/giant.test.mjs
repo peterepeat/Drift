@@ -73,16 +73,16 @@ const sAfter = (await snap()).objects.filter((o) => near(o, SOW, 1600)).length;
 check(sAfter > sBefore, `the giant sows life where it's scarce (${sBefore} -> ${sAfter})`);
 
 // 7. EQUILIBRIUM (stones) — it BREAKS DOWN a boulder back toward the middle. Hand-fusing
-// now caps below boulder size, so we forge one directly (admin place ?r=) past the cap.
+// now caps at a generous size, so we forge one directly (admin place ?r=) PAST that cap.
 const BOULDER = { x: -11000, y: -11000 };
 const st = (await snap()).objects.find((o) => o.family === 'stone' && !o.held);
-await fetch(`${base}/admin/place?id=${st.id}&x=${BOULDER.x}&y=${BOULDER.y}&r=86`, { method: 'POST', headers: key }).then((r) => r.json());
+await fetch(`${base}/admin/place?id=${st.id}&x=${BOULDER.x}&y=${BOULDER.y}&r=400`, { method: 'POST', headers: key }).then((r) => r.json());
 await setGiant(BOULDER.x, BOULDER.y);
-const nearB = (w) => w.objects.filter((o) => o.family === 'stone' && Math.hypot(o.x - BOULDER.x, o.y - BOULDER.y) < 400);
-const hadBoulder = nearB(await snap()).some((o) => (o.r || 0) > 62);
+const nearB = (w) => w.objects.filter((o) => o.family === 'stone' && Math.hypot(o.x - BOULDER.x, o.y - BOULDER.y) < 600);
+const hadBoulder = nearB(await snap()).some((o) => (o.r || 0) > 350);
 await tickG(2);                                    // it reaches the boulder and breaks it down
 const afterB = nearB(await snap());
-const stillBoulder = afterB.some((o) => (o.r || 0) > 62);
+const stillBoulder = afterB.some((o) => (o.r || 0) > 350);
 check(hadBoulder && !stillBoulder && afterB.length >= 2, `the giant breaks a boulder back toward the middle (1 boulder -> ${afterB.length} smaller stones, none over the cap)`);
 
 // 8. SPREAD — the two gardeners don't pile onto the same spot. Stacked together with a
@@ -106,7 +106,7 @@ const NX = 24000, NY = 24000;                               // empty far field, 
 const minorPlant = (await snap()).objects.find((o) => o.family === 'seed' && !o.held);
 await place(minorPlant.id, NX + 60, NY); await lifecycle(minorPlant.id, 0.3, 0); // a small ripen job right beside the giant
 const bigStone = (await snap()).objects.find((o) => o.family === 'stone' && !o.held);
-await fetch(`${base}/admin/place?id=${bigStone.id}&x=${NX + 780}&y=${NY}&r=88`, { method: 'POST', headers: key }).then((r) => r.json()); // a big boulder 780u off (within sight)
+await fetch(`${base}/admin/place?id=${bigStone.id}&x=${NX + 780}&y=${NY}&r=400`, { method: 'POST', headers: key }).then((r) => r.json()); // a big boulder 780u off (within sight), past the cap
 await setGiant(NX, NY);
 await tickG(1);                                             // it scores the jobs and heads for the worse one
 const goal9 = (await fetch(`${base}/admin/giant`, { method: 'POST', headers: key }).then((r) => r.json())).giant.goal;
