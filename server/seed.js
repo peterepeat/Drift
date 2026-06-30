@@ -53,7 +53,7 @@ export function makeRecord(id, family, seed, x, y, now, maturity = 0, aged = 0) 
     id, family, x, y, seed,
     handling: 0, maturity, aged, heat: 0, shedAccum: 0,
     last_touched: now,        // ms timestamp; drives the derived isolation/fade clock
-    last_eval: now, created_at: now,
+    created_at: now,
     held: '', heldConn: '', held_at: 0,
   };
 }

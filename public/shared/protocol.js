@@ -52,8 +52,10 @@ export const isWireField = (k) => WIRE_SET.has(k);
 
 // ---- forbidden raw record fields (must NEVER reach the wire) ------------------
 // Server-internal bookkeeping that rides the in-memory / stored record: the raw
-// holder connection, the thermal/aging/decay accumulators, and the per-object eval
-// clock. A projection carrying any of these is an invariant-#3 leak.
+// holder connection, the thermal/aging/decay accumulators, and the legacy per-object
+// eval clock (`last_eval` is no longer stamped on new records, but pre-existing ones
+// still carry it — kept here so a stray spread of a legacy record still scrubs it).
+// A projection carrying any of these is an invariant-#3 leak.
 //
 // SUBTLE: the session TOKEN does not live under `token` on a record — it rides
 // under `held` (server-side `o.held = m.token`), a WHITELISTED field whose wire
