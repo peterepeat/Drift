@@ -598,8 +598,7 @@ export class WorldRoom {
       const matures = [...this.objects.values()].filter((o) => o.family === 'seed' && o.maturity >= 1);
       const parent = matures.length ? matures[Math.floor(Math.random() * matures.length)] : { x: 0, y: 0 };
       const an = this.#spawnAnomaly(parent, Date.now(), at, url.searchParams.get('kind'));
-      this.objects.set(an.id, an); this.#gridAdd(an); await this.#persist(an);
-      this.#bcast({ t: 'object_new', o: this.#pub(an) }, null);
+      await this.#addObject(an);
       return Response.json({ ok: true, anomaly: { id: an.id, kind: an.kind, x: an.x, y: an.y } });
     }
 
@@ -609,8 +608,7 @@ export class WorldRoom {
       const px = url.searchParams.get('x'), py = url.searchParams.get('y');
       const at = (px != null && py != null) ? { x: parseFloat(px), y: parseFloat(py) } : null;
       const cr = this.#spawnCrystal(Date.now(), at);
-      this.objects.set(cr.id, cr); this.#gridAdd(cr); await this.#persist(cr);
-      this.#bcast({ t: 'object_new', o: this.#pub(cr) }, null);
+      await this.#addObject(cr);
       return Response.json({ ok: true, crystal: { id: cr.id, x: cr.x, y: cr.y } });
     }
 
@@ -620,8 +618,7 @@ export class WorldRoom {
       const px = url.searchParams.get('x'), py = url.searchParams.get('y');
       const at = (px != null && py != null) ? { x: parseFloat(px), y: parseFloat(py) } : null;
       const cr = this.#spawnCreature(Date.now(), at, url.searchParams.get('kind'));
-      this.objects.set(cr.id, cr); this.#gridAdd(cr); await this.#persist(cr);
-      this.#bcast({ t: 'object_new', o: this.#pub(cr) }, null);
+      await this.#addObject(cr);
       return Response.json({ ok: true, creature: { id: cr.id, kind: cr.kind, x: cr.x, y: cr.y } });
     }
 
@@ -641,8 +638,7 @@ export class WorldRoom {
       if (!this.#adminOk(request)) return Response.json({ ok: false, error: 'forbidden' }, { status: 403 });
       const pi = Math.max(0, Math.min(POOLS.length - 1, parseInt(url.searchParams.get('pond') || '0', 10) || 0));
       const f = this.#spawnFish(Date.now(), POOLS[pi]);
-      this.objects.set(f.id, f); this.#gridAdd(f); await this.#persist(f);
-      this.#bcast({ t: 'object_new', o: this.#pub(f) }, null);
+      await this.#addObject(f);
       return Response.json({ ok: true, fish: { id: f.id, x: f.x, y: f.y, pond: pi } });
     }
 
@@ -937,6 +933,31 @@ export class WorldRoom {
   }
   async #persist(o) { await this.state.storage.put('obj:' + o.id, o); this.dirty.delete(o.id); this.objWrites++; } // now byte-current on disk
 
+  // ---- object add / remove (the single home of the spawn/death accounting) ----
+  // Two symmetric helpers that own the coupling between this.objects, the spatial
+  // grid, the broadcast/drift chatter memos, the dirty set, and storage. Funnelling
+  // every spawn/death through them keeps `objWrites` exact (invariant #1: the tick's
+  // only discrete writes are spawns/deaths/reclaims) and makes a forgotten map — a
+  // ghost grid hit, a stale broadcast-throttle, a storage leak — structurally
+  // impossible. Replaces the spawn-triple (~11×) and the delete-dance (~12×, one
+  // copy of which had already drifted: the mark-eviction omitted the chatter purges).
+  async #addObject(o) {
+    this.objects.set(o.id, o);
+    this.#gridAdd(o);
+    await this.#persist(o);                       // the discrete spawn write
+    this.#bcast({ t: 'object_new', o: this.#pub(o) }, null);
+  }
+  async #removeObject(o, extras = null) {
+    this.#gridRemove(o);
+    this.objects.delete(o.id);
+    this.bcastMark.delete(o.id);
+    this.driftMark.delete(o.id);
+    this.dirty.delete(o.id);
+    await this.state.storage.delete('obj:' + o.id); // the discrete death write
+    this.objWrites++;
+    this.#bcast({ t: 'object_gone', id: o.id, ...(extras || {}) }, null);
+  }
+
   // ---- WebSocket message handling -------------------------------------------
   async webSocketMessage(ws, raw) {
     let m; try { m = JSON.parse(raw); } catch { return; }
@@ -980,15 +1001,11 @@ export class WorldRoom {
         // splash) and a fish rises if the pond has room — drop a bug, feed the water.
         const pond = o.kind === 'crawler' ? poolContaining(o.x, o.y) : null;
         if (pond) {
-          this.#gridRemove(o);
-          this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id); this.dirty.delete(o.id);
-          await this.state.storage.delete('obj:' + o.id); this.objWrites++;
-          this.#bcast({ t: 'object_gone', id: o.id, splash: true, x: o.x, y: o.y }, null);
+          await this.#removeObject(o, { splash: true, x: o.x, y: o.y });
           const counts = this.#fishCountByPond(), idx = POOLS.indexOf(pond);
           if (idx >= 0 && counts[idx] < FISH_MAX_PER_POND) {
             const f = this.#spawnFish(now, pond);
-            this.objects.set(f.id, f); this.#gridAdd(f); await this.#persist(f);
-            this.#bcast({ t: 'object_new', o: this.#pub(f) }, null);
+            await this.#addObject(f);
           }
           return;
         }
@@ -1008,10 +1025,7 @@ export class WorldRoom {
         // blended, powers combined. Mirrors stone fusing; the dropped one is consumed.
         const fused = this.#tryFuseAnomaly(o, now);
         if (fused) {
-          this.#gridRemove(o);
-          this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id); this.dirty.delete(o.id);
-          await this.state.storage.delete('obj:' + o.id); this.objWrites++;
-          this.#bcast({ t: 'object_gone', id: o.id, fused: fused.id }, null);
+          await this.#removeObject(o, { fused: fused.id });
           await this.#persist(fused);
           this.#bcast(this.#stateMsg(fused, now), null);
           return;
@@ -1042,10 +1056,7 @@ export class WorldRoom {
       if (o.family === 'stone') {
         // Worn to grit by too much handling — a brief scatter, then gone (§4.3).
         if (o.handling >= GRIT_HANDLING) {
-          this.#gridRemove(o);
-          this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id); this.dirty.delete(o.id);
-          await this.state.storage.delete('obj:' + o.id); this.objWrites++;
-          this.#bcast({ t: 'object_gone', id: o.id, grit: true }, null);
+          await this.#removeObject(o, { grit: true });
           return;
         }
         // Dropped onto another stone → FUSE (target grows, this one is consumed) — UNLESS the
@@ -1053,10 +1064,7 @@ export class WorldRoom {
         const fused = this.#tryFuse(o, now);
         if (fused && fused.bounce) { bounced = true; }
         else if (fused) {
-          this.#gridRemove(o);
-          this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id); this.dirty.delete(o.id);
-          await this.state.storage.delete('obj:' + o.id); this.objWrites++;
-          this.#bcast({ t: 'object_gone', id: o.id, fused: fused.id }, null);
+          await this.#removeObject(o, { fused: fused.id });
           await this.#persist(fused);
           this.#bcast(this.#stateMsg(fused, now), null);
           this.#updateCog(fused.x, fused.y);
@@ -1083,23 +1091,14 @@ export class WorldRoom {
       if (o.family === 'stone') { pieces = this.#breakStone(o, now); puff = { grit: true }; } // a dust puff
       else if (o.family === 'anomaly' && this.#anomalyKindsOf(o).length > 1) { pieces = this.#breakAnomaly(o, now); puff = { burst: true, x: o.x, y: o.y }; } // a soft ripple
       if (!pieces || !pieces.length) return; // nothing breakable here (a too-small stone just stays — never breaks to nothing)
-      this.#gridRemove(o);
-      this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id); this.dirty.delete(o.id);
-      await this.state.storage.delete('obj:' + o.id); this.objWrites++;
-      this.#bcast({ t: 'object_gone', id: o.id, ...puff }, null);
-      for (const c of pieces) {
-        this.objects.set(c.id, c); this.#gridAdd(c); await this.#persist(c);
-        this.#bcast({ t: 'object_new', o: this.#pub(c) }, null);
-      }
+      await this.#removeObject(o, puff);
+      for (const c of pieces) await this.#addObject(c);
 
     } else if (m.t === 'dissolve') {
       // Only the current holder can dissolve an anomaly (the deliberate 10s hold).
       const o = this.objects.get(m.id);
       if (!o || o.family !== 'anomaly' || o.held !== m.token) return;
-      this.#gridRemove(o);
-      this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id); this.dirty.delete(o.id);
-      await this.state.storage.delete('obj:' + o.id); this.objWrites++;
-      this.#bcast({ t: 'object_gone', id: o.id }, null);
+      await this.#removeObject(o);
 
     } else if (m.t === 'mark') {
       // Double-click bare ground → leave a rock-shaped tinted stain (Wave S). Visible to
@@ -1109,14 +1108,10 @@ export class WorldRoom {
       let count = 0, oldest = null;
       for (const o of this.objects.values()) if (o.family === 'mark') { count++; if (!oldest || o.created_at < oldest.created_at) oldest = o; }
       if (count >= MARK_MAX && oldest) { // make room: evict the oldest mark
-        this.#gridRemove(oldest);
-        this.objects.delete(oldest.id); this.dirty.delete(oldest.id);
-        await this.state.storage.delete('obj:' + oldest.id); this.objWrites++;
-        this.#bcast({ t: 'object_gone', id: oldest.id }, null);
+        await this.#removeObject(oldest);
       }
       const mk = makeMarkRecord(crypto.randomUUID(), (Math.random() * 4294967296) >>> 0, m.x, m.y, now);
-      this.objects.set(mk.id, mk); this.#gridAdd(mk); await this.#persist(mk);
-      this.#bcast({ t: 'object_new', o: this.#pub(mk) }, null);
+      await this.#addObject(mk);
 
     } else if (m.t === 'giant_skip') {
       // a friendly tap on the giant — it lets go of what it was about to do and ambles on
@@ -1454,13 +1449,8 @@ export class WorldRoom {
       if (reclaimed.has(o.id)) await this.#persist(o); else this.dirty.add(o.id);
       this.#bcast(this.#stateMsg(o, now), null);
     }
-    for (const o of spawned) { this.objects.set(o.id, o); this.#gridAdd(o); await this.#persist(o); this.#bcast({ t: 'object_new', o: this.#pub(o) }, null); }
-    for (const o of gone) {
-      this.#gridRemove(o);
-      this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id); this.dirty.delete(o.id);
-      await this.state.storage.delete('obj:' + o.id); this.objWrites++;
-      this.#bcast({ t: 'object_gone', id: o.id }, null);
-    }
+    for (const o of spawned) await this.#addObject(o);
+    for (const o of gone) await this.#removeObject(o);
 
     this.season += SEASON_PER_TICK; // advance the world's own season clock (in memory every tick)
     await this.state.storage.put('meta:season', this.season); // one tiny key; cheap
@@ -1637,10 +1627,7 @@ export class WorldRoom {
   }
   // BURST: a grown tree shatters into a scatter of fresh saplings (kept out of water).
   async #burstPlant(target, now) {
-    this.#gridRemove(target);
-    this.objects.delete(target.id); this.bcastMark.delete(target.id); this.driftMark.delete(target.id); this.dirty.delete(target.id);
-    await this.state.storage.delete('obj:' + target.id); this.objWrites++;
-    this.#bcast({ t: 'object_gone', id: target.id, burst: true, x: target.x, y: target.y }, null);
+    await this.#removeObject(target, { burst: true, x: target.x, y: target.y });
     const n = ANOM_BURST_MIN + Math.floor(Math.random() * (ANOM_BURST_MAX - ANOM_BURST_MIN + 1));
     for (let i = 0; i < n; i++) {
       const a = (i / n) * Math.PI * 2 + Math.random() * 0.7, d = 28 + Math.random() * 48;
@@ -1648,8 +1635,7 @@ export class WorldRoom {
       const pond = poolContaining(x, y); if (pond) { const b = bankPoint(pond, x, y); x = b.x; y = b.y; } // saplings never land in water
       const s = makeSeedRecord(crypto.randomUUID(), (Math.random() * 4294967296) >>> 0, x, y, now);
       s.maturity = 0.06 + Math.random() * 0.06; // a hair past a seed — clearly young sprouts, not dormant seeds
-      this.objects.set(s.id, s); this.#gridAdd(s); await this.#persist(s);
-      this.#bcast({ t: 'object_new', o: this.#pub(s) }, null);
+      await this.#addObject(s);
     }
   }
 
@@ -2204,33 +2190,26 @@ export class WorldRoom {
       o.x = partner.x; o.y = partner.y; o.last_touched = now; this.#gridUpdate(o); // nudge the stray onto its partner → fuse into a larger stone
       const fused = this.#tryFuse(o, now);
       if (fused) {
-        this.#gridRemove(o); this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id); this.dirty.delete(o.id);
-        await this.state.storage.delete('obj:' + o.id); this.objWrites++;
-        this.#bcast({ t: 'object_gone', id: o.id, fused: fused.id }, null);
+        await this.#removeObject(o, { fused: fused.id });
         await this.#persist(fused); this.#bcast(this.#stateMsg(fused, now), null);
       } else { this.#gridUpdate(o); await this.#persist(o); this.#bcast(this.#stateMsg(o, now), null); }
     } else if (goal.kind === 'thin' || goal.kind === 'fillhole') {
       // thin a surplus plant from an over-crowded patch, or fill in a dug hole — either
       // way the thing it reached is gently removed (a patient force toward balance).
       const o = this.objects.get(goal.id); if (!o || o.held !== '') return;
-      this.#gridRemove(o); this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id); this.dirty.delete(o.id);
-      await this.state.storage.delete('obj:' + o.id); this.objWrites++;
-      this.#bcast({ t: 'object_gone', id: o.id }, null);
+      await this.#removeObject(o);
     } else if (goal.kind === 'breakstone') {
       // EQUILIBRIUM: break a boulder back down into middling pieces (mirrors a hand-break).
       const o = this.objects.get(goal.id); if (!o || o.held !== '' || o.family !== 'stone' || stoneRadiusOf(o) <= GIANT_BREAK_R) return;
       const pieces = this.#breakStone(o, now); if (!pieces.length) return;
-      this.#gridRemove(o); this.objects.delete(o.id); this.bcastMark.delete(o.id); this.driftMark.delete(o.id); this.dirty.delete(o.id);
-      await this.state.storage.delete('obj:' + o.id); this.objWrites++;
-      this.#bcast({ t: 'object_gone', id: o.id, grit: true }, null); // a soft dust puff, like a hand-break
-      for (const c of pieces) { this.objects.set(c.id, c); this.#gridAdd(c); await this.#persist(c); this.#bcast({ t: 'object_new', o: this.#pub(c) }, null); }
+      await this.#removeObject(o, { grit: true }); // a soft dust puff, like a hand-break
+      for (const c of pieces) await this.#addObject(c);
     } else if (goal.kind === 'sow') {
       // breed life where it's scarce — a young sprout at this still-empty spot
       if (this.objects.size < this.maxObjects && !poolContaining(g.x, g.y) && this.#giantSparse(g.x, g.y)) {
         const s = makeSeedRecord(crypto.randomUUID(), (Math.random() * 4294967296) >>> 0, g.x, g.y, now);
         s.maturity = 0.08 + Math.random() * 0.05; // clearly a sprout, not dormant
-        this.objects.set(s.id, s); this.#gridAdd(s); await this.#persist(s);
-        this.#bcast({ t: 'object_new', o: this.#pub(s) }, null);
+        await this.#addObject(s);
       }
     }
     // drink + watch: no mutation — the giant simply pauses a beat (walk=0); the visual is
