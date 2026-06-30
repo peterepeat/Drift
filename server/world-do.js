@@ -25,6 +25,7 @@ import { stoneRadius } from '../public/shared/sizing.js'; // shared form-from-se
 import { MSG, scrubForbidden } from '../public/shared/protocol.js'; // shared wire message-types + invariant-#3 field whitelist
 import { familyOf } from '../public/shared/families.js'; // shared per-family behaviour flags (drift/fade/tend/trim/deflect)
 import { CATALOG as TUNE_CATALOG, coerce as tuneCoerce } from './tuning.js'; // operator panel: full knob catalogue + value coercion
+import { HeatField } from './systems/heat.js'; // the coarse thermal field — decay/gradient/stone-formation (PRD §4.1)
 const TUNE_KIND = Object.fromEntries(TUNE_CATALOG.map((c) => [c.key, c.kind]));
 
 const TICK_MS = 60000;
@@ -314,14 +315,9 @@ const PATCH_MAX = 400;                     // cap objects streamed per viewport 
 // wider than FLOW_STONE_R so a "stones near a point" query spans few cells.
 const GRID_CELL = 256;                     // world units per grid cell (> FLOW_STONE_R = 70)
 
-// ---- thermal field & stone formation (PRD §4.1) ----------------------------
-// Every area carries a slow, invisible heat value (0..1) that rises where people
-// linger and decays over time (season-modulated: Growing lets heat linger,
-// Resting bleeds it away). Sustained-warm cells slowly grow STONES (PRD §3/§4.1:
-// "form slowly in warm areas" — the maker is long gone before it finishes), and
-// the heat GRADIENT bends the water flow toward cooler areas. This field is
-// SEPARATE from the per-object `heat` that drives growth (unchanged), and is
-// never transmitted — heat is invisible (PRD §4.1).
+// ---- thermal field & stone formation (PRD §4.1): the invisible heat grid that
+// decays, bends the water flow toward cooler areas, and slowly forms stones in
+// sustained-warm spots — now lives in server/systems/heat.js (HeatField). ------
 // ---- ground marks (Family 7, Wave S): a shared, ephemeral drawing surface ----
 // Double-click bare ground → a small rock-shaped tinted stain, visible to everyone,
 // that HEALS over ~10 minutes (the tick removes it once aged out). Capped so the
@@ -329,13 +325,8 @@ const GRID_CELL = 256;                     // world units per grid cell (> FLOW_
 const MARK_LIFE_MS = 10 * TICK_MS;         // a mark fully heals (and is removed) after ~10 min
 const MARK_MAX = 400;                       // at most this many marks at once (oldest evicted)
 
-const HEAT_CELL = 200;                     // world units per heat cell
-const FIELD_HALF = 2000;                   // field covers ±this around the origin (20×20 = 400 cells)
-const HEAT_MAX = 1.0;                      // per-cell heat ceiling
-const HEAT_GAIN_FIELD = 0.5;               // heat a present person adds to their cell per tick
-const HEAT_SEASON_DECAY = { growing: 0.99, turning: 0.98, resting: 0.95, rising: 0.985 }; // heat retained/tick
-const STONE_HEAT = 0.35;                   // a cell this warm makes progress toward forming a stone
-const STONE_FORM_TICKS = 90;               // sustained warm ticks to form one stone (~forms while you're gone)
+// (HEAT_CELL/FIELD_HALF/HEAT_MAX/HEAT_GAIN_FIELD/HEAT_SEASON_DECAY/STONE_HEAT/
+//  STONE_FORM_TICKS now live in server/systems/heat.js with the HeatField class.)
 
 function seasonBlend(phase) {
   const i = Math.floor(phase) % 4, frac = phase - Math.floor(phase);
@@ -426,9 +417,7 @@ export class WorldRoom {
     this.dirty = new Set();        // ids whose in-memory state diverged from disk since last #persist (checkpoint flushes these)
     this.objWrites = 0;            // discrete per-object row writes+deletes (NOT the batched checkpoint) — the rows_written lever, exposed for ops/tests
     this.flowNoise = null;         // lazily-built makeNoise(FLOW_SEED); shared with the client visual
-    this.heat = null;              // coarse thermal field { w, data[], form[] } (lazy; PRD §4.1)
-    this.heatActive = false;       // any heat/formation this tick (skip persisting an inert field)
-    this.heatWasActive = false;    // was active last tick (so the field's final settle-to-zero persists once)
+    this.heat = new HeatField();   // coarse thermal field — decay/gradient/stone-formation (PRD §4.1; server/systems/heat.js)
     this.lastCheckpoint = 0;       // wall-clock ms of the last full snapshot (persisted; survives eviction)
     this.season = 0;               // monotonic season phase (floor % 4 = current season)
     this.bounds = null;            // {x,y} half-extents of the object field — the client clamps its camera to this (no wandering into the void)
@@ -458,7 +447,7 @@ export class WorldRoom {
     this.cog = (await this.state.storage.get('cog')) || { x: 0, y: 0, n: 0 };
     for (const g of this.giants) { g.x = this.cog.x + g.bias.x * 0.3; g.y = this.cog.y + g.bias.y * 0.3; } // the gardeners begin near the world's heart, a little apart
     this.season = (await this.state.storage.get('meta:season')) || 0;
-    this.heat = (await this.state.storage.get('field:heat')) || null; // rebuilt lazily if absent
+    this.heat.load(await this.state.storage.get('field:heat')); // rebuilt lazily if absent
     this.lastCheckpoint = (await this.state.storage.get('meta:checkpoint')) || 0;
     this.tuneOverrides = (await this.state.storage.get('meta:tuning')) || {}; // operator-panel overrides, re-applied over the defaults each load
     for (const [k, v] of Object.entries(this.tuneOverrides)) if (TUNE_REG[k]) TUNE_REG[k].set(v);
@@ -700,11 +689,11 @@ export class WorldRoom {
       if (!Number.isFinite(x) || !Number.isFinite(y)) return Response.json({ ok: false, error: 'bad coords' }, { status: 400 });
       const setv = url.searchParams.get('set');
       if (setv != null && Number.isFinite(parseFloat(setv))) {
-        this.#ensureHeat().data[this.#cellIndex(x, y)] = Math.max(0, Math.min(HEAT_MAX, parseFloat(setv)));
-        await this.state.storage.put('field:heat', this.heat);
+        this.heat.setCell(x, y, parseFloat(setv));
+        await this.state.storage.put('field:heat', this.heat.field);
       }
-      const g = this.#heatGrad(x, y);
-      return Response.json({ ok: true, x, y, heat: this.#heatAt(x, y), gx: g.gx, gy: g.gy });
+      const g = this.heat.grad(x, y);
+      return Response.json({ ok: true, x, y, heat: this.heat.at(x, y), gx: g.gx, gy: g.gy });
     }
 
     // Ops/testing only: bulk-spawn N cheap dormant seeds to push toward the ceiling. Gated.
@@ -1245,8 +1234,12 @@ export class WorldRoom {
     const gMult = lerp(GROWTH_MULT[sb.cur], GROWTH_MULT[sb.next], sb.fade);
     const aMult = lerp(AGE_MULT[sb.cur], AGE_MULT[sb.next], sb.fade);
     // Thermal field first: it bends the flow (read during drift below) and slowly
-    // grows stones in sustained-warm areas.
-    for (const s of this.#updateHeat(now, sb)) ctx.spawn(s);
+    // grows stones in sustained-warm areas. Pass the live presences (the warmth
+    // sources) + a room check; update() returns the formed stones and the ledger
+    // spawns them (so write-economy accounting stays single-source, invariant #1).
+    const livePresence = [];
+    for (const p of this.presencePos.values()) if (now - p.ts <= PRESENCE_STALE_MS) livePresence.push(p);
+    for (const s of this.heat.update(now, sb, livePresence, (n) => this.objects.size + n < this.maxObjects)) ctx.spawn(s);
     const anomalies = [];
     for (const o of this.objects.values()) if (o.family === 'anomaly') anomalies.push(o);
     for (const o of this.objects.values()) {
@@ -1343,7 +1336,7 @@ export class WorldRoom {
     for (const o of this.objects.values()) {
       const fam = familyOf(o.family);
       if (fam.tended || o.held !== '') continue; // anomaly/creature/fish/mark are alive — never faded, never dirtied
-      if (this.#heatAt(o.x, o.y) > WARM_EPS) { o.last_touched = now; ctx.defer(o); continue; } // refresh is checkpoint-only
+      if (this.heat.at(o.x, o.y) > WARM_EPS) { o.last_touched = now; ctx.defer(o); continue; } // refresh is checkpoint-only
       if (fam.fades && (now - o.last_touched) >= STONE_FADE_MS) ctx.remove(o); // only a forgotten stone crumbles to grit
     }
 
@@ -1510,8 +1503,8 @@ export class WorldRoom {
     await this.state.storage.put('meta:season', this.season); // one tiny key; cheap
     // Persist the thermal field only when it's live (or just settled to zero) —
     // an idle, all-zero world shouldn't write the field every tick forever.
-    if (this.heat && (this.heatActive || this.heatWasActive)) await this.state.storage.put('field:heat', this.heat);
-    this.heatWasActive = this.heatActive;
+    if (this.heat.needsPersist) await this.state.storage.put('field:heat', this.heat.field);
+    this.heat.endTick();
 
     // Checkpoint: only every CHECKPOINT_MS (wall-clock, persisted so it fires
     // across eviction). Flushes the dirty set — the in-memory drift no discrete
@@ -1736,8 +1729,8 @@ export class WorldRoom {
         vy += (ty * FLOW_STONE_PUSH + ry * FLOW_STONE_RADIAL) * f;
       }
     }
-    if (this.heat) { // water flows toward cooler areas (PRD §4.2) — bend along -∇heat
-      const g = this.#heatGrad(x, y);
+    if (this.heat.field) { // water flows toward cooler areas (PRD §4.2) — bend along -∇heat
+      const g = this.heat.grad(x, y);
       vx -= g.gx * FLOW_HEAT; vy -= g.gy * FLOW_HEAT;
     }
     const m = Math.hypot(vx, vy) || 1;
@@ -1745,67 +1738,8 @@ export class WorldRoom {
     return { vx: (vx / m) * mag, vy: (vy / m) * mag };
   }
 
-  // ---- thermal field ---------------------------------------------------------
-  #ensureHeat() {
-    if (!this.heat) {
-      const w = Math.round((FIELD_HALF * 2) / HEAT_CELL);
-      this.heat = { w, data: new Array(w * w).fill(0), form: new Array(w * w).fill(0) };
-    }
-    return this.heat;
-  }
-  #cellIndex(x, y) {
-    const h = this.#ensureHeat();
-    const cx = Math.max(0, Math.min(h.w - 1, Math.floor((x + FIELD_HALF) / HEAT_CELL)));
-    const cy = Math.max(0, Math.min(h.w - 1, Math.floor((y + FIELD_HALF) / HEAT_CELL)));
-    return cy * h.w + cx;
-  }
-  #heatAt(x, y) { return this.#ensureHeat().data[this.#cellIndex(x, y)]; }
-  // Heat gradient as a raw cell-to-cell difference (range ~[-1,1]); flow bends along -grad.
-  #heatGrad(x, y) {
-    return { gx: this.#heatAt(x + HEAT_CELL, y) - this.#heatAt(x - HEAT_CELL, y),
-             gy: this.#heatAt(x, y + HEAT_CELL) - this.#heatAt(x, y - HEAT_CELL) };
-  }
-  // One thermal tick: decay every cell (season-modulated), add warmth from live
-  // presences, and let sustained-warm cells make progress toward forming a stone.
-  // Returns any stones formed this tick (the maker is long gone — PRD §4.1).
-  #updateHeat(now, sb) {
-    const h = this.#ensureHeat();
-    const decay = lerp(HEAT_SEASON_DECAY[sb.cur], HEAT_SEASON_DECAY[sb.next], sb.fade);
-    for (let i = 0; i < h.data.length; i++) h.data[i] *= decay;
-    const occupied = new Set();
-    for (const p of this.presencePos.values()) {
-      if (now - p.ts > PRESENCE_STALE_MS) continue;
-      const i = this.#cellIndex(p.x, p.y);
-      h.data[i] = Math.min(HEAT_MAX, h.data[i] + HEAT_GAIN_FIELD);
-      occupied.add(i);
-    }
-    const formed = [];
-    let active = false;
-    for (let i = 0; i < h.data.length; i++) {
-      // A cell makes progress toward a stone only while warm AND UNATTENDED — the
-      // stone finishes after people leave (PRD §4.1: the maker is long gone). The
-      // counter is capped at the threshold so warm-while-capped time isn't lost.
-      if (h.data[i] >= STONE_HEAT && !occupied.has(i)) {
-        h.form[i] = Math.min(STONE_FORM_TICKS, h.form[i] + 1);
-        if (h.form[i] >= STONE_FORM_TICKS && this.objects.size + formed.length < this.maxObjects) {
-          h.form[i] = 0;
-          formed.push(this.#formStone(i, now));
-        }
-      } else if (h.data[i] < STONE_HEAT && h.form[i] > 0) {
-        h.form[i] -= 1; // cooling unwinds the progress
-      }
-      if (h.data[i] > 0 || h.form[i] > 0) active = true;
-    }
-    this.heatActive = active; // lets the tick skip persisting a fully-inert field
-    return formed;
-  }
-  #formStone(idx, now) {
-    const h = this.heat, cx = idx % h.w, cy = Math.floor(idx / h.w);
-    const wx = (cx + 0.5) * HEAT_CELL - FIELD_HALF + (Math.random() * 2 - 1) * HEAT_CELL * 0.4;
-    const wy = (cy + 0.5) * HEAT_CELL - FIELD_HALF + (Math.random() * 2 - 1) * HEAT_CELL * 0.4;
-    const seed = (Math.random() * 4294967296) >>> 0;
-    return makeRecord(crypto.randomUUID(), 'stone', seed, wx, wy, now);
-  }
+  // (thermal field — #ensureHeat/#cellIndex/#heatAt/#heatGrad/#updateHeat/#formStone
+  //  — extracted to server/systems/heat.js; the DO holds one HeatField as this.heat.)
 
   // What drifts on the water: free, unheld things that aren't stones (the channel
   // walls) or anomalies, and aren't pre-sprout seeds (those must be left
