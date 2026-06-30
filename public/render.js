@@ -13,6 +13,7 @@
 // =============================================================================
 import * as PG from './drift-procgen.js';
 import { FLOW_SEED, FLOW_SCALE, FLOW_REACH } from './flow.js'; // shared with the server flow field
+import { POND_ASPECT } from './shared/geometry.js'; // shared pond ellipse aspect (server + client)
 
 const PALETTE = PG.PALETTE;
 const SEASONS = PG.SEASONS;
@@ -161,9 +162,10 @@ export const paintGrade = PG.paintGrade;
 // slow breathing shimmer. Used for every pond the world carries.
 const WATER_BLUE = '#2f78c0';  // pond body — saturated enough to read blue over the warm glow
 const WATER_DEEP = '#1f4f88';  // a deeper centre so the pond has body, not just a flat tint
-// Ponds are ELLIPSES (squashed vertically — a top-down look): ry = r·POND_ASPECT. MUST match
-// the server's POND_ASPECT (world-do.js) so what's drawn is exactly what the world treats as water.
-export const POND_ASPECT = 0.7;
+// Ponds are ELLIPSES (squashed vertically — a top-down look): ry = r·POND_ASPECT.
+// POND_ASPECT is imported from the shared geometry module (the single source the
+// server also reads) and re-exported here for existing importers.
+export { POND_ASPECT };
 export function paintWaterWorld(ctx, pool, t) {
   if (!pool) return;
   const { x, y, r } = pool;

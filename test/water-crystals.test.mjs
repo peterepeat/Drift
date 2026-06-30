@@ -1,3 +1,4 @@
+import { POND_ASPECT } from '../public/shared/geometry.js'; // shared pond aspect (no local magic number)
 const PORT = process.env.PORT || 8787;
 const base = `http://127.0.0.1:${PORT}`;
 const WS = `ws://127.0.0.1:${PORT}/ws`;
@@ -31,7 +32,7 @@ check(crystals(w0).length === 0, 'fresh world has no crystals');
 const sp = await spawn();
 const w1 = await snap();
 const c = crystals(w1).find((o) => o.id === sp.crystal.id);
-const ASPECT = 0.7; // ponds are ellipses (POND_ASPECT) — measure the crystal on the elliptical rim
+const ASPECT = POND_ASPECT; // shared pond aspect — measure the crystal on the elliptical rim
 const eEdge = Math.hypot((c.x - w0.pool.x) / w0.pool.r, (c.y - w0.pool.y) / (w0.pool.r * ASPECT));
 check(c && c.family === 'crystal', 'spawned object is a crystal');
 check(eEdge > 0.7 && eEdge < 1.25, `crystal forms at the elliptical pool edge (e=${eEdge.toFixed(2)})`);
@@ -70,7 +71,7 @@ if (seedObj) {
   await place(seedObj.id, pond.x, pond.y); // drop it dead-centre of the pond
   await tickN(1, 2.0);                      // one tick relocates it to the bank
   const after = (await snap()).objects.find((o) => o.id === seedObj.id);
-  const ASPECT = 0.7; // mirrors POND_ASPECT (ponds are ellipses)
+  const ASPECT = POND_ASPECT; // shared pond aspect (ponds are ellipses)
   const nx = after ? (after.x - pond.x) / pond.r : 0, ny = after ? (after.y - pond.y) / (pond.r * ASPECT) : 0;
   check(after && (nx * nx + ny * ny) > 1, `a seed in a pond is nudged out onto the elliptical bank (e=${(nx * nx + ny * ny).toFixed(2)} > 1)`);
 } else {

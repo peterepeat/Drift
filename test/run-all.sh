@@ -63,7 +63,7 @@ boot() {
 fail=0
 
 # Pure unit suites — no worker boot needed.
-for unit in cull audio-map physics creatures seed; do
+for unit in cull audio-map physics creatures seed parity; do
   echo "=== $unit (unit) ==="
   run_node "test/$unit.test.mjs" || fail=1
 done

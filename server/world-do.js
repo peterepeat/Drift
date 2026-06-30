@@ -20,6 +20,7 @@
 // =============================================================================
 import { generateWorld, makeRecord, makeSeedRecord, makeAnomalyRecord, ANOMALY_KINDS, makeCrystalRecord, makeCreatureRecord, makeFishRecord, makeMarkRecord, CREATURE_KINDS, reseedAction, SEED_VERSION, rng, makeNoise } from './seed.js';
 import { FLOW_SEED, FLOW_SCALE, FLOW_REACH } from '../public/flow.js'; // shared with the client visual
+import { POND_ASPECT, poolContaining as poolContainingIn, bankPoint } from '../public/shared/geometry.js'; // shared pond ellipse geometry (server + client + tests)
 import { CATALOG as TUNE_CATALOG, coerce as tuneCoerce } from './tuning.js'; // operator panel: full knob catalogue + value coercion
 const TUNE_KIND = Object.fromEntries(TUNE_CATALOG.map((c) => [c.key, c.kind]));
 
@@ -145,31 +146,11 @@ const POOLS = [
   { x: 520, y: 1180, r: 230 },
 ];
 const POOL = POOLS[0];                      // the central/primary pool (world_state.pool; flow & crystal anchor)
-const POND_BANK_PAD = 16;                   // a seed that lands in a pond settles this far past its rim
 const POND_RELOCATE_MAX = 64;               // cap seeds nudged out of water per tick (bounds the broadcast burst)
-// Ponds are drawn (and now treated) as ELLIPSES — squashed vertically, a top-down look.
-// rx = p.r, ry = p.r·POND_ASPECT. MUST match render.js paintWaterWorld so placement (what's
-// in the water, where the bank is) lines up with the visible pond, not a phantom circle.
-const POND_ASPECT = 0.7;
-// The pond (if any) whose ELLIPSE contains world point (x,y), within its rim × (1+margin).
-function poolContaining(x, y, margin = 0) {
-  for (const p of POOLS) {
-    const rx = p.r * (1 + margin), ry = p.r * POND_ASPECT * (1 + margin);
-    const nx = (x - p.x) / rx, ny = (y - p.y) / ry;
-    if (nx * nx + ny * ny <= 1) return p;
-  }
-  return null;
-}
-// The point just OUTSIDE pond p's elliptical rim, along the ray from its centre through
-// (x,y) — where an in-water seed/stone settles. `padExtra` clears a body's own radius too.
-function bankPoint(p, x, y, seed = 0, padExtra = 0) {
-  let dx = x - p.x, dy = y - p.y, d = Math.hypot(dx, dy);
-  if (d < 1) { const a = rng(seed >>> 0)() * Math.PI * 2; dx = Math.cos(a); dy = Math.sin(a); d = 1; } // dead-centre → deterministic direction
-  const ry = p.r * POND_ASPECT;
-  const t = 1 / Math.hypot(dx / p.r, dy / ry);        // scale to land exactly on the ellipse rim along this ray
-  const pad = POND_BANK_PAD + padExtra;
-  return { x: p.x + dx * t + (dx / d) * pad, y: p.y + dy * t + (dy / d) * pad }; // rim, then pushed just past it
-}
+// Pond ELLIPSE geometry (POND_ASPECT, the containment test, bankPoint) lives in the
+// shared public/shared/geometry.js so the DO, the client paint, and the tests can
+// never drift apart. POOLS is the world's authoritative layout, injected here once.
+const poolContaining = (x, y, margin = 0) => poolContainingIn(POOLS, x, y, margin);
 // ---- fish (Family 6): a few swim in each pond (Wave Q) ----------------------
 // Existence + a HOME inside a pond only; the live position is a deterministic wander
 // the clients compute (public/creatures.js, kind 'fish'), BOUNDED so a fish never
