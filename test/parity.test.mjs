@@ -10,6 +10,7 @@ import { POND_ASPECT as RENDER_POND_ASPECT } from '../public/render.js';
 import { stoneRadius, anomalyRadius, crystalRadius, seedScale } from '../public/shared/sizing.js';
 import { rng } from '../public/drift-procgen.js';
 import { MSG, IN, OUT, WIRE_OBJECT_FIELDS, FORBIDDEN_WIRE_FIELDS, isWireField, wireLeak, forbiddenLeak, scrubForbidden } from '../public/shared/protocol.js';
+import { FAMILIES, FAMILY_NAMES, familyOf } from '../public/shared/families.js';
 
 let pass = 0, fail = 0;
 const check = (c, label) => { console.log((c ? '  PASS ' : '  FAIL ') + label); c ? pass++ : fail++; };
@@ -87,6 +88,38 @@ const heldSpread = scrubForbidden({ ...clean, held: 'idy-secret-token', heldConn
 check(heldSpread.held === true, 'scrubForbidden coerces a string `held` (where the raw token rides) to a boolean — the token never reaches the wire');
 check(scrubForbidden({ ...clean, held: '' }).held === false, 'an empty `held` coerces to false (nobody is carrying it)');
 check(wireLeak({ ...clean, last_eval: 1 }) === 'last_eval' && forbiddenLeak({ ...clean, last_eval: 1 }) === 'last_eval', 'last_eval is now caught by BOTH the whitelist and the blocklist paths');
+
+// ---- FAMILIES registry: the per-family behaviour-flag contract ----
+// Pin EVERY flag for EVERY family — this is the single source the server's tick
+// passes branch on, so a wrong/flipped flag is a silent world-behaviour regression
+// (the wrong objects drift / fade / get trimmed). The columns are INDEPENDENT; the
+// reference table below is the behaviour contract, verified against the live code.
+const FAM_EXPECTED = {
+  //          drifts  driftsAfterSprout  fades  tended  trimmable  deflectsFlow
+  stone:    [ false,  false,             true,  false,  true,      true  ],
+  seed:     [ true,   true,              false, false,  true,      false ],
+  anomaly:  [ false,  false,             false, true,   false,     false ],
+  crystal:  [ true,   false,             false, false,  true,      false ],
+  creature: [ false,  false,             false, true,   false,     false ],
+  fish:     [ false,  false,             false, true,   false,     false ],
+  mark:     [ false,  false,             false, true,   false,     false ],
+};
+const FAM_KEYS = ['drifts', 'driftsAfterSprout', 'fades', 'tended', 'trimmable', 'deflectsFlow'];
+check(FAMILY_NAMES.length === 7 && Object.keys(FAM_EXPECTED).every((f) => FAMILY_NAMES.includes(f)),
+  `FAMILIES covers exactly the 7 object families (${FAMILY_NAMES.join(',')}) — giant is absent (it's not in this.objects)`);
+let famOk = true, famWhy = '';
+for (const [fam, row] of Object.entries(FAM_EXPECTED)) {
+  FAM_KEYS.forEach((k, i) => { if (FAMILIES[fam][k] !== row[i]) { famOk = false; famWhy = `${fam}.${k}=${FAMILIES[fam][k]} (want ${row[i]})`; } });
+}
+check(famOk, `every family's behaviour flags match the contract (${famWhy || 'all match'})`);
+// The overlaps are coincidental, not one predicate — guard the tempting collapses:
+check(FAMILIES.stone.fades && FAMILIES.stone.trimmable && !FAMILIES.stone.drifts, 'stone fades AND is trimmable but does NOT drift (a wall) — fades/trimmable/drifts are not one flag');
+check(['anomaly', 'creature', 'fish', 'mark'].every((f) => FAMILIES[f].tended && !FAMILIES[f].trimmable), 'the four "alive" families are isolation-exempt AND ceiling-protected');
+check(['seed', 'crystal'].every((f) => FAMILIES[f].trimmable && !FAMILIES[f].tended), 'seed/crystal are trimmable AND participate in isolation (tended=false) — tended ≠ protected');
+check(FAMILIES.seed.driftsAfterSprout && !FAMILIES.crystal.driftsAfterSprout, 'only seed gates drift behind the sprout threshold');
+check(Object.isFrozen(FAMILIES) && Object.values(FAMILIES).every((e) => Object.isFrozen(e)), 'the family table + every entry are frozen');
+check(familyOf('stone') === FAMILIES.stone && familyOf('giant').drifts === false && familyOf('nonsense').tended === false,
+  'familyOf returns the entry, and an unknown family gets the inert all-false default (never undefined → no tick crash)');
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

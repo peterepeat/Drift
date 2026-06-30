@@ -23,6 +23,7 @@ import { FLOW_SEED, FLOW_SCALE, FLOW_REACH } from '../public/flow.js'; // shared
 import { POND_ASPECT, poolContaining as poolContainingIn, bankPoint } from '../public/shared/geometry.js'; // shared pond ellipse geometry (server + client + tests)
 import { stoneRadius } from '../public/shared/sizing.js'; // shared form-from-seed footprint (server + client + tests)
 import { MSG, scrubForbidden } from '../public/shared/protocol.js'; // shared wire message-types + invariant-#3 field whitelist
+import { familyOf } from '../public/shared/families.js'; // shared per-family behaviour flags (drift/fade/tend/trim/deflect)
 import { CATALOG as TUNE_CATALOG, coerce as tuneCoerce } from './tuning.js'; // operator panel: full knob catalogue + value coercion
 const TUNE_KIND = Object.fromEntries(TUNE_CATALOG.map((c) => [c.key, c.kind]));
 
@@ -1339,9 +1340,9 @@ export class WorldRoom {
     // tended/alive and never fade — and skipping creatures keeps them from being
     // dirtied every tick (their last_touched is never read).
     for (const o of this.objects.values()) {
-      if (o.family === 'anomaly' || o.family === 'creature' || o.family === 'fish' || o.family === 'mark' || o.held !== '') continue;
+      if (familyOf(o.family).tended || o.held !== '') continue; // anomaly/creature/fish/mark are alive — never faded, never dirtied
       if (this.#heatAt(o.x, o.y) > WARM_EPS) { o.last_touched = now; ctx.defer(o); continue; } // refresh is checkpoint-only
-      if (o.family === 'stone' && (now - o.last_touched) >= STONE_FADE_MS) ctx.remove(o);
+      if (familyOf(o.family).fades && (now - o.last_touched) >= STONE_FADE_MS) ctx.remove(o); // only a forgotten stone crumbles to grit
     }
 
     // Ceiling (PRD §7.3): when the world is full, the longest-untouched (smallest
@@ -1351,7 +1352,7 @@ export class WorldRoom {
     if (effective >= this.maxObjects) {
       const cands = [];
       for (const o of this.objects.values()) {
-        if (o.family === 'anomaly' || o.family === 'creature' || o.family === 'fish' || o.family === 'mark' || o.held !== '' || ctx.isGone(o)) continue;
+        if (!familyOf(o.family).trimmable || o.held !== '' || ctx.isGone(o)) continue; // the alive families are ceiling-protected
         cands.push(o);
       }
       cands.sort((a, b) => a.last_touched - b.last_touched); // longest-untouched first
@@ -1722,7 +1723,7 @@ export class WorldRoom {
     if (!this.flowNoise) this.flowNoise = makeNoise(FLOW_SEED);
     const a = this.flowNoise(x * FLOW_SCALE, y * FLOW_SCALE) * Math.PI;
     let vx = Math.cos(a), vy = Math.sin(a);
-    for (const s of this.#gridNear(x, y, FLOW_STONE_R, (s) => s.family === 'stone')) {
+    for (const s of this.#gridNear(x, y, FLOW_STONE_R, (s) => familyOf(s.family).deflectsFlow)) {
       const dx = x - s.x, dy = y - s.y, d = Math.hypot(dx, dy);
       if (d > 0.001 && d < FLOW_STONE_R) {
         const f = 1 - d / FLOW_STONE_R, rx = dx / d, ry = dy / d;
@@ -1809,8 +1810,9 @@ export class WorldRoom {
   // undisturbed to take root). So mature plants and crystals creep along.
   #driftEligible(o) {
     if (o.held !== '') return false;
-    if (o.family === 'stone' || o.family === 'anomaly' || o.family === 'creature' || o.family === 'fish' || o.family === 'mark') return false; // creatures + fish move themselves; marks + others don't drift
-    if (o.family === 'seed' && o.maturity < SPROUT) return false;
+    const fam = familyOf(o.family);
+    if (!fam.drifts) return false; // stone is a wall; creatures + fish move themselves; marks don't drift
+    if (fam.driftsAfterSprout && o.maturity < SPROUT) return false; // a seed must root before it creeps
     return true;
   }
 
