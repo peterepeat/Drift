@@ -9,6 +9,7 @@ import { POND_ASPECT, inPond, poolContaining, bankPoint, POND_BANK_PAD } from '.
 import { POND_ASPECT as RENDER_POND_ASPECT } from '../public/render.js';
 import { stoneRadius, anomalyRadius, crystalRadius, seedScale, plantRadius } from '../public/shared/sizing.js';
 import { rng } from '../public/drift-procgen.js';
+import * as PG from '../public/drift-procgen.js';
 import { FORM, formOf, SPROUT_C, BIG_TREE_MAT, GIANT_R, stoneSize, anomalyR, crystalR, shownMat } from '../public/forms.js';
 import { creatureR, fishR } from '../public/creatures.js';
 import { MSG, IN, OUT, WIRE_OBJECT_FIELDS, FORBIDDEN_WIRE_FIELDS, isWireField, wireLeak, forbiddenLeak, scrubForbidden } from '../public/shared/protocol.js';
@@ -167,6 +168,17 @@ check(formOf('stone').movable({}) === true && formOf('giant').movable({}) === tr
 check(shownMat({ maturity: 0.3 }) === 0.3 && shownMat({ _matShown: 0.7, maturity: 0.3 }) === 0.7, 'shownMat prefers the tweened value, falls back to the raw maturity');
 check(Object.values(FORM).every((e) => Object.isFrozen(e)), 'every FORM entry is frozen (an immutable render contract)');
 check(formOf('nonsense').castsShadow === true && formOf('nonsense').pickable === true && formOf('nonsense').alwaysFull === false, 'an unknown family gets the plant-like default (no crash, matches the old fall-through)');
+// 3.9e — the per-family render VALUE fns (lodColor / ageFactor / lightness / collisionGive)
+check(formOf('crystal').lodColor({}) === '#9ec3d6' && formOf('creature').lodColor({ kind: 'flier' }) === '#5c564e' && formOf('creature').lodColor({ kind: 'crawler' }) === '#2f2c28', 'lodColor: crystal + creature(flier/crawler) blob colours match the old client');
+check(formOf('seed').lodColor({ maturity: 0.05 }) === PG.mix(PG.PALETTE.growthDeep, PG.PALETTE.growthLight, 0.5), 'lodColor: a loose seed/leaf is green (matches drawSeed)');
+check(typeof formOf('stone').lodColor({ seed: 7, handling: 2 }) === 'string', 'lodColor: a stone takes its procedural geometry fill');
+check(formOf('stone').ageFactor({ handling: 13 }) === Math.min(1, 13 / 26) && formOf('stone').ageFactor({ handling: 99 }) === 1, 'ageFactor: a stone reveals age by handling (mirrors GRIT_HANDLING=26)');
+check(formOf('crystal').ageFactor({}) === 0.4 && formOf('anomaly').ageFactor({}) === 0.5 && formOf('creature').ageFactor({}) === 0.35, 'ageFactor: crystal/anomaly/creature are steady reveals');
+check(formOf('seed').ageFactor({ maturity: 0.5, aged: 0.2 }) === Math.min(1, 0.5 * 0.55 + 0.2 * 0.65), 'ageFactor: a plant reveals by maturity + aged');
+check([['stone', 0], ['anomaly', 0], ['creature', 0], ['fish', 0], ['crystal', 0.45]].every(([f, v]) => formOf(f).lightness({}) === v), 'lightness: only crystals (0.45) stir; stone/anomaly/creature/fish are unmoved');
+check(formOf('seed').lightness({ maturity: 0.05 }) === 1 && formOf('seed').lightness({ maturity: 0.5 }) === 0, 'lightness: a loose pre-sprout seed slides (1); a sprouted plant sways (0)');
+check([['stone', 0.4], ['crystal', 0.7], ['anomaly', 0], ['creature', 0], ['fish', 0], ['mark', 0]].every(([f, v]) => formOf(f).collisionGive({}) === v), 'collisionGive: stone 0.4 / crystal 0.7 / anomaly·creature·fish·mark 0');
+check(formOf('seed').collisionGive({ maturity: 0.05 }) === 0.8 && formOf('seed').collisionGive({ maturity: 0.5 }) === 0, 'collisionGive: a loose seed yields 0.8; a sprouted plant 0');
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

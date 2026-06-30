@@ -11,7 +11,7 @@ import { flingStep, ema, nudge, spring, deflectCircles } from './physics.js';
 import { wanderAt, drawCreature, creatureR, drawFish, fishR } from './creatures.js';
 import { drawGiant } from './giant.js';
 import { seedScale } from './shared/sizing.js';
-import { SPROUT_C, BIG_TREE_MAT, GIANT_R, shownMat, stoneSize, anomalyR, crystalR, formOf } from './forms.js';
+import { SPROUT_C, BIG_TREE_MAT, GIANT_R, shownMat, shownAged, stoneSize, stoneGeom, anomalyR, crystalR, formOf } from './forms.js';
 
 // ---- tuning constants -------------------------------------------------------
 const Z0 = 1.0, ZMIN = 0.2, ZMAX = 4.0;     // zoom = CSS px per world unit
@@ -317,9 +317,7 @@ function drawAnomalyForm(ctx, o, t, cx, cy, R) {
   for (let i = 0; i < kinds.length; i++) PG.drawAnomaly(ctx, kinds[i], t + i * 1.7, cx, cy, R * (1 - i * 0.06));
   ctx.restore();
 }
-// Smoothly-tweened lifecycle the renderer reads (eased toward server values so the
-// 60s growth steps don't pop). shownMat lives in forms.js (the footprint needs it).
-function shownAged(o) { return o._agedShown != null ? o._agedShown : (o.aged || 0); }
+// shownMat/shownAged (the tweened lifecycle readers) + the footprints live in forms.js.
 function objRadius(o) { return formOf(o.family).sizeFn(o); } // per-family footprint — see forms.js
 // A creature's LIVE position: home (its stored x/y) + the deterministic wander
 // ANCHORED at wanderT0, so the offset is exactly zero at t0 and the creature sits ON
@@ -402,11 +400,7 @@ function posOf(o) {
 // The biggest trees have ROOTED — they're immovable landmarks (never grabbed; you
 // drag straight across them to pan). Everything else can be picked up.
 function isMovable(o) { return formOf(o.family).movable(o); } // a rooted big tree can't be lifted — see forms.js
-function stoneGeom(o) {
-  const er = Math.min(0.95, o.handling * 0.04); // handling erodes the stone (PRD §3.2)
-  if (!o._sg || o._sgEr !== er || o._sgR !== (o.r || 0)) { o._sg = PG.makeStone(o.seed >>> 0, stoneSize(o), er); o._sgEr = er; o._sgR = o.r || 0; } // regen on fuse/split
-  return o._sg;
-}
+// stoneGeom (the cached stone procgen) lives in forms.js — its LOD colour reads it too.
 // Draw any object (stone, seed, or plant) at (cx, cy) in the current transform.
 // FORM is always regenerated from seed (+ maturity/aged for growth) — never stored.
 function paintObject(o, cx, cy, ang = 0) {
@@ -543,25 +537,11 @@ function drawLOD(o, cx, cy, rad) {
 }
 // The representative base colour of an object for its LOD blob — matched to the full
 // form's colour (the plant `core` ramp / the stone's fill) so zooming in/out doesn't shift hue.
-function lodColor(o) {
-  if (o.family === 'stone') return stoneGeom(o).fill;
-  if (o.family === 'crystal') return '#9ec3d6';
-  if (o.family === 'creature') return o.kind === 'flier' ? '#5c564e' : '#2f2c28';
-  const mat = shownMat(o);
-  if (mat < SPROUT_C) return PG.mix(PG.PALETTE.growthDeep, PG.PALETTE.growthLight, 0.5); // a loose seed/leaf — green, matching drawSeed (was wrongly brown)
-  return mat < 0.5 ? PG.mix(PG.PALETTE.growthYoung, PG.PALETTE.growthLight, mat / 0.5)
-                   : PG.mix(PG.PALETTE.growthLight, PG.PALETTE.growthDeep, (mat - 0.5) / 0.5);
-}
+function lodColor(o) { return formOf(o.family).lodColor(o); } // per-family LOD blob colour — see forms.js
 // The "reveal of age" (PRD §5.2): how far along its life an attended object is, so
 // the attend-bloom is larger and warmer the older/more-worn the object — its history
 // made briefly legible without a single word or number.
-function ageFactor(o) {
-  if (o.family === 'stone') return Math.min(1, (o.handling || 0) / 26);   // worn smooth = old (mirror GRIT_HANDLING)
-  if (o.family === 'crystal') return 0.4;                                 // decay isn't on the wire — a steady, modest reveal
-  if (o.family === 'anomaly') return 0.5;                                 // timeless — a steady, even reveal
-  if (o.family === 'creature') return 0.35;                              // alive — a steady, gentle reveal
-  return Math.min(1, shownMat(o) * 0.55 + shownAged(o) * 0.65);           // seed → plant → aged
-}
+function ageFactor(o) { return formOf(o.family).ageFactor(o); } // "reveal of age" 0..1 — see forms.js
 // A soft warm bloom that breathes around the attended object (its "response").
 function paintAttend(o, t) {
   const age = ageFactor(o);
@@ -729,21 +709,14 @@ function settleFlying() {
 // How easily a thing is stirred by a passing cursor (Wave 6): seeds & leaves fly,
 // growing plants get heavier as they mature and root, crystals stir a little, and
 // stones / anomalies / held things don't move at all.
-function lightnessOf(o) {
-  if (o.held || o.family === 'stone' || o.family === 'anomaly' || o.family === 'creature' || o.family === 'fish') return 0; // creatures + fish move themselves
-  if (o.family === 'crystal') return 0.45;
-  // only a LOOSE pre-sprout seed/leaf (no trunk) slides under the cursor; a sprouted
-  // plant has a trunk, so it SWAYS instead (handled in updateNudge) — never slides.
-  return shownMat(o) < SPROUT_C ? 1 : 0;
-}
+// only a LOOSE pre-sprout seed/leaf (no trunk) slides under the cursor; a sprouted plant
+// SWAYS instead (updateNudge) — never slides; stones/anomalies/held things don't move.
+function lightnessOf(o) { return o.held ? 0 : formOf(o.family).lightness(o); } // per-family — see forms.js
 // How much an object YIELDS to being bumped by a carried/thrown object — lighter
 // things give a lot, stones bump but resist, held/rooted/luminous things don't move.
 function collisionGive(o) {
-  if (o.held || o.id === heldId || flying.has(o.id) || o.family === 'anomaly' || o.family === 'creature' || o.family === 'fish' || !isMovable(o)) return 0;
-  if (o.family === 'stone') return 0.4;
-  if (o.family === 'crystal') return 0.7;
-  if (o.family === 'seed') return shownMat(o) < SPROUT_C ? 0.8 : 0; // loose seeds shove aside; a sprouted plant doesn't slide (it sways)
-  return 0;
+  if (o.held || o.id === heldId || flying.has(o.id) || !isMovable(o)) return 0; // held / carried / flying / rooted don't yield
+  return formOf(o.family).collisionGive(o); // per-family give — see forms.js
 }
 // Local, cosmetic displacement: a moving cursor brushes light things aside (a render
 // offset _ox/_oy on a damped spring), and they settle back to rest. Never the real
