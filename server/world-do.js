@@ -1254,17 +1254,18 @@ export class WorldRoom {
         o.held = ''; o.heldConn = ''; o.held_at = 0; ctx.reclaim(o); // ownership ⇒ persist now
       }
       if (o.held !== '') continue;          // growth paused while held
-      if (o.family === 'crystal') {         // crystals slowly dissolve (a brief flash, then gone)
+      const fam = familyOf(o.family);
+      if (fam.decays) {                     // crystals slowly dissolve (a brief flash, then gone)
         o.decay = Math.min(1, (o.decay || 0) + CRYSTAL_DECAY);
         if (o.decay >= 1) ctx.remove(o);
         else ctx.defer(o);                  // decay advances with no discrete write — the checkpoint must catch it
         continue;
       }
-      if (o.family === 'mark') {            // ground marks heal and vanish after ~10 min (Wave S)
+      if (fam.heals) {                      // ground marks heal and vanish after ~10 min (Wave S)
         if (now - (o.created_at || now) >= MARK_LIFE_MS) ctx.remove(o);
         continue;
       }
-      if (o.family !== 'seed') continue;    // stones / anomalies have no time-based change here
+      if (!fam.grows) continue;             // stones / anomalies / fish have no time-based change here
 
       const beforeHeat = o.heat, beforeShed = o.shedAccum;
       o.heat = Math.min(1, o.heat * HEAT_DECAY + this.#warmth(o, now));

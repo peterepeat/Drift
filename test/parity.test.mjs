@@ -95,16 +95,16 @@ check(wireLeak({ ...clean, last_eval: 1 }) === 'last_eval' && forbiddenLeak({ ..
 // (the wrong objects drift / fade / get trimmed). The columns are INDEPENDENT; the
 // reference table below is the behaviour contract, verified against the live code.
 const FAM_EXPECTED = {
-  //          drifts  driftsAfterSprout  fades  tended  trimmable  deflectsFlow
-  stone:    [ false,  false,             true,  false,  true,      true  ],
-  seed:     [ true,   true,              false, false,  true,      false ],
-  anomaly:  [ false,  false,             false, true,   false,     false ],
-  crystal:  [ true,   false,             false, false,  true,      false ],
-  creature: [ false,  false,             false, true,   false,     false ],
-  fish:     [ false,  false,             false, true,   false,     false ],
-  mark:     [ false,  false,             false, true,   false,     false ],
+  //          drifts  driftsAfterSprout  fades  tended  trimmable  deflectsFlow  grows  decays  heals
+  stone:    [ false,  false,             true,  false,  true,      true,         false, false,  false ],
+  seed:     [ true,   true,              false, false,  true,      false,        true,  false,  false ],
+  anomaly:  [ false,  false,             false, true,   false,     false,        false, false,  false ],
+  crystal:  [ true,   false,             false, false,  true,      false,        false, true,   false ],
+  creature: [ false,  false,             false, true,   false,     false,        false, false,  false ],
+  fish:     [ false,  false,             false, true,   false,     false,        false, false,  false ],
+  mark:     [ false,  false,             false, true,   false,     false,        false, false,  true  ],
 };
-const FAM_KEYS = ['drifts', 'driftsAfterSprout', 'fades', 'tended', 'trimmable', 'deflectsFlow'];
+const FAM_KEYS = ['drifts', 'driftsAfterSprout', 'fades', 'tended', 'trimmable', 'deflectsFlow', 'grows', 'decays', 'heals'];
 check(FAMILY_NAMES.length === 7 && Object.keys(FAM_EXPECTED).every((f) => FAMILY_NAMES.includes(f)),
   `FAMILIES covers exactly the 7 object families (${FAMILY_NAMES.join(',')}) — giant is absent (it's not in this.objects)`);
 let famOk = true, famWhy = '';
@@ -117,6 +117,9 @@ check(FAMILIES.stone.fades && FAMILIES.stone.trimmable && !FAMILIES.stone.drifts
 check(['anomaly', 'creature', 'fish', 'mark'].every((f) => FAMILIES[f].tended && !FAMILIES[f].trimmable), 'the four "alive" families are isolation-exempt AND ceiling-protected');
 check(['seed', 'crystal'].every((f) => FAMILIES[f].trimmable && !FAMILIES[f].tended), 'seed/crystal are trimmable AND participate in isolation (tended=false) — tended ≠ protected');
 check(FAMILIES.seed.driftsAfterSprout && !FAMILIES.crystal.driftsAfterSprout, 'only seed gates drift behind the sprout threshold');
+check(FAMILIES.seed.grows && FAMILIES.crystal.decays && FAMILIES.mark.heals, 'the lifecycle flags route to seed (grow) / crystal (decay) / mark (heal)');
+check(FAMILY_NAMES.every((f) => [FAMILIES[f].grows, FAMILIES[f].decays, FAMILIES[f].heals].filter(Boolean).length <= 1), 'at most ONE lifecycle block runs per family (grows/decays/heals are mutually exclusive)');
+check(['stone', 'anomaly', 'fish'].every((f) => !FAMILIES[f].grows && !FAMILIES[f].decays && !FAMILIES[f].heals), 'stone/anomaly/fish have no time-based lifecycle change');
 check(Object.isFrozen(FAMILIES) && Object.values(FAMILIES).every((e) => Object.isFrozen(e)), 'the family table + every entry are frozen');
 check(familyOf('stone') === FAMILIES.stone && familyOf('giant').drifts === false && familyOf('nonsense').tended === false,
   'familyOf returns the entry, and an unknown family gets the inert all-false default (never undefined → no tick crash)');

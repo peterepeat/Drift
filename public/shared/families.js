@@ -25,15 +25,21 @@
 //   trimmable         — eligible for the ceiling / over-cap trim (the inverse of
 //                       "protected")
 //   deflectsFlow      — a wall the water flow steers around (#flowAt)
+//   grows             — runs the per-tick heat/grow/age/shed/dissolve lifecycle (seed)
+//   decays            — slowly dissolves each tick, then is removed (crystal)
+//   heals             — a ground stain that self-removes after its TTL (mark)
+// `grows`/`decays`/`heals` only GATE which lifecycle block runs in the tick loop;
+// the bodies stay in world-do.js (they close over the tick ctx / season / neighbours).
+// At most one is true per family, and a family with none has no time-based change.
 // =============================================================================
 export const FAMILIES = Object.freeze({
-  stone:    Object.freeze({ drifts: false, driftsAfterSprout: false, fades: true,  tended: false, trimmable: true,  deflectsFlow: true  }),
-  seed:     Object.freeze({ drifts: true,  driftsAfterSprout: true,  fades: false, tended: false, trimmable: true,  deflectsFlow: false }),
-  anomaly:  Object.freeze({ drifts: false, driftsAfterSprout: false, fades: false, tended: true,  trimmable: false, deflectsFlow: false }),
-  crystal:  Object.freeze({ drifts: true,  driftsAfterSprout: false, fades: false, tended: false, trimmable: true,  deflectsFlow: false }),
-  creature: Object.freeze({ drifts: false, driftsAfterSprout: false, fades: false, tended: true,  trimmable: false, deflectsFlow: false }),
-  fish:     Object.freeze({ drifts: false, driftsAfterSprout: false, fades: false, tended: true,  trimmable: false, deflectsFlow: false }),
-  mark:     Object.freeze({ drifts: false, driftsAfterSprout: false, fades: false, tended: true,  trimmable: false, deflectsFlow: false }),
+  stone:    Object.freeze({ drifts: false, driftsAfterSprout: false, fades: true,  tended: false, trimmable: true,  deflectsFlow: true,  grows: false, decays: false, heals: false }),
+  seed:     Object.freeze({ drifts: true,  driftsAfterSprout: true,  fades: false, tended: false, trimmable: true,  deflectsFlow: false, grows: true,  decays: false, heals: false }),
+  anomaly:  Object.freeze({ drifts: false, driftsAfterSprout: false, fades: false, tended: true,  trimmable: false, deflectsFlow: false, grows: false, decays: false, heals: false }),
+  crystal:  Object.freeze({ drifts: true,  driftsAfterSprout: false, fades: false, tended: false, trimmable: true,  deflectsFlow: false, grows: false, decays: true,  heals: false }),
+  creature: Object.freeze({ drifts: false, driftsAfterSprout: false, fades: false, tended: true,  trimmable: false, deflectsFlow: false, grows: false, decays: false, heals: false }),
+  fish:     Object.freeze({ drifts: false, driftsAfterSprout: false, fades: false, tended: true,  trimmable: false, deflectsFlow: false, grows: false, decays: false, heals: false }),
+  mark:     Object.freeze({ drifts: false, driftsAfterSprout: false, fades: false, tended: true,  trimmable: false, deflectsFlow: false, grows: false, decays: false, heals: true  }),
 });
 
 // Every persisted object family. (giant is deliberately ABSENT — it's an in-memory
@@ -44,5 +50,5 @@ export const FAMILY_NAMES = Object.freeze(Object.keys(FAMILIES));
 // Conservative all-false default — keeps a hypothetical unknown family inert (it
 // can't arise: the record factories produce only the names above). A missing flag
 // must never crash the always-on tick nor silently drift/fade/trim something.
-const NONE = Object.freeze({ drifts: false, driftsAfterSprout: false, fades: false, tended: false, trimmable: false, deflectsFlow: false });
+const NONE = Object.freeze({ drifts: false, driftsAfterSprout: false, fades: false, tended: false, trimmable: false, deflectsFlow: false, grows: false, decays: false, heals: false });
 export const familyOf = (family) => FAMILIES[family] || NONE;
