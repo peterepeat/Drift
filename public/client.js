@@ -12,6 +12,7 @@ import { wanderAt, drawCreature, creatureR, drawFish, fishR } from './creatures.
 import { drawGiant } from './giant.js';
 import { seedScale } from './shared/sizing.js';
 import { SPROUT_C, BIG_TREE_MAT, GIANT_R, shownMat, shownAged, stoneSize, stoneGeom, anomalyR, crystalR, formOf } from './forms.js';
+import { objects, presences, lifts, flashes, ripples, feedRushes, grits, creatureEvts, giantFootprints } from './state.js'; // shared client state (4.14 mirror)
 
 // ---- tuning constants -------------------------------------------------------
 const Z0 = 1.0, ZMIN = 0.2, ZMAX = 4.0;     // zoom = CSS px per world unit
@@ -255,22 +256,16 @@ function updateArrive(now) {
 }
 
 // ---- world state ------------------------------------------------------------
-const objects = new Map();     // id -> { id, family, x, y, seed, handling, held(bool), _sg, _sgEr }
-const presences = new Map();   // pid -> { x, y, born, last, gone }
-const lifts = new Map();       // id -> lift animation state
-const flashes = [];            // brief crystal-dissolution flashes { x, y, start }
-const ripples = [];            // brief water ripples — a bug dropped in a pond becomes fish food { x, y, start }
-const feedRushes = [];         // a pond's fish swim over to eat a dropped bug { x, y, start, pond, eatT } — local/cosmetic
+// The shared containers — objects/presences/lifts + the cosmetic FX buffers
+// (flashes/ripples/feedRushes/grits/creatureEvts/giantFootprints) — now live in
+// state.js so the extracted subsystems mutate the same references (4.14 mirror).
 const FISH_SWIM_SPEED = 150;   // world u/s the fish swim toward food (a brisk, natural pursuit — the NEAREST reaches first + eats it)
 const FEED_RELEASE = 0.9;      // seconds for fish to ease back to their wander once the bug is eaten
 const FEED_RUSH_CAP_MS = 5000; // hard cap on a feed-rush (safety; normally it ends when the bug is eaten)
-const grits = [];              // brief stone-to-grit scatters { x, y, seed, r, start }
-const creatureEvts = [];       // brief birth-shimmer / death-puff cues { x, y, start, birth } — the ecosystem made legible
 const CREATURE_EVT_MS = 760;   // lifetime of a birth/death cue
 let pool = null;               // the central water pool { x, y, r } (flow + audio anchor)
 let pools = [];                // every pond the world carries (Wave P) — all rendered as water
 let giants = [];               // the TWO gardener NPCs { x, y, hx, hy, walk, tending, _tx, _ty } — server-authoritative; walked continuously client-side
-const giantFootprints = [];    // fading prints the journeyer leaves as it walks { x, y, start } — cosmetic, local
 let myPid = null;
 let seasonPhase = 0;           // monotonic season clock from the server (feels, never labelled)
 let lastSat = -1;              // last-applied canvas saturation (avoids per-frame style writes)
