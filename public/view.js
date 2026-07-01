@@ -18,13 +18,29 @@ const VIEW_FRAC = 0.10;    // at most zoomed-out, the viewport covers ~this frac
 // ---- adaptive quality (graceful degradation — no config) -------------------
 // An old/weak machine silently sheds the costliest work to stay smooth: measure smoothed
 // frame time, step DOWN tiers when it can't keep up (and back UP, slowly, with headroom).
-// Each tier dials the heavy levers — dpr, the full-screen passes, shadows, the LOD
-// budget, litter. Hysteresis + a cooldown keep it from flapping. Tier 0 = full.
+// Hysteresis + a cooldown keep it from flapping. Tier 0 = full.
+//
+// The whole BACKDROP — ground + noise grain + ground-colour patches + ambient glows + sky
+// horizon + season grade — is ALWAYS-ON and never a tier lever: it's all cheap cached buffers
+// now (A2 season-memo + A3 backdrop/glow buffers), so it never pops in/out with the tier. Only
+// these levers remain, and only OBJECTS ever chunk (under genuine load):
+//   dprCap   — render RESOLUTION (the first + softest lever; a softer raster beats chunky LOD)
+//   flow     — the pool's faint flow-trace pass (pool-local)
+//   sat      — the whole-canvas season saturation CSS filter (costly to re-filter on a weak GPU)
+//   shadows  — per-object ground shadows
+//   leaves   — drifting leaf litter
+//   detailBudget — the max objects drawn at full detail before the smallest-on-screen LOD-blob
+// dpr-FIRST degradation (A1): render RESOLUTION steps down before object DETAIL. A softer
+// raster suits the calm, soft-edged look far better than chunky LOD blobs popping in — so the
+// first responses to load are dpr steps (2 → 1.75 → 1.5) with FULL detail held; only the leaner
+// tiers trim the detail budget + shed the secondary passes. dpr floors at 1.0 (never lower, so
+// hairline strokes don't shimmer).
 const QUALITY_TIERS = [
-  { dprCap: 2,    noise: 1, glows: 1, flow: 1, sky: 1, grade: 1, sat: 1, patches: 1, shadows: 1, leaves: 1, detailBudget: 1300 }, // full — doubled headroom
-  { dprCap: 1.5,  noise: 0, glows: 1, flow: 1, sky: 1, grade: 1, sat: 1, patches: 1, shadows: 1, leaves: 1, detailBudget: 840 }, // drop the full-screen noise; cap retina
-  { dprCap: 1.25, noise: 0, glows: 0, flow: 0, sky: 1, grade: 1, sat: 0, patches: 1, shadows: 1, leaves: 0, detailBudget: 500 }, // drop glows/flow/litter + the sat-filter
-  { dprCap: 1,    noise: 0, glows: 0, flow: 0, sky: 0, grade: 0, sat: 0, patches: 0, shadows: 0, leaves: 0, detailBudget: 260 }, // bare
+  { dprCap: 2,    flow: 1, sat: 1, shadows: 1, leaves: 1, detailBudget: 1300 }, // 0 full
+  { dprCap: 1.75, flow: 1, sat: 1, shadows: 1, leaves: 1, detailBudget: 1300 }, // 1 soften resolution first — full detail held
+  { dprCap: 1.5,  flow: 1, sat: 1, shadows: 1, leaves: 1, detailBudget: 1000 }, // 2 more resolution; a light detail trim
+  { dprCap: 1.25, flow: 0, sat: 0, shadows: 1, leaves: 0, detailBudget: 650 },  // 3 drop flow/litter + the sat-filter; trim detail
+  { dprCap: 1,    flow: 0, sat: 0, shadows: 0, leaves: 0, detailBudget: 380 },  // 4 bare
 ];
 let qTier = 0;
 export let Q = QUALITY_TIERS[0];
@@ -40,11 +56,11 @@ const Q_DOWN_MS = 27;        // smoothed frame time worse than this (~<37fps) fo
 // reload. 20ms (a smoothly-vsynced 60Hz frame + a little slack, still clear of the 27ms
 // down-trigger) lets it climb back while staying protective of genuinely weak devices.
 const Q_UP_MS = 20;
-// Manual override (?q=0..3): pin a tier for testing/diagnosis and freeze the adaptive loop.
+// Manual override (?q=0..4): pin a tier for testing/diagnosis and freeze the adaptive loop.
 // Absent/invalid → normal adaptive behaviour. Read once at load, before the first resize().
 let qPinned = false;
 { const qp = new URLSearchParams(location.search).get('q');
-  if (qp != null && /^[0-3]$/.test(qp)) { qPinned = true; qTier = +qp; Q = QUALITY_TIERS[qTier]; } }
+  if (qp != null && /^[0-4]$/.test(qp)) { qPinned = true; qTier = +qp; Q = QUALITY_TIERS[qTier]; } }
 // For the ?perf HUD (client.js): the live tier / smoothed frame time / detail budget.
 export function qStats() { return { tier: qTier, ema: frameMsEMA, budget: Q.detailBudget, pinned: qPinned }; }
 export function adaptQuality(dtMs, nowMs) {

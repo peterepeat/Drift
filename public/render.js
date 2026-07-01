@@ -44,6 +44,35 @@ export function paintGround(ctx, w, h, sk) {
   ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
 }
 
+// The ground radial is opaque, full-screen, and CONSTANT between resizes / season-ground
+// changes — yet it was re-evaluated (a radial-gradient allocation + a per-fragment fill) every
+// frame. Bake it once into a device-resolution offscreen buffer and blit it 1:1 thereafter: a
+// straight opaque texture copy instead of a gradient evaluation, and no per-frame allocation
+// (which also eases the GC pressure Stage C targets). Rebuilt only when the backing-store size
+// or the season ground key changes. Pixel-identical to painting paintGround directly.
+let _bd = null, _bdKey = '';
+function backdropBuffer(vw, vh, dpr, groundKey) {
+  const W = Math.max(1, Math.round(vw * dpr)), H = Math.max(1, Math.round(vh * dpr));
+  const key = W + 'x' + H + ':' + groundKey;
+  if (_bd && _bdKey === key) return _bd;
+  const cv = _bd || document.createElement('canvas');
+  cv.width = W; cv.height = H;                 // (re)assigning width resets + clears the buffer
+  const g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);        // same transform the frame used → identical pixels
+  paintGround(g, vw, vh, groundKey);
+  _bd = cv; _bdKey = key; return cv;
+}
+// Blit the baked ground (device px, identity transform); the opaque buffer covers the whole
+// canvas 1:1, so no clear is needed. Self-contained transform (save/restore) — the caller's
+// current transform is preserved for the atmosphere passes that follow.
+export function paintBackdrop(ctx, vw, vh, dpr, groundKey) {
+  const buf = backdropBuffer(vw, vh, dpr, groundKey);
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.drawImage(buf, 0, 0);
+  ctx.restore();
+}
+
 // The ambient amber glows. (ox, oy) parallax-shift them a little with the camera
 // (Wave H) so they drift slowly behind the 1:1-panning world — distant light, more
 // pronounced depth — instead of being pinned dead to the screen.
@@ -56,6 +85,53 @@ export function paintGlows(ctx, w, h, seed, ox = 0, oy = 0) {
     g.addColorStop(1, PG.rgba(PALETTE.glowCore, 0));
     ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
   }
+}
+
+// Pre-rendered glows. The glow field is seed-fixed and only PARALLAX-drifts a hair with the
+// camera (GLOW_PARALLAX = 0.04) — so re-filling 2-3 full-screen radial gradients every frame is
+// pure waste. Bake it ONCE into a buffer that overscans the viewport by GLOW_MARGIN on each side,
+// then blit it at the parallax offset. The buffer is rendered at GLOW_RES (glows are smooth +
+// low-frequency, so a downscaled buffer upscales back cleanly — a few MB, not tens) and in CSS
+// space — dpr-INDEPENDENT: the buffer is identical at any dpr; the device scale is folded in only
+// at blit time, so it's correctly reused across dpr/tier changes (that's why dpr isn't in its key).
+// source-over is associative, so the baked stack composited onto the ground == the old per-glow
+// fills onto the ground. The parallax offset is BOUNDED to ±GLOW_MARGIN: within the bound (all
+// normal panning, and any pan until the lag reaches the screen margin) it matches the old per-frame
+// offset EXACTLY; the bound engages only once a ~450px-radius glow is already at/off the screen
+// edge, where holding vs. drifting further is imperceptible — and it keeps the always-on glow
+// softly present rather than blanking a far-panned corner (A4's always-painted-backdrop principle).
+const GLOW_MARGIN = 600;   // parallax-lag bound (CSS px); also the viewport overscan so the shift never exposes an edge
+const GLOW_RES = 0.4;      // buffer resolution factor (smooth gradients survive the down/up-scale)
+let _glowBuf = null, _glowKey = '';
+function glowBuffer(vw, vh, seed) {
+  const key = vw + 'x' + vh + ':' + seed;   // dpr intentionally omitted — the buffer is CSS-space; dpr is applied at blit
+  if (_glowBuf && _glowKey === key) return _glowBuf;
+  const M = GLOW_MARGIN, W2 = vw + 2 * M, H2 = vh + 2 * M, s = GLOW_RES;
+  const cv = _glowBuf || document.createElement('canvas');
+  cv.width = Math.max(1, Math.round(W2 * s)); cv.height = Math.max(1, Math.round(H2 * s));
+  const g = cv.getContext('2d');
+  g.setTransform(s, 0, 0, s, 0, 0);   // draw in CSS px; the buffer is downscaled by s
+  g.translate(M, M);                  // buffer (M+x, M+y) ≙ the zero-parallax screen glow at (x, y)
+  const r = PG.rng(seed), n = 2 + (r() < 0.5 ? 1 : 0);   // SAME rng consumption as paintGlows → same centres/radii
+  for (let i = 0; i < n; i++) {
+    const x = vw * (0.32 + r() * 0.36), y = vh * (0.28 + r() * 0.44), rad = Math.min(vw, vh) * (0.42 + r() * 0.3);
+    const grd = g.createRadialGradient(x, y, 0, x, y, rad);
+    grd.addColorStop(0, PG.rgba(PALETTE.glowCore, PALETTE.glowAlpha));
+    grd.addColorStop(1, PG.rgba(PALETTE.glowCore, 0));
+    g.fillStyle = grd; g.fillRect(-M, -M, W2, H2);   // fill the WHOLE buffer (margin included)
+  }
+  _glowBuf = cv; _glowKey = key; return cv;
+}
+// Blit the pre-rendered glows at the camera's parallax offset (device px, identity transform,
+// self-contained). (ox, oy) match paintGlows' offset args; clamped to ±GLOW_MARGIN.
+export function paintGlowsBuffered(ctx, vw, vh, dpr, seed, ox = 0, oy = 0) {
+  const buf = glowBuffer(vw, vh, seed), M = GLOW_MARGIN;
+  const cx = ox < -M ? -M : ox > M ? M : ox, cy = oy < -M ? -M : oy > M ? M : oy;
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(buf, 0, 0, buf.width, buf.height, (-M + cx) * dpr, (-M + cy) * dpr, (vw + 2 * M) * dpr, (vh + 2 * M) * dpr);
+  ctx.restore();
 }
 
 export function paintNoise(ctx, w, h, seed) {
@@ -141,17 +217,17 @@ export function paintCarryTether(ctx, px, py, ox, oy, intensity) {
 // into it, so the flat plane reads as gently receding. The tint is the season's own
 // accent lifted off the ground colour, crossfaded exactly like the grade. Drawn over
 // the world but beneath held objects + the grade, so what's in your hands stays crisp.
+let _skyGrad = null, _skyKey = '';
 export function paintSky(ctx, w, h, phase) {
-  const i = Math.floor(phase) % 4, frac = phase - Math.floor(phase);
-  let f = frac < 0.7 ? 0 : (frac - 0.7) / 0.3; f = f * f * (3 - 2 * f); // smoothstep crossfade
-  const a = SEASONS[SEASON_KEYS[i]] || SEASONS.growing, b = SEASONS[SEASON_KEYS[(i + 1) % 4]] || SEASONS.growing;
-  const col = PG.mix(PG.mix(PALETTE.ground, a.accent, 0.32), PG.mix(PALETTE.ground, b.accent, 0.32), f);
-  const skyH = h * 0.42;
-  const g = ctx.createLinearGradient(0, 0, 0, skyH);
-  g.addColorStop(0, PG.rgba(PG.lighten(col, 0.07), 0.9));    // a brighter horizon rim at the very top
-  g.addColorStop(0.45, PG.rgba(col, 0.40));
-  g.addColorStop(1, PG.rgba(col, 0));
-  ctx.save(); ctx.fillStyle = g; ctx.fillRect(0, 0, w, skyH); ctx.restore();
+  const d = seasonDerived(phase), skyH = h * 0.42, key = phase + '|' + w + '|' + h;
+  if (key !== _skyKey) { // rebuild the gradient only on a phase/size change — the colour math is memoized in seasonDerived
+    _skyGrad = ctx.createLinearGradient(0, 0, 0, skyH);
+    _skyGrad.addColorStop(0, d.skyTop);      // a brighter horizon rim at the very top
+    _skyGrad.addColorStop(0.45, d.skyMid);
+    _skyGrad.addColorStop(1, d.skyBot);
+    _skyKey = key;
+  }
+  ctx.save(); ctx.fillStyle = _skyGrad; ctx.fillRect(0, 0, w, skyH); ctx.restore();
 }
 
 export const paintGrade = PG.paintGrade;
@@ -222,31 +298,51 @@ export function paintFlow(ctx, pool, t) {
 // The whole-frame colour grade for a monotonic season phase (floor % 4 is the
 // current season; it crossfades to the next over the season's last ~30%).
 export const SEASON_KEYS = ['growing', 'turning', 'resting', 'rising'];
-function gradeOne(ctx, w, h, key, weight) {
-  if (weight <= 0) return;
-  const s = SEASONS[key] || SEASONS.growing;
+
+// Season MEMO. S.seasonPhase changes only when net.js reassigns it from a server message
+// (~60s tick cadence); the derived colours/weights/gradients below were nonetheless recomputed
+// 60×/s. Cache the phase-derived bundle and recompute only when the phase actually changes — the
+// `phase === _seasonPhase` guard auto-invalidates on the next reassignment. The per-frame full-
+// screen fillRects stay; only the colour-math + allocation is lifted out of the hot loop.
+let _seasonPhase = NaN, _seasonD = null;
+function seasonDerived(phase) {
+  if (phase === _seasonPhase && _seasonD) return _seasonD;
+  const i = Math.floor(phase) % 4, frac = phase - Math.floor(phase);
+  let f = frac < 0.7 ? 0 : (frac - 0.7) / 0.3; f = f * f * (3 - 2 * f); // smoothstep crossfade
+  const a = SEASONS[SEASON_KEYS[i]] || SEASONS.growing, b = SEASONS[SEASON_KEYS[(i + 1) % 4]] || SEASONS.growing;
+  const skyCol = PG.mix(PG.mix(PALETTE.ground, a.accent, 0.32), PG.mix(PALETTE.ground, b.accent, 0.32), f);
+  _seasonD = {
+    groundKey: SEASON_KEYS[i],
+    sat: a.sat + (b.sat - a.sat) * f,
+    // the two crossfaded grade layers (a weight ≤ 0 is skipped by the painter, exactly as before)
+    grade: [{ blend: a.blend, overlay: a.overlay, weight: 1 - f },
+            { blend: b.blend, overlay: b.overlay, weight: f }],
+    skyTop: PG.rgba(PG.lighten(skyCol, 0.07), 0.9),  // sky gradient stop colours (paintSky builds the gradient)
+    skyMid: PG.rgba(skyCol, 0.40),
+    skyBot: PG.rgba(skyCol, 0),
+  };
+  _seasonPhase = phase;
+  return _seasonD;
+}
+
+// The whole-frame colour grade for a monotonic season phase (floor % 4 is the current
+// season; it crossfades to the next over the season's last ~30%).
+function gradeLayer(ctx, w, h, L) {
+  if (L.weight <= 0) return;
   ctx.save();
-  ctx.globalAlpha = Math.min(1, weight);
-  ctx.globalCompositeOperation = s.blend;
-  ctx.fillStyle = s.overlay;
+  ctx.globalAlpha = Math.min(1, L.weight);
+  ctx.globalCompositeOperation = L.blend;
+  ctx.fillStyle = L.overlay;
   ctx.fillRect(0, 0, w, h);
   ctx.restore();
 }
 export function paintSeasonGrade(ctx, w, h, phase) {
-  const i = Math.floor(phase) % 4, frac = phase - Math.floor(phase);
-  let f = frac < 0.7 ? 0 : (frac - 0.7) / 0.3; f = f * f * (3 - 2 * f); // smoothstep
-  gradeOne(ctx, w, h, SEASON_KEYS[i], 1 - f);
-  gradeOne(ctx, w, h, SEASON_KEYS[(i + 1) % 4], f);
+  const g = seasonDerived(phase).grade;
+  gradeLayer(ctx, w, h, g[0]);
+  gradeLayer(ctx, w, h, g[1]);
 }
 // The current season's ground base colour key (differences are subtle).
-export function seasonGround(phase) { return SEASON_KEYS[Math.floor(phase) % 4]; }
-// The world-layer saturation for this season phase (applied as a CSS filter on
-// the canvas — the Visual Bible's "canvas/CSS saturation multiplier"). Resting
-// drops toward silver (0.68); Growing is full (1.0).
-export function seasonSat(phase) {
-  const i = Math.floor(phase) % 4, frac = phase - Math.floor(phase);
-  let f = frac < 0.7 ? 0 : (frac - 0.7) / 0.3; f = f * f * (3 - 2 * f);
-  const a = SEASONS[SEASON_KEYS[i]] || SEASONS.growing;
-  const b = SEASONS[SEASON_KEYS[(i + 1) % 4]] || SEASONS.growing;
-  return a.sat + (b.sat - a.sat) * f;
-}
+export function seasonGround(phase) { return seasonDerived(phase).groundKey; }
+// The world-layer saturation for this season phase (applied as a CSS filter on the canvas —
+// the Visual Bible's "canvas/CSS saturation multiplier"). Resting drops toward silver (0.68).
+export function seasonSat(phase) { return seasonDerived(phase).sat; }

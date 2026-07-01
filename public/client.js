@@ -4,7 +4,7 @@
 // no visual data is ever stored or transmitted.
 // =============================================================================
 import * as PG from './drift-procgen.js';
-import { paintGround, paintGlows, paintNoise, paintGroundPatches, paintPresence, paintCarryTether, paintSky, paintSeasonGrade, seasonGround, seasonSat, paintWaterWorld, paintFlow } from './render.js';
+import { paintBackdrop, paintGlowsBuffered, paintNoise, paintGroundPatches, paintPresence, paintCarryTether, paintSky, paintSeasonGrade, seasonGround, seasonSat, paintWaterWorld, paintFlow } from './render.js';
 import { inViewport, CULL_MARGIN } from './cull.js';
 import { Audio } from './audio.js';
 import { flingStep, ema, nudge, spring, deflectCircles } from './physics.js';
@@ -49,10 +49,11 @@ const MARK_LIFE_MS = 10 * 60 * 1000;          // a ground mark heals over ~10 mi
 // ---- adaptive quality (graceful degradation — no config) -------------------
 // An old/weak machine silently sheds the costliest work to stay smooth: we measure
 // smoothed frame time and step DOWN through quality tiers when it can't keep up (and
-// back UP, slowly, when it has headroom). Each tier dials the heavy levers — canvas
-// resolution (dpr), the full-screen passes (noise/glows/flow/grade/sat-filter), per-
-// object shadows, the LOD pixel threshold, and drifting litter. Hysteresis + a cooldown
-// keep it from flapping. No UI, no toggle: it just adapts. Tier 0 = full, higher = leaner.
+// back UP, slowly, when it has headroom). The whole BACKDROP (ground/noise/patches/glows/
+// sky/grade) is now always-on cheap cached buffers (A2/A3) — never a lever, so it never
+// pops with the tier. The remaining levers are render resolution (dpr — the first + softest),
+// per-object shadows, the LOD budget, the pool-flow pass, the season saturation filter, and
+// drifting litter. Hysteresis + a cooldown keep it from flapping. Tier 0 = full, higher = leaner.
 // detailBudget: the max objects drawn at FULL detail in a frame. LOD is keyed to the actual
 // cost — the on-screen object COUNT — not zoom or absolute size. Under budget, EVERYTHING
 // draws full (a close-up sprout is never chunky); over budget, only the smallest-on-screen
@@ -196,12 +197,12 @@ function frame(now) {
   updateArrive(now);
   clampCam(); // backstop: keep the camera in bounds across resize / a shrinking world bound
 
-  // background (screen space) — world-locked objects pan over a near-fixed
-  // backdrop, which reads as subtle parallax depth.
+  // background (screen space) — world-locked objects pan over a near-fixed backdrop,
+  // which reads as subtle parallax depth. Ground + glows are pre-baked buffers (A3): a
+  // straight blit each frame instead of re-evaluating full-screen radial gradients.
+  paintBackdrop(ctx, vw, vh, dpr, seasonGround(S.seasonPhase)); // baked ground, blitted 1:1 (device px, opaque → no clear needed)
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, vw, vh);
-  paintGround(ctx, vw, vh, seasonGround(S.seasonPhase));
-  if (Q.glows) paintGlows(ctx, vw, vh, bgSeed, -camera.x * camera.z * GLOW_PARALLAX, -camera.y * camera.z * GLOW_PARALLAX); // parallax drift
+  paintGlowsBuffered(ctx, vw, vh, dpr, bgSeed, -camera.x * camera.z * GLOW_PARALLAX, -camera.y * camera.z * GLOW_PARALLAX); // ambient glows — always on (a clamped blit of the baked glow field); parallax drift
   paintNoise(ctx, vw, vh, bgSeed + 1); // the ground GRAIN — always on (a cached blit): the backdrop's texture must never pop in/out with the quality tier
 
   // objects (world space) — single matrix folds dpr + zoom + pan
@@ -330,7 +331,7 @@ function frame(now) {
     aWater = poolOnScreen() ? 0.5 + 0.5 * Math.sin(S.animT * 0.4) : 0; // matches the visible sheen's shimmer
     Audio.setState(audioState());
   }
-  if (Q.sky) paintSky(ctx, vw, vh, S.seasonPhase); // atmospheric horizon — hazes the up-screen world (depth), beneath held objects
+  paintSky(ctx, vw, vh, S.seasonPhase); // atmospheric horizon — always on (memoized): hazes the up-screen world (depth), beneath held objects
 
   for (const o of objects.values()) {
     if (!isLifted(o.id)) continue;
@@ -409,7 +410,7 @@ function frame(now) {
     }
   }
 
-  if (Q.grade) paintSeasonGrade(ctx, vw, vh, S.seasonPhase); // season composite (crossfaded), last
+  paintSeasonGrade(ctx, vw, vh, S.seasonPhase); // season composite (crossfaded), always on (memoized), last
 
   // season saturation as a GPU CSS filter on the canvas (set only on change). A struggling
   // machine drops it (Q.sat 0 → filter off): re-filtering the whole canvas every frame is
