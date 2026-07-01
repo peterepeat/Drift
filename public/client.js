@@ -202,12 +202,12 @@ function frame(now) {
   ctx.clearRect(0, 0, vw, vh);
   paintGround(ctx, vw, vh, seasonGround(S.seasonPhase));
   if (Q.glows) paintGlows(ctx, vw, vh, bgSeed, -camera.x * camera.z * GLOW_PARALLAX, -camera.y * camera.z * GLOW_PARALLAX); // parallax drift
-  if (Q.noise) paintNoise(ctx, vw, vh, bgSeed + 1);
+  paintNoise(ctx, vw, vh, bgSeed + 1); // the ground GRAIN — always on (a cached blit): the backdrop's texture must never pop in/out with the quality tier
 
   // objects (world space) — single matrix folds dpr + zoom + pan
   ctx.setTransform(dpr * camera.z, 0, 0, dpr * camera.z,
     dpr * (vw / 2 - camera.x * camera.z), dpr * (vh / 2 - camera.y * camera.z));
-  if (Q.patches) paintGroundPatches(ctx); // world-anchored terrain tint (precomputed buffer, one blit), beneath water + objects
+  paintGroundPatches(ctx); // world-anchored terrain COLOUR (cached, one blit) — always on: the backdrop stays consistent regardless of tier (only the OBJECTS chunk under load)
   for (const pd of S.pools) paintWaterWorld(ctx, pd, S.animT); // every pond, beneath the objects
   if (Q.flow && poolOnScreen()) paintFlow(ctx, S.pool, S.animT); // faint flow streaks — only the central pool's drift band
   // ground marks (Wave S): flat rock-shaped stains, beneath objects, healing over ~10 min
