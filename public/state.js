@@ -9,6 +9,14 @@
 // 4.14a moves the pure containers here (zero usage-site rename); later sub-increments
 // add the scalars their subsystem needs.
 
+// the render substrate — read by nearly everything (draw / cull / hit-test / transforms).
+// `canvas`/`ctx` are const; `camera` is const + mutated in place (camera.x = …), never
+// re-assigned, so consumers keep `camera.x/.y/.z` unchanged. z starts at Z0 (=1.0, the
+// CSS-px-per-world-unit base — Z0 itself stays in client.js for the zoom clamps/gestures).
+export const canvas = document.getElementById('c');
+export const ctx = canvas.getContext('2d');
+export const camera = { x: 0, y: 0, z: 1.0 };
+
 export const objects = new Map();     // id -> { id, family, x, y, seed, handling, held(bool), _sg, … } — THE model
 export const presences = new Map();   // pid -> { x, y, born, last, gone }
 export const lifts = new Map();       // id -> lift animation state

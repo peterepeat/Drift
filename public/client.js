@@ -12,7 +12,7 @@ import { wanderAt, drawCreature, creatureR, drawFish, fishR } from './creatures.
 import { drawGiant } from './giant.js';
 import { seedScale } from './shared/sizing.js';
 import { SPROUT_C, BIG_TREE_MAT, GIANT_R, shownMat, shownAged, stoneSize, stoneGeom, anomalyR, crystalR, formOf } from './forms.js';
-import { objects, presences, lifts, flashes, ripples, feedRushes, grits, creatureEvts, giantFootprints } from './state.js'; // shared client state (4.14 mirror)
+import { canvas, ctx, camera, objects, presences, lifts, flashes, ripples, feedRushes, grits, creatureEvts, giantFootprints } from './state.js'; // shared client state (4.14 mirror)
 
 // ---- tuning constants -------------------------------------------------------
 const Z0 = 1.0, ZMIN = 0.2, ZMAX = 4.0;     // zoom = CSS px per world unit
@@ -140,8 +140,7 @@ function setQTier(t, nowMs) {
 }
 
 // ---- canvas + viewport sizing ----------------------------------------------
-const canvas = document.getElementById('c');
-const ctx = canvas.getContext('2d');
+// canvas/ctx now live in state.js (the shared render substrate; 4.14 mirror).
 let dpr = 1, vw = 0, vh = 0;
 
 function resize() {
@@ -169,7 +168,7 @@ if (window.visualViewport) {
 resize();
 
 // ---- camera + transforms (all in CSS px; dpr only folded into the matrix) ---
-const camera = { x: 0, y: 0, z: Z0 };
+// camera now lives in state.js (shared substrate; initial z === Z0 === 1.0).
 let arrive = null; // soft-pan-to-active-area animation
 let worldBounds = null; // {x,y} half-extents of the object field (from the server) — the camera is clamped to it
 
