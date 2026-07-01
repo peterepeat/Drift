@@ -29,6 +29,14 @@ export const grits = [];              // brief stone-to-grit scatters { x, y, se
 export const creatureEvts = [];       // brief birth-shimmer / death-puff cues { x, y, start, birth }
 export const giantFootprints = [];    // fading prints the journeyer leaves as it walks { x, y, start }
 
+// shared cross-module refs (input WRITES, localfx READS — by-reference so no circular
+// import). flying: thrown objects gliding free of the pointer (input arms, localfx eases +
+// client.js drains). swaying: rooted trees leaning under a drag (input adds, localfx springs
+// back). mouseVelW: the cursor's smoothed world velocity (input samples, localfx nudges by it).
+export const flying = new Map();      // id -> { vx, vy, x0, y0 } — a thrown object gliding on
+export const swaying = new Set();     // ids of rooted trees currently leaning (updateSway settles them)
+export const mouseVelW = { x: 0, y: 0 }; // cursor world-velocity (mutated in place by input)
+
 // Re-assigned SCALARS live on this holder object: an imported `let` is read-only at the
 // import site and re-assigning one across modules is a SyntaxError, so shared values that
 // get RE-ASSIGNED (not just mutated) become S.<name> and every consumer reads/writes the
@@ -55,5 +63,10 @@ export const S = {
   // (an imported `let` is read-only at the import site — the arrive-class hazard).
   frameStones: [],    // this frame's visible rock footprints {x,y,r} — creaturePos fences ground creatures around them (Unit ⑥)
   frameLodCut: 0,     // on-screen radius below which to LOD this frame (0 = LOD nothing); set by the detail budget
+
+  // cursor + sway scalars that input RE-ASSIGNS and localfx READS (reassigned → on S, not by-ref)
+  mouseWorld: { x: 0, y: 0 }, // the cursor's world position (input sets S.mouseWorld = worldPoint each hover)
+  lastHoverT: 0,      // performance.now() of the last hover sample (gates the nudge/leaf cursor force)
+  swayId: null,       // the rooted tree currently held under a drag-pan (input sets, updateSway reads)
 };
 

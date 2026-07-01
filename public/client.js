@@ -11,9 +11,9 @@ import { flingStep, ema, nudge, spring, deflectCircles } from './physics.js';
 import { wanderAt, drawCreature, creatureR, drawFish, fishR } from './creatures.js';
 import { drawGiant } from './giant.js';
 import { SPROUT_C, BIG_TREE_MAT, GIANT_R, shownMat, shownAged, stoneSize, stoneGeom, anomalyR, crystalR, formOf } from './forms.js';
-import { objRadius, creaturePos, posOf, drawMark, drawObjectWorld, drawHeldScreen, paintAttend, FISH_SWIM_SPEED, FEED_RELEASE } from './draw.js'; // ctx-coupled object paint dispatch + position/geometry readers (4.14d)
+import { objRadius, isMovable, creaturePos, posOf, drawMark, drawObjectWorld, drawHeldScreen, paintAttend, FISH_SWIM_SPEED, FEED_RELEASE } from './draw.js'; // ctx-coupled object paint dispatch + position/geometry readers (4.14d)
 import { IN, OUT } from './shared/protocol.js'; // the wire single-source (2.6) — client now sends IN.* / switches on OUT.* (string-identical to the old raw types)
-import { canvas, ctx, camera, objects, presences, lifts, flashes, ripples, feedRushes, grits, creatureEvts, giantFootprints, S } from './state.js'; // shared client state (4.14 mirror)
+import { canvas, ctx, camera, objects, presences, lifts, flashes, ripples, feedRushes, grits, creatureEvts, giantFootprints, flying, swaying, mouseVelW, S } from './state.js'; // shared client state (4.14 mirror)
 import { screenToWorld, worldToScreen, viewHalf, poolOnScreen, camLimits, zMin, clampCam, applyPan, startArrive, updateArrive, cancelArrive, saveHome, adaptQuality, setQTier, qStats, resize, queueResize, dpr, vw, vh, Q, home, Z0, ZMIN, ZMAX } from './view.js'; // camera/transforms/sizing/quality (4.14 mirror)
 
 // ---- tuning constants -------------------------------------------------------
@@ -153,7 +153,6 @@ let flingVel = { x: 0, y: 0 }, lastCarryPos = null, lastCarryT = 0;
 // Thrown objects glide FREE of the pointer (id -> {vx,vy}): a throw releases the
 // pointer immediately so you can pan / grab again while the object flies on. It
 // stays server-held by our token until it lands (so S.carry streams), then places.
-let flying = new Map();
 
 // ---- lift animation ---------------------------------------------------------
 function setLift(id, target, dur, ease) {
@@ -185,7 +184,6 @@ function giantChime() {
 }
 // The biggest trees have ROOTED — they're immovable landmarks (never grabbed; you
 // drag straight across them to pan). Everything else can be picked up.
-function isMovable(o) { return formOf(o.family).movable(o); } // a rooted big tree can't be lifted — see forms.js
 // An object's ground line — where it sits and sorts in the painter's order.
 function groundY(o) { return o.y; }
 // Fliers are airborne, so their DEPTH (paint order) is lifted above ground clutter —
@@ -334,29 +332,29 @@ let _lastNudgeT = 0;
 function updateNudge(now) {
   const dt = _lastNudgeT ? Math.min(0.05, (now - _lastNudgeT) / 1000) : 0; _lastNudgeT = now;
   if (dt <= 0) return;
-  const speed = (now - lastHoverT) < 60 ? Math.hypot(mouseVelW.x, mouseVelW.y) : 0;
+  const speed = (now - S.lastHoverT) < 60 ? Math.hypot(mouseVelW.x, mouseVelW.y) : 0;
   const active = speed > NUDGE_MIN_SPEED;
   for (const o of objects.values()) {
     // A sprouted plant SWAYS when the moving cursor brushes it — the canopy leans in the
     // cursor's travel direction (trunk anchored at the base), never sliding the whole
     // tree. Feeds the same _bend spring updateSway settles (Wave M).
     if (active && o.family === 'seed' && shownMat(o) >= SPROUT_C && !o.held && o.id !== S.heldId &&
-        Math.abs(o.x - mouseWorld.x) < NUDGE_RADIUS && Math.abs(o.y - mouseWorld.y) < NUDGE_RADIUS) {
-      const d = Math.hypot(o.x - mouseWorld.x, o.y - mouseWorld.y);
+        Math.abs(o.x - S.mouseWorld.x) < NUDGE_RADIUS && Math.abs(o.y - S.mouseWorld.y) < NUDGE_RADIUS) {
+      const d = Math.hypot(o.x - S.mouseWorld.x, o.y - S.mouseWorld.y);
       if (d < NUDGE_RADIUS) { const fall = 1 - d / NUDGE_RADIUS; o._bendV = (o._bendV || 0) + mouseVelW.x * fall * fall * BEND_FROM_CURSOR; swaying.add(o.id); }
     }
     const resting = !o._ox && !o._oy && !o._ovx && !o._ovy;
     // Only objects near the moving cursor are stirred; already-displaced ones still
     // spring back. A resting object that's neither is skipped — so the cost is ~the
     // few things near the cursor + the few in motion, not the whole population.
-    const near = active && Math.abs(o.x - mouseWorld.x) < NUDGE_RADIUS && Math.abs(o.y - mouseWorld.y) < NUDGE_RADIUS;
+    const near = active && Math.abs(o.x - S.mouseWorld.x) < NUDGE_RADIUS && Math.abs(o.y - S.mouseWorld.y) < NUDGE_RADIUS;
     if (resting && !near) continue;
     // light things are stirred by the cursor; heavier things still spring back from a
     // collision bump (collisionGive) — only truly fixed things (held/anomaly) are zeroed.
     if (lightnessOf(o) <= 0 && collisionGive(o) <= 0) { if (!resting) { o._ox = o._oy = o._ovx = o._ovy = 0; } continue; }
     o._ox = o._ox || 0; o._oy = o._oy || 0; o._ovx = o._ovx || 0; o._ovy = o._ovy || 0;
     if (near && o.id !== S.heldId) {
-      const n = nudge(mouseWorld.x, mouseWorld.y, o.x + o._ox, o.y + o._oy, NUDGE_RADIUS, speed, NUDGE_STR, lightnessOf(o));
+      const n = nudge(S.mouseWorld.x, S.mouseWorld.y, o.x + o._ox, o.y + o._oy, NUDGE_RADIUS, speed, NUDGE_STR, lightnessOf(o));
       o._ovx += n.vx * dt; o._ovy += n.vy * dt;
     }
     const sx = spring(o._ox, o._ovx, dt, NUDGE_SPRING, NUDGE_DAMP); // damped spring-back to rest
@@ -397,8 +395,6 @@ function updateCollision(now) {
 // with a small bounce. Purely a render-only canopy lean (o._bend) — no network, no
 // real movement; the tree never actually goes anywhere. Only swaying trees are
 // touched (tracked in `swaying`), so a still world costs nothing.
-const swaying = new Set();
-let swayId = null;        // the rooted tree currently held under a drag-pan
 let _lastSwayT = 0;
 function updateSway(now) {
   const dt = _lastSwayT ? Math.min(0.05, (now - _lastSwayT) / 1000) : 0; _lastSwayT = now;
@@ -408,7 +404,7 @@ function updateSway(now) {
     if (!o) { swaying.delete(id); continue; }
     const s = spring(o._bend || 0, o._bendV || 0, dt, SWAY_K, SWAY_DAMP);
     o._bend = clamp(s.pos, -SWAY_MAX, SWAY_MAX); o._bendV = s.vel;
-    if (id !== swayId && Math.abs(o._bend) < 1e-4 && Math.abs(o._bendV) < 1e-3) { o._bend = 0; o._bendV = 0; swaying.delete(id); }
+    if (id !== S.swayId && Math.abs(o._bend) < 1e-4 && Math.abs(o._bendV) < 1e-3) { o._bend = 0; o._bendV = 0; swaying.delete(id); }
   }
 }
 // ---- cosmetic leaf litter (Wave F) ------------------------------------------
@@ -431,7 +427,7 @@ function updateLeaves(now) {
   _leafCamX = camera.x; _leafCamY = camera.y;
   const hw = (vw / 2) / camera.z * LEAF_MARGIN, hh = (vh / 2) / camera.z * LEAF_MARGIN;
   const minX = camera.x - hw, maxX = camera.x + hw, minY = camera.y - hh, maxY = camera.y + hh;
-  const cursorSpeed = (now - lastHoverT) < 60 ? Math.hypot(mouseVelW.x, mouseVelW.y) : 0;
+  const cursorSpeed = (now - S.lastHoverT) < 60 ? Math.hypot(mouseVelW.x, mouseVelW.y) : 0;
   const relax = 1 - Math.pow(0.02, dt); // velocity relaxes toward its ambient drift in ~0.5s
   for (const lf of leaves) {
     if (!lf.placed) {                                       // first fill: spread across the whole view
@@ -451,8 +447,8 @@ function updateLeaves(now) {
     const ambVx = Math.sin(now * 0.0003 + lf.seed) * LEAF_BREEZE - pvx * LEAF_PAN;
     const ambVy = Math.cos(now * 0.00027 + lf.seed * 1.3) * LEAF_BREEZE * 0.6 - pvy * LEAF_PAN;
     lf.vx += (ambVx - lf.vx) * relax; lf.vy += (ambVy - lf.vy) * relax;
-    if (cursorSpeed > NUDGE_MIN_SPEED && Math.abs(lf.x - mouseWorld.x) < NUDGE_RADIUS && Math.abs(lf.y - mouseWorld.y) < NUDGE_RADIUS) {
-      const n = nudge(mouseWorld.x, mouseWorld.y, lf.x, lf.y, NUDGE_RADIUS, cursorSpeed, LEAF_CURSOR, 1);
+    if (cursorSpeed > NUDGE_MIN_SPEED && Math.abs(lf.x - S.mouseWorld.x) < NUDGE_RADIUS && Math.abs(lf.y - S.mouseWorld.y) < NUDGE_RADIUS) {
+      const n = nudge(S.mouseWorld.x, S.mouseWorld.y, lf.x, lf.y, NUDGE_RADIUS, cursorSpeed, LEAF_CURSOR, 1);
       lf.vx += n.vx * dt; lf.vy += n.vy * dt;                               // a cursor swipe scatters them
     }
     lf.x += lf.vx * dt; lf.y += lf.vy * dt;
@@ -577,17 +573,17 @@ const pointers = new Map(); // id -> { x, y, sx, sy, maxMove }
 let pinch = null, multiTouched = false;
 let lastMouse = { x: 0, y: 0 };  // last mouse screen position (anchors desktop gesture-zoom)
 // Hover velocity in WORLD units (Wave 6): a moving cursor stirs nearby light things.
-let mouseWorld = { x: 0, y: 0 }, mouseVelW = { x: 0, y: 0 }, lastHoverT = 0, lastHoverW = null;
+let lastHoverW = null;              // previous hover world-point (for the velocity sample); S.mouseWorld/mouseVelW/S.lastHoverT now on state.js
 function trackMouseHover(cx, cy) {
   const w = screenToWorld(cx, cy), t = performance.now();
-  if (lastHoverW && lastHoverT) {
-    const dt = (t - lastHoverT) / 1000;
+  if (lastHoverW && S.lastHoverT) {
+    const dt = (t - S.lastHoverT) / 1000;
     if (dt > 0.001) {
       mouseVelW.x = ema(mouseVelW.x, (w.x - lastHoverW.x) / dt, 0.5);
       mouseVelW.y = ema(mouseVelW.y, (w.y - lastHoverW.y) / dt, 0.5);
     }
   }
-  mouseWorld = w; lastHoverW = w; lastHoverT = t;
+  S.mouseWorld = w; lastHoverW = w; S.lastHoverT = t;
 }
 let grab = null;                 // pending press on an object: { id, ox, oy } (object-centre − pointer, world units)
 let lastTapId = null, lastTapT = 0; // double-tap-a-stone detection (→ break)
@@ -679,7 +675,7 @@ canvas.addEventListener('pointerdown', (e) => {
   // (a still tap does nothing). A rooted tree or empty ground leaves grab null → pan;
   // a press on a rooted tree also arms its SWAY, so a drag across it leans the canopy.
   if (hit && isMovable(hit)) { const c = posOf(hit); grab = { id: hit.id, ox: c.x - w.x, oy: c.y - w.y }; }
-  else if (hit) { swayId = hit.id; swaying.add(hit.id); }
+  else if (hit) { S.swayId = hit.id; swaying.add(hit.id); }
   // touch/pen: a still long-press attends whatever's under the finger (§5.2), movable or not.
   if (hit && e.pointerType !== 'mouse') lpTimer = setTimeout(() => { attendId = hit.id; lpFired = true; lpTimer = null; grab = null; }, ATTEND_MS);
 });
@@ -719,7 +715,7 @@ canvas.addEventListener('pointermove', (e) => {
     if (!o) { grab = null; }
     else { beginHold(o, 'drag', { x: grab.ox, y: grab.oy }); carryTo(e.clientX, e.clientY); }
   } else if (!grab && p.maxMove > SLOP) {                // empty ground or a rooted tree → pan
-    if (swayId) { const o = objects.get(swayId); if (o) { o._bendV = (o._bendV || 0) + dx * SWAY_IMPULSE; swaying.add(swayId); } } // lean the pressed tree with the drag
+    if (S.swayId) { const o = objects.get(S.swayId); if (o) { o._bendV = (o._bendV || 0) + dx * SWAY_IMPULSE; swaying.add(S.swayId); } } // lean the pressed tree with the drag
     applyPan(-dx / camera.z, -dy / camera.z); cancelArrive();
   }
 });
@@ -761,14 +757,14 @@ function endPointer(e) {
   }
   if (e.pointerType !== 'mouse') attendId = null; // touch attend ends on release (a mouse keeps hovering)
   if (pointers.size === 0) multiTouched = false;
-  swayId = null;                                  // release the swayed tree — it springs back upright
+  S.swayId = null;                                  // release the swayed tree — it springs back upright
 }
 canvas.addEventListener('pointerup', endPointer);
 canvas.addEventListener('pointercancel', (e) => {
   pointers.delete(e.pointerId);
   if (pointers.size < 2) pinch = null;
   if (pointers.size === 0) multiTouched = false;
-  clearLongPress(); lpFired = false; attendId = null; swayId = null;
+  clearLongPress(); lpFired = false; attendId = null; S.swayId = null;
   if (holdMode === 'drag') placeHold();           // don't leave a dragged object stuck held
   else grab = null;
   try { canvas.releasePointerCapture(e.pointerId); } catch {}

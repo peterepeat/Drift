@@ -80,6 +80,7 @@ function posOf(o) {
   return { x: o.x + (o._ox || 0), y: o.y + (o._oy || 0) };
 }
 function objRadius(o) { return formOf(o.family).sizeFn(o); } // per-family footprint — see forms.js
+function isMovable(o) { return formOf(o.family).movable(o); } // a rooted big tree can't be lifted — see forms.js
 // Paint the full form of any object at (cx, cy) in the current transform by dispatching to
 // its family's FORM.draw descriptor (forms.js — the 3.9 registry, folded in at 4.14d.2).
 // `env` is a SHARED object: only `t` (=animT) changes per call; glowOf/tameOf are the
@@ -199,4 +200,4 @@ function drawHeldScreen(o, sx, sy, lift) {
   ctx.restore();
 }
 
-export { objRadius, creaturePos, posOf, drawMark, drawObjectWorld, drawHeldScreen, paintAttend };
+export { objRadius, isMovable, creaturePos, posOf, drawMark, drawObjectWorld, drawHeldScreen, paintAttend };
