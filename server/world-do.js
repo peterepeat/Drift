@@ -27,6 +27,7 @@ import { familyOf } from '../public/shared/families.js'; // shared per-family be
 import { CATALOG as TUNE_CATALOG, coerce as tuneCoerce } from './tuning.js'; // operator panel: full knob catalogue + value coercion
 import { HeatField } from './systems/heat.js'; // the coarse thermal field — decay/gradient/stone-formation (PRD §4.1)
 import { GiantManager } from './systems/giant.js'; // the gardener giants — movement + the job catalogue (a world-facade + tune-port seam)
+import { CreatureManager } from './systems/creatures.js'; // crawler/flier drives + social life + population (shares the giant's facade + tune port)
 const TUNE_KIND = Object.fromEntries(TUNE_CATALOG.map((c) => [c.key, c.kind]));
 
 const TICK_MS = 60000;
@@ -175,59 +176,17 @@ const CRYSTAL_DECAY = 1 / 300;            // decay/tick (~5h to dissolve) — sl
 // broadcast — the always-ticking world spends nothing keeping them moving. They
 // ramp to a baseline quickly so an arriving world feels inhabited, then top up to
 // a cap. Spared from water-drift, isolation-fade and the ceiling trim (they're alive).
-const MIN_CREATURES = 50;                 // a livelier world — you should spot several wherever you look
-const MAX_CREATURES = 120;
-const CREATURE_SPAWN_CHANCE = 0.12;       // per tick, between MIN and MAX (ramps up a touch quicker)
-// ---- creatures: social life & population homeostasis (Wave G2) -------------
-// Creatures that share a patch interact: same species may MATE (an offspring with a
-// blended seed), different species may CLASH (the smaller routs — fleeing far, rarely
-// dying). The population stays self-balancing: births are capped at MAX_CREATURES and
-// a death never drops a kind below MIN_PER_SPECIES, while the per-species floor in the
-// spawn ramp refills any kind that thins — so nothing explodes or goes extinct.
-const SOCIAL_R = 80;                      // grid radius for "near enough to interact" (>= MATE/FIGHT dist)
-const MATE_DIST = 64;                     // same-species homes this close may breed
-const MATE_CHANCE = 0.05;                 // per eligible pair, per tick (gentle — a dense cluster has many pairs)
-const FIGHT_DIST = 58;                    // different-species homes this close may clash
-const FIGHT_CHANCE = 0.2;                 // per eligible pair, per tick
-const DEATH_CHANCE = 0.28;                // a clash that kills the loser (else it just routs)
-const FLEE_DIST = 130;                    // how far a routed creature bolts
-const MIN_PER_SPECIES = 12;               // a kind never falls below this (no extinction)
-const MAX_PER_SPECIES = 60;               // ...nor past this (== MAX_CREATURES/2, so the ceiling ITSELF enforces parity — no kind hogs the cap)
-// ---- creatures: goal-seeking drift (Wave G1) -------------------------------
-// Each tick a creature steps its HOME toward what it needs — a plant to feed at, the
-// pool to drink, a stone to rest by — cycling slowly through those drives (seed-
-// desynced so they don't all do the same thing). The step is broadcast and the client
-// EASES the home (like water drift), so under the lively wander it reads as a slow,
-// purposeful drift rather than a teleport. Authority stays server-side; motion stays
-// deterministic + zero per-frame sync. Held creatures are left alone.
-const CREATURE_DRIVES = ['feed', 'drink', 'rest', 'roam'];
-let CREATURE_STEP = 46;                 // world units the home migrates toward a goal per tick
-let CREATURE_SEEK_R = 720;              // how far a creature looks for an attractor
-const CREATURE_ARRIVE = 42;               // stop this near the goal (graze/rest beside it, don't pile on)
-const CREATURE_DRIVE_TICKS = 5;           // a creature holds one drive ~this many ticks before it shifts
-// SPREAD (declustering at the SOURCE): each creature carries a stable, SEEDED affinity for every
-// feed/rest target, so a knot of creatures fans out across nearby trees instead of all collapsing
-// onto the single nearest one (the pile-up). A creature will favour "its" tree up to this many
-// world units farther than the true-nearest — one pile becomes a scatter across the grove.
-// (0 ⇒ pure nearest, the old behaviour. Deterministic ⇒ zero per-frame sync, no client change.)
-let CREATURE_PREF_SPREAD = 260;
-// ANTI-CROWD (Wave: declustering): a creature is pushed off its neighbours each tick so
-// the population spreads into a living scatter instead of piling into one dense blob.
-// Radius < MATE_DIST so two CAN still close enough to breed — it only stops the pile-up.
-const CREATURE_SEP_R = 46;                // creature homes closer than this push apart
-const CREATURE_SEP_STEP = 24;             // max world units the anti-crowd push moves a home per tick
-// CURIOSITY (Wave: the world notices you): during a free-wander phase a creature ambles
-// toward a nearby person and mills a little way off — so lingering draws life to you.
-const CURIOSITY_R = 760;                  // a creature this near a presence may amble over (during its roam phase)
-const CURIOSITY_STANDOFF = 95;            // it stops this far off (curious, not crowding — the wander + anti-crowd keep it loose)
-// BEFRIEND (a companion): attend a creature steadily and it BONDS to you — for a bounded,
-// OBSERVABLE while it follows you (its HOME drifts toward you each tick, at its own brisk-but-
-// natural pace — NOT glued to your viewport) and glows warm-red, the glow fading as the bond
-// wanes so you can SEE it end (then it drifts back to its own life). Re-attend to refresh.
+// ---- creatures (crawler/flier) ---------------------------------------------
+// The creature LOGIC + the non-tunable CREATURE_* consts (population/social/drive/
+// separation/curiosity/follow) now live in server/systems/creatures.js (the
+// CreatureManager). These stay HERE: CREATURE_STEP/SEEK_R/PREF_SPREAD are LIVE-
+// TUNABLE (the TUNE_REG closures below bind these module `let`s; the manager reads
+// them at call-time via the `tune` getter port), and BEFRIEND_MS is used by the
+// #onBefriend wire handler (which stays DO-side; creatures just READ o.tameUntil).
+let CREATURE_STEP = 46;                 // world units the home migrates toward a goal per tick (live-tunable)
+let CREATURE_SEEK_R = 720;              // how far a creature looks for an attractor (live-tunable)
+let CREATURE_PREF_SPREAD = 260;         // seeded per-(creature,target) affinity spread — declusters feed/rest targets (live-tunable; 0 ⇒ pure nearest)
 let BEFRIEND_MS = 6 * 60 * 1000;        // a bond lasts ~6 min — long enough to be a companion, short enough that its whole arc (form → follow → fade) is watchable
-const CREATURE_FOLLOW_R = 1500;           // a bonded creature follows a person within this (beyond it, it just stays put + lives — no snap)
-const CREATURE_FOLLOW_STANDOFF = 70;      // ...and settles this close to its person
-const CREATURE_FOLLOW_STEP = 130;         // home units it closes toward its person per tick (≈3× a normal drive step — keeps up, but at its own pace, not glued)
 // ---- the giant: a shared, world-tending NPC (the gardener) ------------------
 // Its LOGIC + the non-tunable GIANT_* consts now live in server/systems/giant.js
 // (the GiantManager). These stay HERE: GIANT_REACH/SIGHT are LIVE-TUNABLE — the
@@ -412,20 +371,24 @@ export class WorldRoom {
       [MSG.BREAK]: this.#onBreak, [MSG.DISSOLVE]: this.#onDissolve, [MSG.MARK]: this.#onMark,
       [MSG.GIANT_SKIP]: this.#onGiantSkip, [MSG.BEFRIEND]: this.#onBefriend, [MSG.PRESENCE_MOVE]: this.#onPresenceMove,
     });
-    // The gardener giants (server/systems/giant.js). They TEND the world in place —
-    // their act() writes go straight to storage OUTSIDE the per-tick ledger (this is
-    // why the write-economy tests run them off) — so the manager keeps writing through
-    // a small WORLD FACADE: read-throughs for the shared/DO-owned state (objects, cog,
-    // bounds, season, maxObjects) + arrow forwarders to the DO's own private write
-    // methods (so #-privacy + objWrites accounting + broadcast order stay intact). The
-    // TUNE port exposes the live-tunable knobs as getters over the module `let`s.
+    // The DO's subsystems (giant + creatures) reach the world through a shared WORLD
+    // FACADE: read-through getters for the shared/DO-owned state (objects/cog/bounds/
+    // season/maxObjects/SPROUT) + arrow forwarders to the DO's own private methods (so
+    // #-privacy, objWrites accounting + broadcast order stay byte-identical). The giant
+    // writes IN PLACE through the write forwarders (its act() runs outside the ledger —
+    // why the write-economy tests run it off); creatures run inside #tick and write via
+    // the ctx ledger passed to their passes, so they only need the grid forwarders +
+    // nearestPresence. The TUNE port exposes the live-tunable knobs as getters over the
+    // module `let`s (read at call time, so a TUNE_REG.set is seen on the next tick).
     const self = this;
     const world = {
       get objects() { return self.objects; }, get cog() { return self.cog; },
       get bounds() { return self.bounds; }, get season() { return self.season; },
-      get maxObjects() { return self.maxObjects; },
+      get maxObjects() { return self.maxObjects; }, get SPROUT() { return SPROUT; },
       gridNear: (x, y, r, f) => self.#gridNear(x, y, r, f),
+      gridNearest: (x, y, r, f, score) => self.#gridNearest(x, y, r, f, score),
       gridUpdate: (o) => self.#gridUpdate(o),
+      nearestPresence: (x, y, maxR) => self.#nearestPresence(x, y, maxR),
       addObject: (o) => self.#addObject(o),
       removeObject: (o, extras) => self.#removeObject(o, extras),
       persist: (o) => self.#persist(o),
@@ -437,8 +400,10 @@ export class WorldRoom {
     const tune = {
       get REACH() { return GIANT_REACH; }, get SIGHT() { return GIANT_SIGHT; }, get BREAK_R() { return GIANT_BREAK_R; },
       get SEASON_PER_TICK() { return SEASON_PER_TICK; }, get STONE_EQ_R() { return STONE_EQ_R; }, get STONE_CAP_R() { return STONE_CAP_R; },
+      get STEP() { return CREATURE_STEP; }, get SEEK_R() { return CREATURE_SEEK_R; }, get PREF_SPREAD() { return CREATURE_PREF_SPREAD; },
     };
     this.giant = new GiantManager(world, tune, POOLS);
+    this.creatures = new CreatureManager(world, tune, POOLS);
     this.state.blockConcurrencyWhile(async () => { await this.#load(); });
   }
 
@@ -637,7 +602,7 @@ export class WorldRoom {
       if (!this.#adminOk(request)) return Response.json({ ok: false, error: 'forbidden' }, { status: 403 });
       const px = url.searchParams.get('x'), py = url.searchParams.get('y');
       const at = (px != null && py != null) ? { x: parseFloat(px), y: parseFloat(py) } : null;
-      const cr = this.#spawnCreature(Date.now(), at, url.searchParams.get('kind'));
+      const cr = this.creatures.spawnCreature(Date.now(), at, url.searchParams.get('kind'));
       await this.#addObject(cr);
       return Response.json({ ok: true, creature: { id: cr.id, kind: cr.kind, x: cr.x, y: cr.y } });
     }
@@ -814,7 +779,7 @@ export class WorldRoom {
     if (o.wanderT0 != null) p.wanderT0 = o.wanderT0; // the shared wander anchor (creatures + fish)
     if (o.glowUntil) { p.glowUntil = o.glowUntil; p.glowHue = o.glowHue; } // anomaly glow buff (rainbow + 2× speed)
     if (o.tameUntil) p.tameUntil = o.tameUntil; // tamed (follows the nearest person)
-    if (o.family === 'creature') p.act = (o.tameUntil && o.tameUntil > Date.now()) ? 'follow' : this.#creatureDrive(o); // its current focus, for the (debug) focus label — computed live, never stored
+    if (o.family === 'creature') p.act = (o.tameUntil && o.tameUntil > Date.now()) ? 'follow' : this.creatures.driveLabel(o); // its current focus, for the (debug) focus label — computed live, never stored
     if (o.family === 'stone' && o.r != null) p.r = o.r; // a fused/split stone's stored radius (shape still from seed)
     if (o.held !== '') p.heldBy = o.heldConn; // the holder's EPHEMERAL pid (same id presence carries) — links a carried thing to its carrier; never the token
     return scrubForbidden(p); // invariant #3: defensively strip any raw record field (a no-op while we build by listing)
@@ -828,7 +793,7 @@ export class WorldRoom {
     if (o.wanderT0 != null) m.wanderT0 = o.wanderT0; // re-anchor on the wire so a placed creature/fish continues smoothly for everyone
     if (o.glowUntil) { m.glowUntil = o.glowUntil; m.glowHue = o.glowHue; } // anomaly glow buff
     if (o.tameUntil) m.tameUntil = o.tameUntil; // tamed (follows the nearest person)
-    if (o.family === 'creature') m.act = (o.tameUntil && o.tameUntil > now) ? 'follow' : this.#creatureDrive(o); // current focus, for the (debug) focus label — computed live, never stored
+    if (o.family === 'creature') m.act = (o.tameUntil && o.tameUntil > now) ? 'follow' : this.creatures.driveLabel(o); // current focus, for the (debug) focus label — computed live, never stored
     if (o.family === 'stone' && o.r != null) m.r = o.r;   // a fused stone broadcasts its grown radius
     if (o.kinds && o.kinds.length > 1) m.kinds = o.kinds;  // a fused anomaly broadcasts its hybrid kinds (live form change)
     return scrubForbidden(m); // invariant #3: defensively strip any raw record field
@@ -1391,27 +1356,7 @@ export class WorldRoom {
     // the guaranteed ramp can't keep refilling exactly what the trim just freed (a
     // full world would otherwise oscillate at the cap instead of breathing).
     const creRoom = this.maxObjects - CEIL_TRIM;
-    const kindCount = {}; for (const k of CREATURE_KINDS) kindCount[k] = 0;
-    let creatureCount = 0;
-    for (const o of this.objects.values()) if (o.family === 'creature') { creatureCount++; kindCount[o.kind] = (kindCount[o.kind] || 0) + 1; }
-    let creAdded = 0;
-    // Per-species floor FIRST: refill any kind that has thinned below its floor, so a
-    // run of losses (or lopsided breeding) can never drive a species extinct.
-    for (const k of CREATURE_KINDS) {
-      while ((kindCount[k] || 0) < MIN_PER_SPECIES && creatureCount + creAdded < MAX_CREATURES && this.objects.size + ctx.spawned.length < creRoom) {
-        ctx.spawn(this.#spawnCreature(now, null, k)); kindCount[k]++; creAdded++;
-      }
-    }
-    // Then ramp toward the baseline and (chance-gated) top up toward the cap — each
-    // refill is the MINORITY kind, so the world trends toward a balanced mix instead
-    // of letting random spawns pile onto whichever species is already ahead.
-    const minorityKind = () => CREATURE_KINDS.reduce((a, b) => (kindCount[a] || 0) <= (kindCount[b] || 0) ? a : b);
-    while (creatureCount + creAdded < MIN_CREATURES && this.objects.size + ctx.spawned.length < creRoom) {
-      const k = minorityKind(); ctx.spawn(this.#spawnCreature(now, null, k)); kindCount[k]++; creAdded++;
-    }
-    if (creatureCount + creAdded < MAX_CREATURES && this.objects.size + ctx.spawned.length < creRoom && Math.random() < CREATURE_SPAWN_CHANCE) {
-      const k = minorityKind(); ctx.spawn(this.#spawnCreature(now, null, k)); kindCount[k]++;
-    }
+    this.creatures.maintainPopulation(now, ctx, creRoom); // per-species floor → baseline ramp → chance-gated top-up (minority kind), all riding ctx.spawn
 
     // Fish (Wave Q): keep every pond stocked. Floor-fill to FISH_PER_POND, then a
     // chance-gated top-up toward the cap — so a fresh world's ponds fill quickly and a
@@ -1424,30 +1369,13 @@ export class WorldRoom {
       if (fishCounts[i] < FISH_MAX_PER_POND && this.objects.size + ctx.spawned.length < creRoom && Math.random() < FISH_SPAWN_CHANCE) { ctx.spawn(this.#spawnFish(now, POOLS[i])); fishCounts[i]++; }
     }
 
-    // Goal-seeking drift (Wave G1): step each free creature's HOME toward what it
-    // needs this cycle (a plant / the pool / a stone). Broadcast the new home; the
-    // client eases it, so it reads as a slow purposeful drift beneath the wander.
-    // Marked dirty via `changed` below — rides the checkpoint, no per-tick write.
-    for (const o of this.objects.values()) {
-      if (o.family !== 'creature' || o.held !== '') continue;
-      let mx = 0, my = 0;
-      const goal = this.#creatureGoal(o);
-      if (goal) {                                    // step toward what it needs this cycle (a bonded creature follows FASTER, to keep up with you)
-        const bonded = o.tameUntil && o.tameUntil > Date.now();
-        const dx = goal.x - o.x, dy = goal.y - o.y, d = Math.hypot(dx, dy);
-        if (d > CREATURE_ARRIVE) { const step = Math.min(bonded ? CREATURE_FOLLOW_STEP : CREATURE_STEP, d - CREATURE_ARRIVE); mx += (dx / d) * step; my += (dy / d) * step; }
-      }
-      const sep = this.#creatureSeparation(o);        // ALWAYS shove off the crowd (even while grazing) — no pile-ups
-      if (sep.x || sep.y) { const sl = Math.hypot(sep.x, sep.y); const push = Math.min(CREATURE_SEP_STEP, sl * CREATURE_SEP_STEP); mx += (sep.x / sl) * push; my += (sep.y / sl) * push; }
-      if (!mx && !my) continue;                       // settled — the wander keeps it alive in place
-      o.x += mx; o.y += my;
-      this.#gridUpdate(o);
-      ctx.change(o);     // broadcast the new home (clients ease it smoothly)
-    }
+    // Goal-seeking drift (Wave G1): step each free creature's HOME toward what it needs
+    // this cycle (a plant / pool / stone) + anti-crowd separation; broadcast via ctx.change.
+    this.creatures.moveHomes(ctx);
 
     // Social life (Wave G2): creatures sharing a patch mate (→ spawned) or clash
     // (→ gone, or a routed flee → changed). Self-balancing (cap + per-species floor).
-    this.#socialCreatures(now, ctx);
+    this.creatures.social(now, ctx);
 
     // ROCK WINS POSITION WARS (Wave): a stone never yields ground. Any free non-stone object
     // whose body overlaps a stone's footprint is eased OUT to just-clear — so a rock grown by
@@ -1843,23 +1771,6 @@ export class WorldRoom {
     return makeCrystalRecord(crypto.randomUUID(), seed, x, y, now);
   }
 
-  // Born among the living: a creature's home starts near a random plant/seed (or
-  // the centre-of-gravity if the world is bare), so they inhabit the vegetated areas.
-  #spawnCreature(now, at, kind) {
-    const k = (kind && CREATURE_KINDS.includes(kind)) ? kind : CREATURE_KINDS[Math.floor(Math.random() * CREATURE_KINDS.length)];
-    let x, y;
-    if (at) { x = at.x; y = at.y; }
-    else {
-      const verdure = [];
-      for (const o of this.objects.values()) if (o.family === 'seed') verdure.push(o);
-      const base = verdure.length ? verdure[Math.floor(Math.random() * verdure.length)] : { x: this.cog.x, y: this.cog.y };
-      const ang = Math.random() * Math.PI * 2, d = Math.random() * 120;
-      x = base.x + Math.cos(ang) * d; y = base.y + Math.sin(ang) * d;
-    }
-    const seed = (Math.random() * 4294967296) >>> 0;
-    return makeCreatureRecord(crypto.randomUUID(), seed, k, x, y, now);
-  }
-
   // A fish's home sits well INSIDE a pond (≤ FISH_HOME_FRAC of the radius from its
   // centre), so home + its bounded wander never crosses the rim — it stays in the water.
   #spawnFish(now, pond) {
@@ -1878,33 +1789,6 @@ export class WorldRoom {
     return counts;
   }
 
-  // What a creature is drawn toward THIS tick, or null to just roam. Its drive cycles
-  // slowly (feed → drink → rest → roam), seed-desynced so the world isn't in lockstep;
-  // the target is the nearest matching thing within reach (grid-local, cheap).
-  #creatureDrive(c) {
-    const ticks = this.season / SEASON_PER_TICK;     // monotonic tick count (season advances per tick)
-    const phase = Math.floor(ticks / CREATURE_DRIVE_TICKS + (c.seed % 1000) / 250);
-    return CREATURE_DRIVES[((phase % 4) + 4) % 4];
-  }
-  // A push off every too-close creature home (summed, falls to zero at CREATURE_SEP_R) —
-  // the anti-crowd force that keeps the population a living scatter, never a dense blob.
-  #creatureSeparation(c) {
-    let px = 0, py = 0;
-    for (const o of this.#gridNear(c.x, c.y, CREATURE_SEP_R, (o) => o.family === 'creature' && o.held === '')) {
-      if (o.id === c.id) continue;
-      const dx = c.x - o.x, dy = c.y - o.y, d = Math.hypot(dx, dy);
-      if (d >= CREATURE_SEP_R) continue;
-      let ux, uy;
-      if (d > 0.01) { ux = dx / d; uy = dy / d; }
-      else { // exactly coincident → split along a deterministic axis, OPPOSITE for the two
-        const a = rng(((c.seed ^ o.seed) >>> 0) || 1)() * Math.PI * 2, s = c.id < o.id ? 1 : -1;
-        ux = Math.cos(a) * s; uy = Math.sin(a) * s;
-      }
-      const w = (CREATURE_SEP_R - Math.max(d, 0.01)) / CREATURE_SEP_R;
-      px += ux * w; py += uy * w;
-    }
-    return { x: px, y: py };
-  }
   // The nearest LIVE presence within maxR (or null) — drives creature curiosity.
   #nearestPresence(x, y, maxR) {
     let best = null, bd = maxR, now = Date.now();
@@ -1915,105 +1799,13 @@ export class WorldRoom {
     }
     return best;
   }
-  #creatureGoal(c) {
-    // BONDED: a befriended (tamed) creature follows its person — its home drifts toward the
-    // nearest presence within range, overriding its ordinary drives while you're around, and
-    // resuming normal life when you leave (or the bond lapses). The drift loop steps a bonded
-    // creature by the larger CREATURE_FOLLOW_STEP so it actually keeps up, at its own pace.
-    if (c.tameUntil && c.tameUntil > Date.now()) {
-      const fp = this.#nearestPresence(c.x, c.y, CREATURE_FOLLOW_R);
-      if (fp) { const dx = c.x - fp.x, dy = c.y - fp.y, d = Math.hypot(dx, dy) || 1; return { x: fp.x + (dx / d) * CREATURE_FOLLOW_STANDOFF, y: fp.y + (dy / d) * CREATURE_FOLLOW_STANDOFF }; }
-    }
-    const drive = this.#creatureDrive(c);
-    if (drive === 'roam') {                            // a free-wander phase — but if someone is lingering nearby, amble over to them
-      const p = this.#nearestPresence(c.x, c.y, CURIOSITY_R);
-      if (!p) return null;                             // no one near → truly free wander
-      const dx = c.x - p.x, dy = c.y - p.y, d = Math.hypot(dx, dy) || 1;
-      return { x: p.x + (dx / d) * CURIOSITY_STANDOFF, y: p.y + (dy / d) * CURIOSITY_STANDOFF }; // mill a little way off, curious
-    }
-    if (drive === 'drink') {                          // head to the nearest point on the NEAREST pond's rim
-      let p = null, pd = Infinity;                    // (was hardcoded to the central POOL — so every thirsty bug in a huge radius streamed to 0,0)
-      for (const q of POOLS) { const e = Math.hypot(c.x - q.x, c.y - q.y) - q.r; if (e < pd) { pd = e; p = q; } }
-      if (!p || pd > CREATURE_SEEK_R) return null;    // too far from any water to bother this cycle
-      return bankPoint(p, c.x, c.y, c.seed);          // the (elliptical) water's edge nearest the creature
-    }
-    const wantPlant = drive === 'feed';               // feed → a growing plant; rest → a stone
-    // Pick by SEEDED preference, not raw distance: each (creature,target) pair has a stable
-    // affinity in [0,1), so two creatures near the same tree usually favour DIFFERENT nearby
-    // trees and the crowd spreads across the grove. A lone creature still usually takes the
-    // nearest; the affinity only tips the balance among trees within ~CREATURE_PREF_SPREAD.
-    const best = this.#gridNearest(c.x, c.y, CREATURE_SEEK_R,
-      (o) => wantPlant ? (o.family === 'seed' && o.maturity >= SPROUT) : o.family === 'stone',
-      (o, d) => d - rng((Math.imul(c.seed >>> 0, 2654435761) ^ (o.seed >>> 0)) >>> 0)() * CREATURE_PREF_SPREAD); // stable per (creature,target) affinity nudge
-    return best ? { x: best.x, y: best.y } : null;
-  }
-
   // (the giant — #pondAcross/#giantStep/#buildGiantJobs/#giant* — extracted to
   //  server/systems/giant.js; the DO holds one GiantManager as this.giant.)
 
-  // A creature's "strength" = its drawn size (mirrors public/creatures.js creatureR):
-  // in a clash the smaller one is the loser. Server-only (it decides + broadcasts the
-  // outcome), so it needn't be client-reproducible — but matching size keeps the
-  // visibly-bigger creature the winner.
-  #strength(c) { return (c.kind === 'flier' ? 11 : 14) + rng((c.seed ^ 0x9e37) >>> 0)() * 6; }
-
-  // An offspring of two same-species creatures: home near their midpoint, kind
-  // inherited, seed BLENDED (low bits from one parent, high from the other) plus a
-  // small mutation — so it reads as related to both, never identical.
-  #breed(a, b, now) {
-    // spawn the offspring with ROOM (a random direction, well clear of the parents) so a
-    // new birth doesn't instantly pile onto them — the anti-crowd force then keeps it loose.
-    const ang = Math.random() * Math.PI * 2, dist = 80 + Math.random() * 70;
-    const mx = (a.x + b.x) / 2 + Math.cos(ang) * dist;
-    const my = (a.y + b.y) / 2 + Math.sin(ang) * dist;
-    const mask = 0xffff;
-    const seed = ((((a.seed & mask) | (b.seed & ~mask)) >>> 0) ^ Math.floor(Math.random() * 0x10000)) >>> 0;
-    return makeCreatureRecord(crypto.randomUUID(), seed, a.kind, mx, my, now);
-  }
-
-  // One pass of creature social life. Pairs are found via the grid (cheap at creature
-  // scale); home-distance is the "same patch" proxy (their wanders overlap). Mating
-  // pushes to `spawned`, a kill to `gone`, a rout (home jumps away) to `changed`.
-  // Bounded: births stop at MAX_CREATURES; a kill never drops a kind below its floor
-  // or the total below the baseline — so the population churns, never collapses.
-  #socialCreatures(now, ctx) {
-    const creatures = [], kindCount = {};
-    for (const o of this.objects.values()) {
-      if (o.family !== 'creature' || o.held !== '') continue;
-      creatures.push(o); kindCount[o.kind] = (kindCount[o.kind] || 0) + 1;
-    }
-    let total = creatures.length;
-    let pendingCre = 0; for (const s of ctx.spawned) if (s.family === 'creature') pendingCre++; // creature-only pending (floor refills) — NOT shed seeds/crystals/etc., so the mate cap is exact
-    const dead = new Set();
-    for (const a of creatures) {
-      if (dead.has(a.id)) continue;
-      let aFled = false;
-      for (const b of this.#gridNear(a.x, a.y, SOCIAL_R, (o) => o.family === 'creature' && o.held === '' && o.id > a.id && !dead.has(o.id))) {
-        const d = Math.hypot(a.x - b.x, a.y - b.y);
-        if (a.kind === b.kind) {
-          if (d <= MATE_DIST && total + pendingCre < MAX_CREATURES &&  // count only pending CREATURES, not other lifecycle spawns this tick
-              (kindCount[a.kind] || 0) < MAX_PER_SPECIES &&   // a kind can't breed past its ceiling — neither species hogs the cap
-              this.objects.size + ctx.spawned.length < this.maxObjects && Math.random() < MATE_CHANCE) {
-            ctx.spawn(this.#breed(a, b, now)); kindCount[a.kind] = (kindCount[a.kind] || 0) + 1; pendingCre++;
-          }
-        } else if (d <= FIGHT_DIST && Math.random() < FIGHT_CHANCE) {
-          const loser = this.#strength(a) <= this.#strength(b) ? a : b;
-          const winner = loser === a ? b : a;
-          if (Math.random() < DEATH_CHANCE && (kindCount[loser.kind] || 0) > MIN_PER_SPECIES && total > MIN_CREATURES) {
-            dead.add(loser.id); ctx.remove(loser); kindCount[loser.kind]--; total--;
-            if (loser === a) { aFled = true; break; }
-          } else {
-            const fx = loser.x - winner.x, fy = loser.y - winner.y, fd = Math.hypot(fx, fy) || 1;
-            loser.x += (fx / fd) * FLEE_DIST; loser.y += (fy / fd) * FLEE_DIST;
-            this.#gridUpdate(loser);
-            if (!ctx.isGone(loser)) ctx.change(loser);
-            if (loser === a) { aFled = true; break; }   // a bolted — stop pairing it this tick
-          }
-        }
-      }
-      if (aFled) continue;
-    }
-  }
+  // (creatures — driveLabel/#creatureGoal/#creatureSeparation/#strength/#breed/social/
+  //  maintainPopulation/moveHomes/spawnCreature — extracted to server/systems/creatures.js;
+  //  the DO holds one CreatureManager as this.creatures. #nearestPresence stays here —
+  //  it reads presence state — and is forwarded to the manager via the world facade.)
 
   async alarm() {
     // A bad tick must NOT freeze the world forever: catch, log, and ALWAYS
