@@ -1209,6 +1209,59 @@ export class WorldRoom {
     for (const s of this.heat.update(now, sb, livePresence, (n) => this.objects.size + n < this.maxObjects)) ctx.spawn(s);
     const anomalies = [];
     for (const o of this.objects.values()) if (o.family === 'anomaly') anomalies.push(o);
+    // The tick is an ordered sequence of passes over the TickContext ledger. Order is
+    // BEHAVIOUR: it fixes the global RNG sequence, the accounting (pending spawns, the
+    // ceiling's breathing room) and the "shove then re-bank" precedence. Each pass writes
+    // ONLY through ctx (change/reclaim/defer/spawn/remove) so write-economy stays single-
+    // source (invariant #1). heat/communion/creatures/giant are their own modules; the rest
+    // are named #tick* passes (defined below #tick, in this same order).
+    this.#tickLifecycle(ctx, now, gMult, aMult, anomalies); // growth / age / shed / dissolve + crystal decay + mark heal
+    this.#tickWaterDrift(ctx, sb);                          // free objects near the pool creep along the flow
+    this.#tickIsolation(ctx, now);                          // a forgotten free stone crumbles to grit; warmth refreshes the clock
+    this.#tickCeiling(ctx);                                 // a full world trims its longest-untouched back under the cap
+    this.#prunePresence(now);                               // drop presences whose connection never closed cleanly
+    this.#communion(now, ctx);                              // where people tend a patch TOGETHER, the world blossoms
+    this.#tickAnomalySpawn(ctx, now, sb, anomalies);        // rarely, a mature plant births an anomaly (generative seasons)
+    this.#tickCrystalSpawn(ctx, now);                       // crystalline formations grow at the pool's edge, up to a few
+    const creRoom = this.maxObjects - CEIL_TRIM;            // ceiling's breathing room — shared by the creature + fish refills
+    this.creatures.maintainPopulation(now, ctx, creRoom);   // per-species floor → baseline ramp → chance-gated top-up
+    this.#tickFish(ctx, now, creRoom);                      // keep every pond stocked (floor-fill + chance top-up)
+    this.creatures.moveHomes(ctx);                          // step each free creature's HOME toward its goal + anti-crowd separation
+    this.creatures.social(now, ctx);                        // mate (→ spawned) / clash (→ gone, or a routed flee → changed)
+    this.#tickStonePush(ctx);                               // a stone never yields ground — shove overlappers just-clear
+    this.#tickPondRelocate(ctx, now);                       // no trees in water — nudge any seed/stone in a pond to its bank
+
+    await this.#commit(ctx, now);                           // flush ctx.changed (persist reclaimed, else defer + broadcast), then spawns + deaths
+
+    this.season += SEASON_PER_TICK; // advance the world's own season clock (in memory every tick)
+    await this.state.storage.put('meta:season', this.season); // one tiny key; cheap
+    // Persist the thermal field only when it's live (or just settled to zero) —
+    // an idle, all-zero world shouldn't write the field every tick forever.
+    if (this.heat.needsPersist) await this.state.storage.put('field:heat', this.heat.field);
+    this.heat.endTick();
+
+    // Checkpoint: only every CHECKPOINT_MS (wall-clock, persisted so it fires
+    // across eviction). Flushes the dirty set — the in-memory drift no discrete
+    // write captured — and nothing else; clean objects are already byte-current
+    // on disk. This is what keeps the always-ticking world off the rows_written
+    // quota AND lets its write rate scale with change, not population.
+    let checkpointed = false, checkpointWrote = 0;
+    if (now - this.lastCheckpoint >= CHECKPOINT_MS) {
+      checkpointWrote = await this.#checkpoint(now);
+      checkpointed = true;
+    }
+    await this.giant.step(now); // each gardener strolls a step + tends what it reaches
+    this.bounds = this.#computeBounds(); // refresh the camera bound (the world grows/shrinks)
+    this.#bcast({ t: MSG.SEASON, phase: this.season, bounds: this.bounds, giants: this.giant.pub() }, null); // feel the clock turn + the gardeners' new spots (clients glide to them)
+
+    return { spawned: ctx.spawned.length, gone: ctx.gone.size, checkpointed, checkpointWrote };
+  }
+
+  // ---- #tick passes (each writes only through the ctx ledger; order is behaviour) ----
+  // Growth & lifecycle: per free object — hold-timeout reclaim, crystal decay, mark heal,
+  // plant growth/age/shed/dissolve, and the broadcast-on-threshold + sub-threshold-defer
+  // bookkeeping. `anomalies` is pre-gathered so growth can sense a nearby wonder.
+  #tickLifecycle(ctx, now, gMult, aMult, anomalies) {
     for (const o of this.objects.values()) {
       if (o.held !== '' && now - o.held_at > HOLD_TIMEOUT_MS) { // missed-close safety net
         o.held = ''; o.heldConn = ''; o.held_at = 0; ctx.reclaim(o); // ownership ⇒ persist now
@@ -1268,11 +1321,12 @@ export class WorldRoom {
       if ((o.maturity !== beforeMat || o.aged !== beforeAged || o.heat !== beforeHeat || o.shedAccum !== beforeShed) &&
           !ctx.changed.has(o) && !ctx.isGone(o)) ctx.defer(o);
     }
+  }
 
-    // Water drift: eligible free objects near the pool creep along the flow.
-    // Movement is sub-pixel/tick; we mark it dirty (a checkpoint persists the
-    // creep) but BROADCAST only once an object has crept POS_BCAST_DELTA —
-    // otherwise a pool full of drifters would spam object_state every tick.
+  // Water drift: eligible free objects near the pool creep along the flow. Movement is
+  // sub-pixel/tick; mark it dirty (a checkpoint persists the creep) but BROADCAST only
+  // once an object has crept POS_BCAST_DELTA — else a pool full of drifters spams state.
+  #tickWaterDrift(ctx, sb) {
     for (const o of this.objects.values()) {
       if (ctx.isGone(o) || !this.#driftEligible(o) ||
           Math.hypot(o.x - POOL.x, o.y - POOL.y) > POOL.r * FLOW_REACH) {
@@ -1294,22 +1348,24 @@ export class WorldRoom {
         ctx.change(o);
       }
     }
+  }
 
-    // Isolation (PRD §4.3): derived from last_touched — no per-tick write. Warmth
-    // refreshes the clock (in memory; persisted at the next checkpoint); a forgotten
-    // free stone crumbles to grit. Anomalies, creatures, and held objects are
-    // tended/alive and never fade — and skipping creatures keeps them from being
-    // dirtied every tick (their last_touched is never read).
+  // Isolation (PRD §4.3): derived from last_touched — no per-tick write. Warmth refreshes
+  // the clock (in memory; persisted at the next checkpoint); a forgotten free stone crumbles
+  // to grit. Anomalies, creatures, and held objects are tended/alive — never faded, never dirtied.
+  #tickIsolation(ctx, now) {
     for (const o of this.objects.values()) {
       const fam = familyOf(o.family);
       if (fam.tended || o.held !== '') continue; // anomaly/creature/fish/mark are alive — never faded, never dirtied
       if (this.heat.at(o.x, o.y) > WARM_EPS) { o.last_touched = now; ctx.defer(o); continue; } // refresh is checkpoint-only
       if (fam.fades && (now - o.last_touched) >= STONE_FADE_MS) ctx.remove(o); // only a forgotten stone crumbles to grit
     }
+  }
 
-    // Ceiling (PRD §7.3): when the world is full, the longest-untouched (smallest
-    // last_touched) objects are trimmed back to just under the cap so a packed
-    // world keeps breathing. Anomalies and held objects are spared.
+  // Ceiling (PRD §7.3): when the world is full, the longest-untouched (smallest last_touched)
+  // objects are trimmed back to just under the cap so a packed world keeps breathing. Anomalies
+  // and held objects are spared. A forced eviction is NOT a natural death — it releases no seeds.
+  #tickCeiling(ctx) {
     const effective = this.objects.size - ctx.gone.size;
     if (effective >= this.maxObjects) {
       const cands = [];
@@ -1319,69 +1375,52 @@ export class WorldRoom {
       }
       cands.sort((a, b) => a.last_touched - b.last_touched); // longest-untouched first
       const trim = Math.min(cands.length, effective - (this.maxObjects - CEIL_TRIM));
-      // A forced eviction is not a natural death — it does NOT release final seeds
-      // (that would fight the very trim we're doing); the object just leaves.
       for (let k = 0; k < trim; k++) ctx.remove(cands[k]);
     }
+  }
 
-    // Prune stale presence so the warmth map can't grow unbounded from
-    // connections that never closed cleanly.
+  // Prune stale presence so the warmth map can't grow unbounded from connections that never closed cleanly.
+  #prunePresence(now) {
     for (const [pid, p] of this.presencePos) {
       if (now - p.ts > PRESENCE_STALE_MS + 5000) this.presencePos.delete(pid);
     }
+  }
 
-    // Communion: where people tend a patch TOGETHER, the world blossoms (the reward
-    // for bringing a friend). Presence-driven; the blooms spawn like any other object.
-    this.#communion(now, ctx);
-
-    // Rarely, a mature plant births an anomaly — only in generative seasons,
-    // and only while the world holds fewer than a few. Seeing one is luck.
+  // Rarely, a mature plant births an anomaly — only in generative seasons, and only while the
+  // world holds fewer than a few. Seeing one is luck. (anomalies = the count at tick start.)
+  #tickAnomalySpawn(ctx, now, sb, anomalies) {
     if (anomalies.length < MAX_ANOMALIES && ANOMALY_SEASONS[sb.cur] &&
         this.objects.size + ctx.spawned.length < this.maxObjects && Math.random() < ANOMALY_SPAWN_CHANCE) {
       const matures = [];
       for (const o of this.objects.values()) if (o.family === 'seed' && o.maturity >= 1 && o.aged < 0.5) matures.push(o);
       if (matures.length) ctx.spawn(this.#spawnAnomaly(matures[Math.floor(Math.random() * matures.length)], now));
     }
+  }
 
-    // Crystalline formations grow at the pool's edge, up to a few.
+  // Crystalline formations grow at the pool's edge, up to a few.
+  #tickCrystalSpawn(ctx, now) {
     let crystalCount = 0;
     for (const o of this.objects.values()) if (o.family === 'crystal') crystalCount++;
     if (crystalCount < CRYSTAL_CAP && this.objects.size + ctx.spawned.length < this.maxObjects && Math.random() < CRYSTAL_SPAWN_CHANCE) {
       ctx.spawn(this.#spawnCrystal(now));
     }
+  }
 
-    // Creatures: ramp quickly to a baseline so the world feels inhabited, then top
-    // up toward the cap. Only existence is written; their motion costs the tick
-    // nothing. Gated BELOW the ceiling's breathing room (maxObjects − CEIL_TRIM) so
-    // the guaranteed ramp can't keep refilling exactly what the trim just freed (a
-    // full world would otherwise oscillate at the cap instead of breathing).
-    const creRoom = this.maxObjects - CEIL_TRIM;
-    this.creatures.maintainPopulation(now, ctx, creRoom); // per-species floor → baseline ramp → chance-gated top-up (minority kind), all riding ctx.spawn
-
-    // Fish (Wave Q): keep every pond stocked. Floor-fill to FISH_PER_POND, then a
-    // chance-gated top-up toward the cap — so a fresh world's ponds fill quickly and a
-    // pond that loses fish refills. (Pending fish count toward the per-pond cap so one
-    // tick can't overfill.) Gated below the breathing room like creatures.
+  // Fish (Wave Q): keep every pond stocked. Floor-fill to FISH_PER_POND, then a chance-gated
+  // top-up toward the cap. (Pending fish count toward the per-pond cap so one tick can't overfill.)
+  #tickFish(ctx, now, creRoom) {
     const fishCounts = this.#fishCountByPond();
     for (const s of ctx.spawned) if (s.family === 'fish') { for (let i = 0; i < POOLS.length; i++) { const p = POOLS[i]; const dx = s.x - p.x, dy = s.y - p.y; if (dx * dx + dy * dy <= p.r * p.r) { fishCounts[i]++; break; } } }
     for (let i = 0; i < POOLS.length; i++) {
       while (fishCounts[i] < FISH_PER_POND && this.objects.size + ctx.spawned.length < creRoom) { ctx.spawn(this.#spawnFish(now, POOLS[i])); fishCounts[i]++; }
       if (fishCounts[i] < FISH_MAX_PER_POND && this.objects.size + ctx.spawned.length < creRoom && Math.random() < FISH_SPAWN_CHANCE) { ctx.spawn(this.#spawnFish(now, POOLS[i])); fishCounts[i]++; }
     }
+  }
 
-    // Goal-seeking drift (Wave G1): step each free creature's HOME toward what it needs
-    // this cycle (a plant / pool / stone) + anti-crowd separation; broadcast via ctx.change.
-    this.creatures.moveHomes(ctx);
-
-    // Social life (Wave G2): creatures sharing a patch mate (→ spawned) or clash
-    // (→ gone, or a routed flee → changed). Self-balancing (cap + per-species floor).
-    this.creatures.social(now, ctx);
-
-    // ROCK WINS POSITION WARS (Wave): a stone never yields ground. Any free non-stone object
-    // whose body overlaps a stone's footprint is eased OUT to just-clear — so a rock grown by
-    // fusing, or one a plant/creature has drifted into, shoulders the others aside instead of
-    // swallowing them. The stone itself never moves. Capped per tick; broadcast + dirtied via
-    // `changed` (the pond pass below then re-banks anything shoved into water), so no per-tick write.
+  // ROCK WINS POSITION WARS: a stone never yields ground. Any free non-stone object whose body
+  // overlaps a stone's footprint is eased OUT to just-clear — the stone itself never moves.
+  // Capped per tick; broadcast + dirtied via `changed` (the pond pass then re-banks any shoved into water).
+  #tickStonePush(ctx) {
     let shoved = 0;
     for (const o of this.objects.values()) {
       if (shoved >= STONE_PUSH_MAX) break;
@@ -1390,11 +1429,11 @@ export class WorldRoom {
       this.#settleClearOfStones(o, o.family === 'seed' ? PLANT_BASE_R : STONE_PUSH_CLEAR);
       if (o.x !== px || o.y !== py) { this.#gridUpdate(o); ctx.change(o); shoved++; }
     }
+  }
 
-    // No trees in water (Wave P): any free seed/plant sitting in a pond is nudged to
-    // its bank — catches seeds that drifted in and any caught inside a pond's footprint
-    // (e.g. a new pond placed over existing growth). Capped per tick; broadcast +
-    // dirtied via `changed`, so it rides the checkpoint with no per-tick write.
+  // No trees in water (Wave P): any free seed/plant sitting in a pond is nudged to its bank; a
+  // rock that drifted (or was caught) in a pool rolls out with the roll flag. Capped per tick.
+  #tickPondRelocate(ctx, now) {
     let relocated = 0;
     for (const o of this.objects.values()) {
       if (relocated >= POND_RELOCATE_MAX) break;
@@ -1416,41 +1455,18 @@ export class WorldRoom {
       }
       relocated++;
     }
+  }
 
-    // Broadcast every threshold-crossing for smooth visuals, but DON'T write per
-    // crossing: mark it dirty and let the periodic checkpoint persist it (the
-    // broadcast/persist decouple — write rate tracks the checkpoint cadence, not the
-    // broadcast rate). A reclaimed hold is the exception: ownership writes now, so a
-    // missed-close release can't silently revive after a pre-checkpoint eviction.
+  // Commit: broadcast every threshold-crossing for smooth visuals, but DON'T write per crossing —
+  // mark it dirty and let the periodic checkpoint persist it (the broadcast/persist decouple). A
+  // reclaimed hold is the exception: ownership writes NOW so a missed-close release can't revive.
+  async #commit(ctx, now) {
     for (const o of ctx.changed) {
       if (ctx.reclaimed.has(o.id)) await this.#persist(o); else ctx.defer(o);
       this.#bcast(this.#stateMsg(o, now), null);
     }
     for (const o of ctx.spawned) await this.#addObject(o);
     for (const o of ctx.gone) await this.#removeObject(o);
-
-    this.season += SEASON_PER_TICK; // advance the world's own season clock (in memory every tick)
-    await this.state.storage.put('meta:season', this.season); // one tiny key; cheap
-    // Persist the thermal field only when it's live (or just settled to zero) —
-    // an idle, all-zero world shouldn't write the field every tick forever.
-    if (this.heat.needsPersist) await this.state.storage.put('field:heat', this.heat.field);
-    this.heat.endTick();
-
-    // Checkpoint: only every CHECKPOINT_MS (wall-clock, persisted so it fires
-    // across eviction). Flushes the dirty set — the in-memory drift no discrete
-    // write captured — and nothing else; clean objects are already byte-current
-    // on disk. This is what keeps the always-ticking world off the rows_written
-    // quota AND lets its write rate scale with change, not population.
-    let checkpointed = false, checkpointWrote = 0;
-    if (now - this.lastCheckpoint >= CHECKPOINT_MS) {
-      checkpointWrote = await this.#checkpoint(now);
-      checkpointed = true;
-    }
-    await this.giant.step(now); // each gardener strolls a step + tends what it reaches
-    this.bounds = this.#computeBounds(); // refresh the camera bound (the world grows/shrinks)
-    this.#bcast({ t: MSG.SEASON, phase: this.season, bounds: this.bounds, giants: this.giant.pub() }, null); // feel the clock turn + the gardeners' new spots (clients glide to them)
-
-    return { spawned: ctx.spawned.length, gone: ctx.gone.size, checkpointed, checkpointWrote };
   }
 
   // Flush the dirty set to storage and stamp the checkpoint mark. Writes only the
