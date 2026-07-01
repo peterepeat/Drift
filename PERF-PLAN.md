@@ -5,6 +5,22 @@ option set + risks live in the `perf-roadmap` memory; this file is the ordered, 
 **execution checklist**. Ship each numbered step as its own verified commit (build → verify →
 commit → push; assets auto-deploy). Re-profile between stages.
 
+## Resume here → STAGE B (Stage A is DONE)
+- **`HEAD == origin/main == b878cc4`** (was `f8a70c2` at plan creation). **✅ STAGE A SHIPPED**
+  as one cohesive commit `b878cc4` (the four sub-steps are interleaved across render.js/client.js/
+  view.js, so they shipped + were verified together rather than as 4 split commits). Full suite
+  (28) green; 5-lens adversarial equivalence review passed (1 finding fixed: glow-parallax bound
+  200→600; 1 false-positive refuted). Forced-frame verified at pinned q0/q2/q4 — the whole
+  backdrop now stays present at the bare tier, no console errors.
+- **What Stage A delivered:** A2 season-memo (`seasonDerived`), A3a baked ground buffer
+  (`paintBackdrop`), A3b pre-rendered glow buffer (`paintGlowsBuffered`, CSS-space/dpr-independent,
+  parallax bounded ±600px), A4 always-on glows/sky/grade + removed the dead `noise/glows/sky/grade/
+  patches` tier flags, A1 dpr-first 5-tier curve (dpr 2/1.75/1.5/1.25/1, full detail held early;
+  `?q` pin now 0–4). The remaining tier levers are `dprCap/flow/sat/shadows/leaves/detailBudget`.
+- **▶ NEXT = STAGE B** (the big lever: sprite-cache the static forms). Re-profile first on a REAL
+  tab with the perf HUD (`?perf=1`), then start at B1. Real-tab TODOs carried from Stage A to
+  eyeball: glow-parallax during a far pan, tier climb/drop feel over time, season crossfade.
+
 ## Resume here (state at plan creation)
 - `HEAD == origin/main == f8a70c2`. The client is fully modularized (state/view/draw/forms/
   localfx/net/input; client.js ≈ 433 lines = orchestrator). Full suite (28) green; parity 82.
@@ -32,8 +48,12 @@ commit → push; assets auto-deploy). Re-profile between stages.
 
 ---
 
-## Stage A — cheap, low-risk wins (START HERE)
+## Stage A — cheap, low-risk wins ✅ DONE (`b878cc4`)
 Directly attacks the two things flagged: chunking *feels* jarring, and the backdrop popping.
+(Shipped as one commit; sub-steps below are the as-built record. NOTE the two deviations from the
+literal plan text: A3a bakes GROUND-only + keeps `paintNoise` per-frame — glows sit between ground
+and noise in the stacking order and must stay per-frame for parallax, so ground+noise can't merge
+without reordering; and A3b's glow parallax is BOUNDED to ±600px, not literally the raw offset.)
 
 - **A1. Degrade RESOLUTION before DETAIL.** In `view.js` `QUALITY_TIERS`, reorder the curve so
   `dprCap` steps down first (add an intermediate ~1.75/1.5 step) while holding `detailBudget`
@@ -58,7 +78,7 @@ Directly attacks the two things flagged: chunking *feels* jarring, and the backd
   glows+sky+grade) is consistent at every tier; only OBJECTS ever chunk. Completes the `f8a70c2`
   fix. Remove the now-vestigial tier flags. Verify at pinned `?q=3` the atmosphere still reads.
 
-## Stage B — the big lever: sprite-cache the static forms
+## Stage B — the big lever: sprite-cache the static forms (◀ START HERE)
 The change that actually lets full detail hold without chunking. *(roadmap ①)*
 
 - **B1. A sprite-cache module.** New `public/spritecache.js` (or fold into forms.js): given an
