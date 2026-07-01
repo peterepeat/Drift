@@ -12,6 +12,7 @@ import { wanderAt, drawCreature, creatureR, drawFish, fishR } from './creatures.
 import { drawGiant } from './giant.js';
 import { seedScale } from './shared/sizing.js';
 import { SPROUT_C, BIG_TREE_MAT, GIANT_R, shownMat, shownAged, stoneSize, stoneGeom, anomalyR, crystalR, formOf } from './forms.js';
+import { IN, OUT } from './shared/protocol.js'; // the wire single-source (2.6) — client now sends IN.* / switches on OUT.* (string-identical to the old raw types)
 import { canvas, ctx, camera, objects, presences, lifts, flashes, ripples, feedRushes, grits, creatureEvts, giantFootprints, S } from './state.js'; // shared client state (4.14 mirror)
 import { screenToWorld, worldToScreen, viewHalf, poolOnScreen, camLimits, zMin, clampCam, applyPan, startArrive, updateArrive, cancelArrive, saveHome, adaptQuality, setQTier, qStats, resize, queueResize, dpr, vw, vh, Q, home, Z0, ZMIN, ZMAX } from './view.js'; // camera/transforms/sizing/quality (4.14 mirror)
 
@@ -525,7 +526,7 @@ function updateDissolve(now) {
   if (!S.heldId) return;
   const ho = objects.get(S.heldId);
   if (ho && ho.family === 'anomaly' && (now - S.heldSince) >= ANOM_DISSOLVE_MS) {
-    send({ t: 'dissolve', id: S.heldId, token, ts: Date.now() });
+    send({ t: IN.DISSOLVE, id: S.heldId, token, ts: Date.now() });
     objects.delete(S.heldId); lifts.delete(S.heldId);
     clearHold();
   }
@@ -549,7 +550,7 @@ function updateFlying(now) {
     if (!Number.isFinite(s.x) || !Number.isFinite(s.y)) {
       o.x = f.x0; o.y = f.y0; o._tx = f.x0; o._ty = f.y0; o.held = false; reanchorCreature(o);
       setLift(id, 0, SETTLE_MS, EASE_SETTLE);
-      send({ t: 'place', id, token, x: f.x0, y: f.y0, ts: Date.now() });
+      send({ t: IN.PLACE, id, token, x: f.x0, y: f.y0, ts: Date.now() });
       flying.delete(id);
       continue;
     }
@@ -557,11 +558,11 @@ function updateFlying(now) {
     if (s.stopped) {
       o.held = false; reanchorCreature(o);
       setLift(id, 0, SETTLE_MS, EASE_SETTLE);        // settle down where it came to rest
-      send({ t: 'place', id, token, x: o.x, y: o.y, ts: Date.now() });
+      send({ t: IN.PLACE, id, token, x: o.x, y: o.y, ts: Date.now() });
       Audio.event('land', { seed: o.seed, family: o.family, x: o.x });
       flying.delete(id);
     } else if (sendNow) {
-      send({ t: 'carry', id, token, x: o.x, y: o.y, ts: Date.now() });
+      send({ t: IN.CARRY, id, token, x: o.x, y: o.y, ts: Date.now() });
     }
   }
   if (sendNow) _flyCarryAt = now;
@@ -571,7 +572,7 @@ function updateFlying(now) {
 function settleFlying() {
   for (const id of flying.keys()) {
     const o = objects.get(id);
-    if (o) { o.held = false; reanchorCreature(o); o._tx = o.x; o._ty = o.y; setLift(id, 0, SETTLE_MS, EASE_SETTLE); send({ t: 'place', id, token, x: o.x, y: o.y, ts: Date.now() }); }
+    if (o) { o.held = false; reanchorCreature(o); o._tx = o.x; o._ty = o.y; setLift(id, 0, SETTLE_MS, EASE_SETTLE); send({ t: IN.PLACE, id, token, x: o.x, y: o.y, ts: Date.now() }); }
   }
   flying.clear();
 }
@@ -823,7 +824,7 @@ function updateBefriend(now) {
   if (!befriendSent && now - befriendSince >= BEFRIEND_DWELL) {
     befriendSent = true;
     myFriendId = o.id; try { localStorage.setItem('drift_friend', o.id); } catch {}
-    send({ t: 'befriend', id: o.id, token, ts: Date.now() });
+    send({ t: IN.BEFRIEND, id: o.id, token, ts: Date.now() });
     const p = creaturePos(o);
     creatureEvts.push({ x: p.x, y: p.y, start: now, birth: true }); // a warm confirming bloom where it stands
     giantChime();                                                   // a soft little flourish (silent unless sound is on)
@@ -869,7 +870,7 @@ function beginHold(o, mode, off) {
   flingVel.x = 0; flingVel.y = 0; lastCarryPos = null; lastCarryT = 0; // fresh velocity
   o.held = true;                                  // optimistic; the server confirms via pickup_ack
   setLift(o.id, 1, LIFT_MS, EASE_RISE);
-  send({ t: 'pickup', id: o.id, token, ts: Date.now() });
+  send({ t: IN.PICKUP, id: o.id, token, ts: Date.now() });
   Audio.event('pickup', { seed: o.seed, family: o.family, x: o.x }); // a generative lift tone (silent unless sound is on)
 }
 function carryTo(cx, cy) {                         // keep the grab point under the pointer
@@ -919,7 +920,7 @@ function placeHold(kind) {                         // settle the held object whe
   if (!S.heldId) return;
   const o = objects.get(S.heldId);
   if (o) { o.x = S.carry.x; o.y = S.carry.y; o._tx = S.carry.x; o._ty = S.carry.y; o.held = false; reanchorCreature(o); }
-  send({ t: 'place', id: S.heldId, token, x: S.carry.x, y: S.carry.y, ts: Date.now() });
+  send({ t: IN.PLACE, id: S.heldId, token, x: S.carry.x, y: S.carry.y, ts: Date.now() });
   setLift(S.heldId, 0, SETTLE_MS, EASE_SETTLE);
   if (o) Audio.event(kind || 'place', { seed: o.seed, family: o.family, x: o.x }); // generative settle/land tone
   clearHold();
@@ -1008,14 +1009,14 @@ function endPointer(e) {
     const o = grab ? objects.get(grab.id) : null;
     if (wpt && S.giants.some((g) => Math.hypot(wpt.x - g.x, wpt.y - g.y) < GIANT_R * 0.55)) { // a friendly tap on a journeyer
       giantChime();                                       // a warm little chime...
-      send({ t: 'giant_skip', token, ts: Date.now() });   // ...and it lets go of this task and ambles to the next
+      send({ t: IN.GIANT_SKIP, token, ts: Date.now() });   // ...and it lets go of this task and ambles to the next
     } else if (o && (o.family === 'stone' || (o.family === 'anomaly' && o.kinds && o.kinds.length > 1))) { // double-tap a stone → smaller stones; a fused anomaly → split back into its kinds
-      if (lastTapId === o.id && tnow - lastTapT < DBLTAP_MS) { send({ t: 'break', id: o.id, token, ts: Date.now() }); lastTapId = null; }
+      if (lastTapId === o.id && tnow - lastTapT < DBLTAP_MS) { send({ t: IN.BREAK, id: o.id, token, ts: Date.now() }); lastTapId = null; }
       else { lastTapId = o.id; lastTapT = tnow; }
     } else if (!grab && p) {                               // a tap on BARE ground → double-tap leaves a mark (Wave S)
       const w = screenToWorld(p.sx, p.sy);
       if (!hitTest(w)) {                                   // truly empty (not over a rooted tree / object)
-        if (lastTapId === 'ground' && tnow - lastTapT < DBLTAP_MS) { send({ t: 'mark', x: w.x, y: w.y, ts: Date.now() }); lastTapId = null; }
+        if (lastTapId === 'ground' && tnow - lastTapT < DBLTAP_MS) { send({ t: IN.MARK, x: w.x, y: w.y, ts: Date.now() }); lastTapId = null; }
         else { lastTapId = 'ground'; lastTapT = tnow; }
       }
     }
@@ -1083,7 +1084,7 @@ function maybeSendCarry() {
   const n = performance.now();
   if (n - lastCarry < CARRY_SEND_MS) return;
   lastCarry = n;
-  if (S.heldId && S.carry) send({ t: 'carry', id: S.heldId, token, x: S.carry.x, y: S.carry.y, ts: Date.now() });
+  if (S.heldId && S.carry) send({ t: IN.CARRY, id: S.heldId, token, x: S.carry.x, y: S.carry.y, ts: Date.now() });
 }
 
 // ---- websocket + reconnect --------------------------------------------------
@@ -1173,7 +1174,7 @@ function onDisconnect() {
 function onMessage(raw) {
   let m; try { m = JSON.parse(raw); } catch { return; }
   switch (m.t) {
-    case 'world_state': {
+    case OUT.WORLD_STATE: {
       S.myPid = m.pid;
       objects.clear(); lifts.clear();
       for (const o of m.objects) objects.set(o.id, { ...o, held: !!o.held, _matShown: o.maturity || 0, _agedShown: o.aged || 0, _tx: o.x, _ty: o.y });
@@ -1195,7 +1196,7 @@ function onMessage(raw) {
       }
       break;
     }
-    case 'object_state': {
+    case OUT.OBJECT_STATE: {
       const o = objects.get(m.id);
       if (!o) break; // unknown (already dissolved) — ignore
       const wasHeld = o.held;
@@ -1233,7 +1234,7 @@ function onMessage(raw) {
       }
       break;
     }
-    case 'season': { // the world's slow clock advanced
+    case OUT.SEASON: { // the world's slow clock advanced
       if (m.phase != null) S.seasonPhase = m.phase;
       if (m.bounds && Number.isFinite(m.bounds.x) && Number.isFinite(m.bounds.y)) S.worldBounds = m.bounds; // keep the camera bound fresh as the world grows
       if (Array.isArray(m.giants)) { // the gardeners stepped — glide toward their new spots
@@ -1245,21 +1246,21 @@ function onMessage(raw) {
       }
       break;
     }
-    case 'object_new': { // a shed seed (or other runtime-spawned object)
+    case OUT.OBJECT_NEW: { // a shed seed (or other runtime-spawned object)
       const o = m.o;
       objects.set(o.id, { ...o, held: !!o.held, _matShown: o.maturity || 0, _agedShown: o.aged || 0, _tx: o.x, _ty: o.y });
       // a creature born (mated into being) shimmers softly where it appears — life made legible
       if (o.family === 'creature') creatureEvts.push({ x: o.x, y: o.y, start: performance.now(), birth: true });
       break;
     }
-    case 'world_patch': { // interest streaming: objects paging into view as we pan
+    case OUT.WORLD_PATCH: { // interest streaming: objects paging into view as we pan
       for (const o of m.objects) {
         if (objects.has(o.id)) continue; // already known — leave its animation state alone
         objects.set(o.id, { ...o, held: !!o.held, _matShown: o.maturity || 0, _agedShown: o.aged || 0, _tx: o.x, _ty: o.y });
       }
       break;
     }
-    case 'object_gone': {
+    case OUT.OBJECT_GONE: {
       const og = objects.get(m.id);
       if (m.splash) { // a bug dropped in a pond → fish food: a ripple + the pond's fish rush over to eat
         ripples.push({ x: m.x, y: m.y, start: performance.now() });
@@ -1286,7 +1287,7 @@ function onMessage(raw) {
       if (S.heldId === m.id) clearHold();
       break;
     }
-    case 'pickup_ack': {
+    case OUT.PICKUP_ACK: {
       if (!m.ok) { // lost the race — stop owning it (whether still in hand or already thrown)
         flying.delete(m.id);                  // a rejected throw stops gliding; the real holder's state wins
         const o = objects.get(m.id);
@@ -1298,7 +1299,7 @@ function onMessage(raw) {
       }
       break;
     }
-    case 'presence': {
+    case OUT.PRESENCE: {
       if (m.pid === S.myPid) break;
       const now = performance.now();
       const p = presences.get(m.pid);
@@ -1306,7 +1307,7 @@ function onMessage(raw) {
       else { p.x = m.x; p.y = m.y; p.last = now; } // never un-set `gone`: presence_gone must finish its fade
       break;
     }
-    case 'presence_gone': {
+    case OUT.PRESENCE_GONE: {
       const p = presences.get(m.pid); if (p) p.gone = performance.now();
       break;
     }
@@ -1318,7 +1319,7 @@ setInterval(() => {
   if (!wsReady) return;
   const c = screenToWorld(vw / 2, vh / 2);
   const h = viewHalf();
-  send({ t: 'presence_move', x: c.x, y: c.y, hw: h.hw, hh: h.hh, ts: Date.now() });
+  send({ t: IN.PRESENCE_MOVE, x: c.x, y: c.y, hw: h.hw, hh: h.hh, ts: Date.now() });
   saveHome(performance.now()); // remember where we've been inhabiting (return thread, §6.3)
 }, PRESENCE_SEND_MS);
 
