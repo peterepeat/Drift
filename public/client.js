@@ -13,7 +13,7 @@ import { drawGiant } from './giant.js';
 import { seedScale } from './shared/sizing.js';
 import { SPROUT_C, BIG_TREE_MAT, GIANT_R, shownMat, shownAged, stoneSize, stoneGeom, anomalyR, crystalR, formOf } from './forms.js';
 import { canvas, ctx, camera, objects, presences, lifts, flashes, ripples, feedRushes, grits, creatureEvts, giantFootprints, S } from './state.js'; // shared client state (4.14 mirror)
-import { screenToWorld, worldToScreen, viewHalf, poolOnScreen, camLimits, zMin, clampCam, applyPan, startArrive, updateArrive, cancelArrive, saveHome, adaptQuality, setQTier, resize, queueResize, dpr, vw, vh, Q, home, Z0, ZMIN, ZMAX } from './view.js'; // camera/transforms/sizing/quality (4.14 mirror)
+import { screenToWorld, worldToScreen, viewHalf, poolOnScreen, camLimits, zMin, clampCam, applyPan, startArrive, updateArrive, cancelArrive, saveHome, adaptQuality, setQTier, qStats, resize, queueResize, dpr, vw, vh, Q, home, Z0, ZMIN, ZMAX } from './view.js'; // camera/transforms/sizing/quality (4.14 mirror)
 
 // ---- tuning constants -------------------------------------------------------
 // Z0/ZMIN/ZMAX (zoom range) now live in view.js (imported above).
@@ -115,7 +115,15 @@ let qPrevNow = 0;              // frame-timing anchor for adaptQuality (the fram
 // ?focus=1 in the URL (the admin panel links here) or by pressing 'f'. The only text in Drift.
 let showFocus = new URLSearchParams(location.search).has('focus');
 const ACT_COLOR = { feed: 'rgba(150,210,120,0.95)', drink: 'rgba(130,190,235,0.95)', rest: 'rgba(225,200,150,0.95)', roam: 'rgba(200,195,185,0.9)', follow: 'rgba(240,150,150,0.96)' };
-addEventListener('keydown', (e) => { if (e.key === 'f' || e.key === 'F') showFocus = !showFocus; });
+// PERF HUD (debug): a corner readout of the adaptive-quality tier + smoothed fps + the
+// on-screen count vs the detail budget — so a chunky-looking world can be diagnosed as
+// "tier dropped" vs "genuinely over budget". Off by default; ?perf=1 or press 'p'. To
+// force full detail while testing, pin the tier with ?q=0 (see view.js adaptQuality).
+let showPerf = new URLSearchParams(location.search).has('perf');
+addEventListener('keydown', (e) => {
+  if (e.key === 'f' || e.key === 'F') showFocus = !showFocus;
+  else if (e.key === 'p' || e.key === 'P') showPerf = !showPerf;
+});
 
 // ---- canvas + viewport sizing ----------------------------------------------
 // canvas/ctx (state.js) + dpr/vw/vh + resize/queueResize + the resize listeners now
@@ -1522,6 +1530,26 @@ function frame(now) {
       const s = worldToScreen(g.x, g.y), word = g.act + (g.stuck >= 2 ? ' ·stuck' : ''), yo = GIANT_R * camera.z * 0.5 + 8;
       ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillText(word, s.x + 0.7, s.y + yo + 0.7);
       ctx.fillStyle = g.stuck >= 2 ? 'rgba(240,150,150,0.98)' : 'rgba(190,225,170,0.96)'; ctx.fillText(word, s.x, s.y + yo);
+    }
+  }
+
+  // PERF HUD: tier + smoothed fps + on-screen count vs budget + the live LOD cut. Lets a
+  // "why is everything chunky" moment be read at a glance — a dropped tier (low budget) vs a
+  // genuinely over-budget viewport. Screen space, top-left, above everything.
+  if (showPerf) {
+    const q = qStats(), fps = q.ema > 0 ? Math.round(1000 / q.ema) : 0;
+    const lines = [
+      `tier ${q.tier}${q.pinned ? ' ·pinned' : ''}   ~${fps}fps (${q.ema.toFixed(1)}ms)`,
+      `on-screen ${list.length} / budget ${q.budget}`,
+      frameLodCut > 0 ? `LOD: chunk < ${frameLodCut.toFixed(1)}px on screen` : 'LOD: all full detail',
+    ];
+    ctx.font = '600 11px ui-monospace, SFMono-Regular, monospace';
+    ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+    let yy = 12;
+    for (const ln of lines) {
+      ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillText(ln, 12.7, yy + 0.7);
+      ctx.fillStyle = frameLodCut > 0 && ln.startsWith('LOD') ? 'rgba(240,200,150,0.96)' : 'rgba(210,230,205,0.95)'; ctx.fillText(ln, 12, yy);
+      yy += 15;
     }
   }
 

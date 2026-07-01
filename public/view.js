@@ -31,9 +31,25 @@ export let Q = QUALITY_TIERS[0];
 let frameMsEMA = 16.7, qLastChangeMs = 0, qHotFrames = 0, qCoolFrames = 0;
 const Q_COOLDOWN_MS = 4000;  // min ms between tier changes (don't thrash)
 const Q_DOWN_MS = 27;        // smoothed frame time worse than this (~<37fps) for a spell → go leaner
-const Q_UP_MS = 14;          // ...better than this (~>71fps) for a longer spell → go richer
+// Climb back once frames sit comfortably inside the refresh budget again. This threshold
+// MUST be ABOVE a 60Hz vsync interval (16.7ms): rAF is vsync-capped, so on a 60/75Hz
+// display the measured frame time can NEVER fall below ~16.7ms no matter how much headroom
+// the machine has. The old 14ms was therefore UNREACHABLE there — once the tier dropped
+// from any transient hitch (a GC pause, a big world_patch, the pre-b4aa8fe pan/zoom
+// exception storm) it could NEVER recover, stranding the world in low-detail "chunks" until
+// reload. 20ms (a smoothly-vsynced 60Hz frame + a little slack, still clear of the 27ms
+// down-trigger) lets it climb back while staying protective of genuinely weak devices.
+const Q_UP_MS = 20;
+// Manual override (?q=0..3): pin a tier for testing/diagnosis and freeze the adaptive loop.
+// Absent/invalid → normal adaptive behaviour. Read once at load, before the first resize().
+let qPinned = false;
+{ const qp = new URLSearchParams(location.search).get('q');
+  if (qp != null && /^[0-3]$/.test(qp)) { qPinned = true; qTier = +qp; Q = QUALITY_TIERS[qTier]; } }
+// For the ?perf HUD (client.js): the live tier / smoothed frame time / detail budget.
+export function qStats() { return { tier: qTier, ema: frameMsEMA, budget: Q.detailBudget, pinned: qPinned }; }
 export function adaptQuality(dtMs, nowMs) {
-  if (dtMs > 0 && dtMs < 400) frameMsEMA += (dtMs - frameMsEMA) * 0.08; // ignore tab-hidden / GC outliers
+  if (dtMs > 0 && dtMs < 400) frameMsEMA += (dtMs - frameMsEMA) * 0.08; // ignore tab-hidden / GC outliers (still tracked for the HUD)
+  if (qPinned) return;                                                  // ?q= pins the tier — honour it
   if (frameMsEMA > Q_DOWN_MS) { qHotFrames++; qCoolFrames = 0; }
   else if (frameMsEMA < Q_UP_MS) { qCoolFrames++; qHotFrames = 0; }
   else { qHotFrames = 0; qCoolFrames = 0; }
