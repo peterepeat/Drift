@@ -13,16 +13,16 @@ import { drawGiant } from './giant.js';
 import { seedScale } from './shared/sizing.js';
 import { SPROUT_C, BIG_TREE_MAT, GIANT_R, shownMat, shownAged, stoneSize, stoneGeom, anomalyR, crystalR, formOf } from './forms.js';
 import { canvas, ctx, camera, objects, presences, lifts, flashes, ripples, feedRushes, grits, creatureEvts, giantFootprints, S } from './state.js'; // shared client state (4.14 mirror)
+import { screenToWorld, worldToScreen, viewHalf, poolOnScreen, camLimits, zMin, clampCam, applyPan, startArrive, updateArrive, saveHome, adaptQuality, setQTier, resize, queueResize, dpr, vw, vh, Q, home, Z0, ZMIN, ZMAX } from './view.js'; // camera/transforms/sizing/quality (4.14 mirror)
 
 // ---- tuning constants -------------------------------------------------------
-const Z0 = 1.0, ZMIN = 0.2, ZMAX = 4.0;     // zoom = CSS px per world unit
+// Z0/ZMIN/ZMAX (zoom range) now live in view.js (imported above).
 const SLOP = 8;                              // px of movement that turns a tap into a pan
 // Camera bounds (Wave J): the camera centre is held within the object field (sent by
 // the server as world half-extents) so you can never wander far into empty space —
 // panning SLOWS as you approach the edge and STOPS at it. Zoom-aware: when zoomed out
 // (the viewport already covers the world) the pannable range collapses toward centre.
-const EDGE_MARGIN = 320;                      // how far past the furthest object the centre may go (when zoomed in)
-const EDGE_SOFT = 0.72;                        // fraction of the limit past which panning starts to resist
+// EDGE_MARGIN / EDGE_SOFT (camera edge-resistance) now live in view.js.
 const HIT_MIN = 26;                          // min tap radius in CSS px (accessibility)
 const HIT_PAD = 3, HIT_GROW = 1.18;          // grab area modestly exceeds the drawn form — easy to grab, but not so greedy it steals pans
 const LIFT_MS = 300, SETTLE_MS = 260;        // pickup / place timings (spec)
@@ -107,152 +107,26 @@ if (!token) { token = crypto.randomUUID(); localStorage.setItem('drift_session',
 // draws full (a close-up sprout is never chunky); over budget, only the smallest-on-screen
 // overflow simplifies. So chunkiness happens solely under genuine load, and a leaner tier
 // just lowers the budget.
-const QUALITY_TIERS = [
-  { dprCap: 2,    noise: 1, glows: 1, flow: 1, sky: 1, grade: 1, sat: 1, patches: 1, shadows: 1, leaves: 1, detailBudget: 1300 }, // full — doubled headroom: ~2× as many on-screen objects stay full-detail before any chunk
-  { dprCap: 1.5,  noise: 0, glows: 1, flow: 1, sky: 1, grade: 1, sat: 1, patches: 1, shadows: 1, leaves: 1, detailBudget: 840 }, // drop the full-screen noise; cap retina
-  { dprCap: 1.25, noise: 0, glows: 0, flow: 0, sky: 1, grade: 1, sat: 0, patches: 1, shadows: 1, leaves: 0, detailBudget: 500 }, // drop glows/flow/litter + the sat-filter (a real GPU win)
-  { dprCap: 1,    noise: 0, glows: 0, flow: 0, sky: 0, grade: 0, sat: 0, patches: 0, shadows: 0, leaves: 0, detailBudget: 260 }, // bare: no sky/grade/patches/shadows, tight budget
-];
-let qTier = 0, Q = QUALITY_TIERS[0];
-let frameMsEMA = 16.7, qLastChangeMs = 0, qHotFrames = 0, qCoolFrames = 0, qPrevNow = 0;
+// QUALITY_TIERS / qTier / Q / adaptQuality / setQTier now live in view.js (imported above);
+// client.js reads the live `Q` binding to gate the render passes.
+let qPrevNow = 0;              // frame-timing anchor for adaptQuality (the frame loop owns this)
 // FOCUS LABELS (debug/troubleshooting): a tiny word under each creature naming its current
 // focus. The world is deliberately wordless, so this is OFF by default — turn it on with
 // ?focus=1 in the URL (the admin panel links here) or by pressing 'f'. The only text in Drift.
 let showFocus = new URLSearchParams(location.search).has('focus');
 const ACT_COLOR = { feed: 'rgba(150,210,120,0.95)', drink: 'rgba(130,190,235,0.95)', rest: 'rgba(225,200,150,0.95)', roam: 'rgba(200,195,185,0.9)', follow: 'rgba(240,150,150,0.96)' };
 addEventListener('keydown', (e) => { if (e.key === 'f' || e.key === 'F') showFocus = !showFocus; });
-const Q_COOLDOWN_MS = 4000;  // min ms between tier changes (don't thrash)
-const Q_DOWN_MS = 27;        // smoothed frame time worse than this (~<37fps) for a sustained spell → go leaner
-const Q_UP_MS = 14;          // ...better than this (~>71fps) for a longer spell → go richer
-function adaptQuality(dtMs, nowMs) {
-  if (dtMs > 0 && dtMs < 400) frameMsEMA += (dtMs - frameMsEMA) * 0.08; // ignore tab-hidden / GC outliers
-  if (frameMsEMA > Q_DOWN_MS) { qHotFrames++; qCoolFrames = 0; }
-  else if (frameMsEMA < Q_UP_MS) { qCoolFrames++; qHotFrames = 0; }
-  else { qHotFrames = 0; qCoolFrames = 0; }
-  if (nowMs - qLastChangeMs < Q_COOLDOWN_MS) return;
-  if (qHotFrames > 40 && qTier < QUALITY_TIERS.length - 1) setQTier(qTier + 1, nowMs);        // struggling now → shed quickly
-  else if (qCoolFrames > 240 && qTier > 0) setQTier(qTier - 1, nowMs);                        // sustained headroom → climb back gently
-}
-function setQTier(t, nowMs) {
-  const prevDpr = Q.dprCap;
-  qTier = t; Q = QUALITY_TIERS[t]; qLastChangeMs = nowMs; qHotFrames = 0; qCoolFrames = 0;
-  if (Q.dprCap !== prevDpr) resize(); // the canvas backing store changes with the dpr cap
-}
 
 // ---- canvas + viewport sizing ----------------------------------------------
-// canvas/ctx now live in state.js (the shared render substrate; 4.14 mirror).
-let dpr = 1, vw = 0, vh = 0;
+// canvas/ctx (state.js) + dpr/vw/vh + resize/queueResize + the resize listeners now
+// live in view.js (the render substrate + sizing; 4.14 mirror). client.js reads the
+// live dpr/vw/vh bindings.
 
-function resize() {
-  dpr = Math.min(window.devicePixelRatio || 1, Q.dprCap);
-  const vv = window.visualViewport;
-  vw = Math.round(vv ? vv.width : window.innerWidth);
-  vh = Math.round(vv ? vv.height : window.innerHeight);
-  canvas.width = Math.round(vw * dpr);
-  canvas.height = Math.round(vh * dpr);
-  canvas.style.width = vw + 'px';
-  canvas.style.height = vh + 'px';
-}
-let resizeQueued = false;
-function queueResize() {
-  if (resizeQueued) return;
-  resizeQueued = true;
-  requestAnimationFrame(() => { resizeQueued = false; resize(); });
-}
-window.addEventListener('resize', queueResize);
-window.addEventListener('orientationchange', queueResize);
-if (window.visualViewport) {
-  visualViewport.addEventListener('resize', queueResize);
-  visualViewport.addEventListener('scroll', queueResize);
-}
-resize();
-
-// ---- camera + transforms (all in CSS px; dpr only folded into the matrix) ---
-// camera now lives in state.js (shared substrate; initial z === Z0 === 1.0).
-let arrive = null; // soft-pan-to-active-area animation
-// worldBounds now lives on S (state.js) — net writes it, view (clampCam) reads it.
-
-// Return thread (PRD §6.3): the area a visitor was last active in is remembered
-// CLIENT-side (never sent as identity — only as a transient viewport hint) so a
-// returning visitor is softly oriented back toward where they were, rather than the
-// world's global centre-of-gravity. First-time visitors have no home and arrive at
-// the cog (PRD §5.4). Stored as the camera centre, throttled while inhabiting.
-let home = null;
-try { const h = JSON.parse(localStorage.getItem('drift_home') || 'null'); if (h && Number.isFinite(h.x) && Number.isFinite(h.y)) home = h; } catch {}
-let arrivedOnce = false, homeSavedAt = 0;
-function saveHome(now) {
-  if (now - homeSavedAt < 2000) return;          // at most every 2s
-  homeSavedAt = now;
-  home = { x: camera.x, y: camera.y };
-  try { localStorage.setItem('drift_home', JSON.stringify(home)); } catch {}
-}
-
-function screenToWorld(sx, sy) {
-  return { x: camera.x + (sx - vw / 2) / camera.z, y: camera.y + (sy - vh / 2) / camera.z };
-}
-function worldToScreen(wx, wy) {
-  return { x: (wx - camera.x) * camera.z + vw / 2, y: (wy - camera.y) * camera.z + vh / 2 };
-}
-// Is the water pool's drift band anywhere on screen? (gates the flow-trace pass)
-function poolOnScreen() {
-  if (!S.pool) return false;
-  const s = worldToScreen(S.pool.x, S.pool.y), rr = S.pool.r * camera.z * 1.4;
-  return s.x + rr >= 0 && s.x - rr <= vw && s.y + rr >= 0 && s.y - rr <= vh;
-}
-// How far the camera CENTRE may stray from origin on each axis right now. Shrinks as
-// you zoom out (the viewport already covers more world), so the view always overlaps
-// the object field — collapses toward 0 once the whole world fits on screen.
-function camLimits() {
-  if (!S.worldBounds) return { x: Infinity, y: Infinity };
-  const h = viewHalf();
-  return { x: Math.max(0, S.worldBounds.x + EDGE_MARGIN - h.hw), y: Math.max(0, S.worldBounds.y + EDGE_MARGIN - h.hh) };
-}
-// Zoom-out is LIMITED so you can't take in the whole world at once (more to discover, and
-// it keeps the on-screen object count sane). At the most zoomed-out, the viewport covers
-// ~VIEW_FRAC of the WORLD's area — and since that's derived from the live world bounds, the
-// limit scales as the world grows. (Zoom-IN is unchanged, up to ZMAX.)
-const VIEW_FRAC = 0.10;
-function zMin() {
-  if (!S.worldBounds || !vw || !vh) return ZMIN;
-  const bx = Math.max(500, S.worldBounds.x), by = Math.max(500, S.worldBounds.y);
-  const z = Math.sqrt((vw * vh) / (VIEW_FRAC * 4 * bx * by)); // (vw/z)(vh/z) = VIEW_FRAC · worldArea
-  return clamp(z, 0.05, ZMAX * 0.9);
-}
-// Hard backstop: pull the camera within the limits + the zoom within range (after a jump,
-// a resize, or the world bounds changing under it).
-function clampCam() {
-  camera.z = clamp(camera.z, zMin(), ZMAX);
-  const L = camLimits();
-  camera.x = clamp(camera.x, -L.x, L.x);
-  camera.y = clamp(camera.y, -L.y, L.y);
-}
-// Apply a pan (world-unit deltas) with edge RESISTANCE: free near the centre, easing
-// to a stop at the limit. Only OUTWARD motion is resisted — you can always pan back in.
-function approachLimit(cur, d, limit) {
-  let next = cur + d;
-  if (Math.abs(next) > Math.abs(cur) && Math.abs(cur) > limit * EDGE_SOFT) {
-    const slack = Math.max(1, limit * (1 - EDGE_SOFT));
-    const t = Math.min(1, (Math.abs(cur) - limit * EDGE_SOFT) / slack);
-    next = cur + d * (1 - t); // scale the outward step toward 0 at the limit
-  }
-  return clamp(next, -limit, limit);
-}
-function applyPan(wdx, wdy) {
-  const L = camLimits();
-  camera.x = approachLimit(camera.x, wdx, L.x);
-  camera.y = approachLimit(camera.y, wdy, L.y);
-}
-function startArrive(tx, ty) {
-  arrive = { fromX: camera.x, fromY: camera.y, toX: tx, toY: ty, start: performance.now(), dur: 1200 };
-}
-function updateArrive(now) {
-  if (!arrive) return;
-  const t = Math.min(1, (now - arrive.start) / arrive.dur), e = 1 - Math.pow(1 - t, 3);
-  camera.x = arrive.fromX + (arrive.toX - arrive.fromX) * e;
-  camera.y = arrive.fromY + (arrive.toY - arrive.fromY) * e;
-  clampCam(); // a remembered home from before bounds existed (or a stranded one) is pulled back into the world
-  if (t >= 1) arrive = null;
-}
+// ---- camera + transforms ---------------------------------------------------
+// The camera transforms / sizing / adaptive-quality / pan-zoom-arrive machinery + the
+// remembered `home` all live in view.js (imported above). Only `arrivedOnce` stays here:
+// it's net-orient state (set once on the first world_state), owned by the net handlers.
+let arrivedOnce = false;
 
 // ---- world state ------------------------------------------------------------
 // The shared containers — objects/presences/lifts + the cosmetic FX buffers
@@ -1258,9 +1132,7 @@ document.addEventListener('visibilitychange', () => {
   else Audio.onVisible();
 });
 
-// Half-extents of the current viewport in world units — what the server needs to
-// know which objects we can see (interest management). dpr is already folded out.
-function viewHalf() { return { hw: (vw / 2) / camera.z, hh: (vh / 2) / camera.z }; }
+// viewHalf() (half-extents of the viewport in world units) now lives in view.js.
 function wsUrl() {
   const h = viewHalf();
   let q = `?hw=${Math.round(h.hw)}&hh=${Math.round(h.hh)}`;
