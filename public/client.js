@@ -11,9 +11,9 @@ import { flingStep, ema, nudge, spring, deflectCircles } from './physics.js';
 import { wanderAt, drawCreature, creatureR, drawFish, fishR } from './creatures.js';
 import { drawGiant } from './giant.js';
 import { SPROUT_C, BIG_TREE_MAT, GIANT_R, shownMat, shownAged, stoneSize, stoneGeom, anomalyR, crystalR, formOf } from './forms.js';
-import { objRadius, isMovable, creaturePos, posOf, drawMark, drawObjectWorld, drawHeldScreen, paintAttend, FISH_SWIM_SPEED, FEED_RELEASE } from './draw.js'; // ctx-coupled object paint dispatch + position/geometry readers (4.14d)
+import { objRadius, isMovable, creaturePos, posOf, drawMark, drawObjectWorld, drawHeldScreen, paintAttend, FISH_SWIM_SPEED, FEED_RELEASE, FEED_RUSH_CAP_MS } from './draw.js'; // ctx-coupled object paint dispatch + position/geometry readers (4.14d)
 import { IN, OUT } from './shared/protocol.js';
-import { setLift, liftValue, isLifted, updateLifts, updateGrowth, updatePositions, updateNudge, updateCollision, updateSway, updateLeaves, drawLeaves, drawCreatureEvts, GIANT_VIS_SPEED } from './localfx.js'; // lift anim + per-frame cosmetic-fx passes (4.14e) // the wire single-source (2.6) — client now sends IN.* / switches on OUT.* (string-identical to the old raw types)
+import { setLift, liftValue, isLifted, updateLifts, updateGrowth, updatePositions, updateNudge, updateCollision, updateSway, updateLeaves, drawLeaves, drawCreatureEvts, GIANT_VIS_SPEED, LIFT_MS, SETTLE_MS, EASE_RISE, EASE_SETTLE } from './localfx.js'; // lift anim + per-frame cosmetic-fx passes (4.14e) // the wire single-source (2.6) — client now sends IN.* / switches on OUT.* (string-identical to the old raw types)
 import { canvas, ctx, camera, objects, presences, lifts, flashes, ripples, feedRushes, grits, creatureEvts, giantFootprints, flying, swaying, mouseVelW, S } from './state.js'; // shared client state (4.14 mirror)
 import { screenToWorld, worldToScreen, viewHalf, poolOnScreen, camLimits, zMin, clampCam, applyPan, startArrive, updateArrive, cancelArrive, saveHome, adaptQuality, setQTier, qStats, resize, queueResize, dpr, vw, vh, Q, home, Z0, ZMIN, ZMAX } from './view.js'; // camera/transforms/sizing/quality (4.14 mirror)
 
@@ -27,7 +27,6 @@ const SLOP = 8;                              // px of movement that turns a tap 
 // EDGE_MARGIN / EDGE_SOFT (camera edge-resistance) now live in view.js.
 const HIT_MIN = 26;                          // min tap radius in CSS px (accessibility)
 const HIT_PAD = 3, HIT_GROW = 1.18;          // grab area modestly exceeds the drawn form — easy to grab, but not so greedy it steals pans
-const LIFT_MS = 300, SETTLE_MS = 260;        // pickup / place timings (spec)
 const CARRY_SEND_MS = 50;                    // throttle for streaming a carried object
 const THROW_MIN = 180;                       // release speed (world units/s) below which a drag just places — no fling
 const THROW_FRICTION = 0.045;                // velocity retained per second mid-fling (fast, natural settle)
@@ -56,9 +55,6 @@ const POS_EASE_MAX = 24;                       // a position change up to this (
 // then spring back, when you try to drag across them — a render-only canopy lean.
 const SWAY_IMPULSE = 0.0011;                   // how much a px of drag feeds the lean
 
-// Spec easing curves (Visual Bible §06).
-const EASE_RISE = cubicBezier(0.22, 1, 0.36, 1);     // pickup / place lift
-const EASE_SETTLE = cubicBezier(0.40, 0, 0.20, 1);   // place settle, no overshoot
 
 // ---- session token ----------------------------------------------------------
 // Opaque UUID, never transmitted with identifying info. Used server-side only
@@ -112,7 +108,6 @@ let arrivedOnce = false;
 // The shared containers — objects/presences/lifts + the cosmetic FX buffers
 // (flashes/ripples/feedRushes/grits/creatureEvts/giantFootprints) — now live in
 // state.js so the extracted subsystems mutate the same references (4.14 mirror).
-const FEED_RUSH_CAP_MS = 5000; // hard cap on a feed-rush (safety; normally it ends when the bug is eaten)
 // pool/pools/giants/myPid/seasonPhase/animT/clockSkew now live on S (state.js) — the
 // world MODEL: net writes them, render/draw/view read them (4.14 mirror).
 let lastSat = -1;              // last-applied canvas saturation (avoids per-frame style writes)
@@ -1014,22 +1009,6 @@ function frame(now) {
 // throw/S.carry position. Collapsing NaN to `lo` keeps the camera (and everything
 // derived from it) finite no matter what upstream produced.
 function clamp(v, lo, hi) { return v !== v ? lo : v < lo ? lo : v > hi ? hi : v; }
-function cubicBezier(x1, y1, x2, y2) {
-  const cx = 3 * x1, bx = 3 * (x2 - x1) - cx, ax = 1 - cx - bx;
-  const cy = 3 * y1, by = 3 * (y2 - y1) - cy, ay = 1 - cy - by;
-  const sampleX = (t) => ((ax * t + bx) * t + cx) * t;
-  const sampleY = (t) => ((ay * t + by) * t + cy) * t;
-  const dX = (t) => (3 * ax * t + 2 * bx) * t + cx;
-  return function (x) {
-    if (x <= 0) return 0; if (x >= 1) return 1;
-    let t = x;
-    for (let i = 0; i < 8; i++) {
-      const xe = sampleX(t) - x; if (Math.abs(xe) < 1e-4) break;
-      const d = dX(t); if (Math.abs(d) < 1e-6) break; t -= xe / d;
-    }
-    return sampleY(clamp(t, 0, 1));
-  };
-}
 
 // ---- go ---------------------------------------------------------------------
 connect();

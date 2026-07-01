@@ -18,6 +18,7 @@ import * as PG from './drift-procgen.js';
 // Client render consts owned here (only the moved draw code reads them).
 export const FISH_SWIM_SPEED = 150; // world u/s the fish swim toward food (a brisk, natural pursuit — the NEAREST reaches first + eats it)
 export const FEED_RELEASE = 0.9;    // seconds for fish to ease back to their wander once the bug is eaten
+export const FEED_RUSH_CAP_MS = 5000; // hard cap on a feed-rush (safety; normally it ends when the bug is eaten)
 const GLOW_SEC = 180;               // glow-buff duration in seconds (mirror server GLOW_MS)
 const MARK_SIZE = 24;               // ground-mark footprint (world units) — small, rock-shaped
 const MARK_TINT = '#d3c6ab';        // pale warm stain — a drawn mark visible on the dark ground

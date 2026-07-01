@@ -17,6 +17,28 @@ import * as PG from './drift-procgen.js';
 
 const clamp = (v, lo, hi) => (v !== v ? lo : v < lo ? lo : v > hi ? hi : v); // shared 1-liner (also in client.js/view.js)
 
+// ---- the lift API's timings + easing (co-located with setLift/updateLifts; net + input +
+// client.js's throw/place all pass these to setLift, so they're exported from the lift home) ----
+function cubicBezier(x1, y1, x2, y2) { // spec easing curve (Visual Bible §06)
+  const cx = 3 * x1, bx = 3 * (x2 - x1) - cx, ax = 1 - cx - bx;
+  const cy = 3 * y1, by = 3 * (y2 - y1) - cy, ay = 1 - cy - by;
+  const sampleX = (t) => ((ax * t + bx) * t + cx) * t;
+  const sampleY = (t) => ((ay * t + by) * t + cy) * t;
+  const dX = (t) => (3 * ax * t + 2 * bx) * t + cx;
+  return function (x) {
+    if (x <= 0) return 0; if (x >= 1) return 1;
+    let t = x;
+    for (let i = 0; i < 8; i++) {
+      const xe = sampleX(t) - x; if (Math.abs(xe) < 1e-4) break;
+      const d = dX(t); if (Math.abs(d) < 1e-6) break; t -= xe / d;
+    }
+    return sampleY(clamp(t, 0, 1));
+  };
+}
+export const LIFT_MS = 300, SETTLE_MS = 260;              // pickup / place timings (spec)
+export const EASE_RISE = cubicBezier(0.22, 1, 0.36, 1);   // pickup / place lift
+export const EASE_SETTLE = cubicBezier(0.40, 0, 0.20, 1); // place settle, no overshoot
+
 // ---- tuning consts (owned here; GIANT_VIS_SPEED is also read by the frame's giant entry) ----
 export const GIANT_VIS_SPEED = 13;                   // world u/s it WALKS along its heading between ticks (≈ GIANT_STEP/tick) — brisk, continuous motion (not rushed, never parked)
 const GIANT_EASE = 0.4;                       // per-second retention for the giant's correction toward each broadcast spot
