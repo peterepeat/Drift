@@ -44,5 +44,10 @@ export const S = {
   pool: null,         // the central water pool { x, y, r } (flow + audio anchor)
   pools: [],          // every pond the world carries (Wave P) — all rendered as water
   giants: [],         // the TWO gardener NPCs — server-authoritative; walked continuously client-side
+
+  // local HOLD state — input + net WRITE it, draw (isLifted/drawHeldScreen) + localfx READ it
+  heldId: null,       // id of the object this client is currently holding (or null)
+  carry: null,        // the held object's live carried position { x, y } (null when not holding)
+  heldSince: 0,       // performance.now() when the local hold began (drives anomaly dissolution)
 };
 

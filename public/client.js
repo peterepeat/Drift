@@ -268,14 +268,13 @@ let lastSat = -1;              // last-applied canvas saturation (avoids per-fra
 function syncedT() { return (Date.now() + S.clockSkew) / 1000; }
 
 // local hold
-let heldId = null, carry = null, preGrab = null;
-let heldSince = 0;             // when the local hold began (drives anomaly dissolution)
+let preGrab = null; // S.heldId / S.carry / S.heldSince now live on S (state.js) — the HOLD state (input+net write, draw+localfx read)
 // Throw momentum: the carried object's recent velocity (world units/s), sampled as
 // it moves, so releasing a moving drag flings it on instead of freezing it (Wave 3).
 let flingVel = { x: 0, y: 0 }, lastCarryPos = null, lastCarryT = 0;
 // Thrown objects glide FREE of the pointer (id -> {vx,vy}): a throw releases the
 // pointer immediately so you can pan / grab again while the object flies on. It
-// stays server-held by our token until it lands (so carry streams), then places.
+// stays server-held by our token until it lands (so S.carry streams), then places.
 let flying = new Map();
 
 // ---- lift animation ---------------------------------------------------------
@@ -293,7 +292,7 @@ function updateLifts(now) {
 }
 // An object is rendered in the lifted screen-space pass while it is being held
 // (locally or remotely) or while it is settling. The world pass skips these.
-function isLifted(id) { return id === heldId || liftValue(id) > 0.002; }
+function isLifted(id) { return id === S.heldId || liftValue(id) > 0.002; }
 
 // ---- deterministic-from-seed forms (footprints + render flags now in forms.js) ----
 // A plain anomaly draws its one kind; a fused hybrid layers each constituent kind
@@ -383,7 +382,7 @@ function creaturePos(o) {
 // Where an object is drawn / tested THIS frame: a free creature wanders; everything
 // else sits at its true position plus any local cursor-displacement offset.
 function posOf(o) {
-  if ((o.family === 'creature' || o.family === 'fish') && !o.held && o.id !== heldId) return creaturePos(o);
+  if ((o.family === 'creature' || o.family === 'fish') && !o.held && o.id !== S.heldId) return creaturePos(o);
   return { x: o.x + (o._ox || 0), y: o.y + (o._oy || 0) };
 }
 // The biggest trees have ROOTED — they're immovable landmarks (never grabbed; you
@@ -605,7 +604,7 @@ function updatePositions(now) {
   const kr = dt > 0 ? 1 - Math.pow(0.06, dt) : 0;    // a rock rolling out of water: a slower, visible ~1.2s roll to the bank
   for (const o of objects.values()) {
     if (o._tx == null) { o._tx = o.x; o._ty = o.y; continue; }
-    if (o.id === heldId) { o._tx = o.x; o._ty = o.y; continue; } // locally carried — follows the finger
+    if (o.id === S.heldId) { o._tx = o.x; o._ty = o.y; continue; } // locally carried — follows the finger
     const r = o._roll ? kr : (o.family === 'creature' ? kc : k);
     o.x += (o._tx - o.x) * r;
     o.y += (o._ty - o.y) * r;
@@ -641,17 +640,17 @@ function updatePositions(now) {
 }
 // Holding an anomaly for 10s dissolves it (it fades from your hands — never explained).
 function updateDissolve(now) {
-  if (!heldId) return;
-  const ho = objects.get(heldId);
-  if (ho && ho.family === 'anomaly' && (now - heldSince) >= ANOM_DISSOLVE_MS) {
-    send({ t: 'dissolve', id: heldId, token, ts: Date.now() });
-    objects.delete(heldId); lifts.delete(heldId);
+  if (!S.heldId) return;
+  const ho = objects.get(S.heldId);
+  if (ho && ho.family === 'anomaly' && (now - S.heldSince) >= ANOM_DISSOLVE_MS) {
+    send({ t: 'dissolve', id: S.heldId, token, ts: Date.now() });
+    objects.delete(S.heldId); lifts.delete(S.heldId);
     clearHold();
   }
 }
 
 // Advance every thrown object: friction decays its velocity, it glides, and once
-// slow enough it settles into a place. Streams carry so others see the glide (it
+// slow enough it settles into a place. Streams S.carry so others see the glide (it
 // stays owned until it rests). dt is clamped so a backgrounded tab doesn't teleport.
 let _lastFlingT = 0, _flyCarryAt = 0;
 function updateFlying(now) {
@@ -704,7 +703,7 @@ function lightnessOf(o) { return o.held ? 0 : formOf(o.family).lightness(o); } /
 // How much an object YIELDS to being bumped by a carried/thrown object — lighter
 // things give a lot, stones bump but resist, held/rooted/luminous things don't move.
 function collisionGive(o) {
-  if (o.held || o.id === heldId || flying.has(o.id) || !isMovable(o)) return 0; // held / carried / flying / rooted don't yield
+  if (o.held || o.id === S.heldId || flying.has(o.id) || !isMovable(o)) return 0; // held / carried / flying / rooted don't yield
   return formOf(o.family).collisionGive(o); // per-family give — see forms.js
 }
 // Local, cosmetic displacement: a moving cursor brushes light things aside (a render
@@ -721,7 +720,7 @@ function updateNudge(now) {
     // A sprouted plant SWAYS when the moving cursor brushes it — the canopy leans in the
     // cursor's travel direction (trunk anchored at the base), never sliding the whole
     // tree. Feeds the same _bend spring updateSway settles (Wave M).
-    if (active && o.family === 'seed' && shownMat(o) >= SPROUT_C && !o.held && o.id !== heldId &&
+    if (active && o.family === 'seed' && shownMat(o) >= SPROUT_C && !o.held && o.id !== S.heldId &&
         Math.abs(o.x - mouseWorld.x) < NUDGE_RADIUS && Math.abs(o.y - mouseWorld.y) < NUDGE_RADIUS) {
       const d = Math.hypot(o.x - mouseWorld.x, o.y - mouseWorld.y);
       if (d < NUDGE_RADIUS) { const fall = 1 - d / NUDGE_RADIUS; o._bendV = (o._bendV || 0) + mouseVelW.x * fall * fall * BEND_FROM_CURSOR; swaying.add(o.id); }
@@ -736,7 +735,7 @@ function updateNudge(now) {
     // collision bump (collisionGive) — only truly fixed things (held/anomaly) are zeroed.
     if (lightnessOf(o) <= 0 && collisionGive(o) <= 0) { if (!resting) { o._ox = o._oy = o._ovx = o._ovy = 0; } continue; }
     o._ox = o._ox || 0; o._oy = o._oy || 0; o._ovx = o._ovx || 0; o._ovy = o._ovy || 0;
-    if (near && o.id !== heldId) {
+    if (near && o.id !== S.heldId) {
       const n = nudge(mouseWorld.x, mouseWorld.y, o.x + o._ox, o.y + o._oy, NUDGE_RADIUS, speed, NUDGE_STR, lightnessOf(o));
       o._ovx += n.vx * dt; o._ovy += n.vy * dt;
     }
@@ -757,7 +756,7 @@ function updateCollision(now) {
   const dt = _lastColT ? Math.min(0.05, (now - _lastColT) / 1000) : 0; _lastColT = now;
   if (dt <= 0) return;
   const bumpers = [];
-  if (heldId && carry) { const ho = objects.get(heldId); if (ho) bumpers.push({ x: carry.x, y: carry.y, r: objRadius(ho) }); }
+  if (S.heldId && S.carry) { const ho = objects.get(S.heldId); if (ho) bumpers.push({ x: S.carry.x, y: S.carry.y, r: objRadius(ho) }); }
   for (const id of flying.keys()) { const o = objects.get(id); if (o) bumpers.push({ x: o.x, y: o.y, r: objRadius(o) }); }
   if (!bumpers.length) return;
   for (const b of bumpers) {
@@ -924,7 +923,7 @@ function hitTest(w) {
   return pick;
 }
 function updateHover(cx, cy) { // desktop: attend whatever the mouse rests on
-  if (heldId) { attendId = null; return; }
+  if (S.heldId) { attendId = null; return; }
   const o = hitTest(screenToWorld(cx, cy));
   attendId = o ? o.id : null;
 }
@@ -936,7 +935,7 @@ const BEFRIEND_DWELL = 4400;            // ms of unbroken attention on one creat
 let befriendTrack = null, befriendSince = 0, befriendSent = false;
 let myFriendId = (() => { try { return localStorage.getItem('drift_friend'); } catch { return null; } })(); // a befriended creature, remembered across visits
 function updateBefriend(now) {
-  const o = (attendId && !heldId) ? objects.get(attendId) : null;
+  const o = (attendId && !S.heldId) ? objects.get(attendId) : null;
   if (!o || o.family !== 'creature' || isLifted(o.id)) { befriendTrack = null; befriendSent = false; return; }
   if (o.id !== befriendTrack) { befriendTrack = o.id; befriendSince = now; befriendSent = false; return; } // a new creature → restart the dwell
   if (!befriendSent && now - befriendSince >= BEFRIEND_DWELL) {
@@ -978,13 +977,13 @@ let holdMode = null;             // null | 'drag' (an object carried by a presse
 let holdOff = { x: 0, y: 0 };    // world-unit offset object-centre − pointer, so a grab doesn't snap to centre
 
 function beginHold(o, mode, off) {
-  // Start the carry where the object is actually DRAWN: a free creature wanders off
-  // its stored home, so seeding carry from o.x/o.y would snap it home on pickup.
+  // Start the S.carry where the object is actually DRAWN: a free creature wanders off
+  // its stored home, so seeding S.carry from o.x/o.y would snap it home on pickup.
   const live = (o.family === 'creature') ? creaturePos(o) : { x: o.x, y: o.y };
   preGrab = { x: o.x, y: o.y };                   // the true stored position (restore target if rejected)
-  heldId = o.id; holdMode = mode; holdOff = off || { x: 0, y: 0 };
-  heldSince = performance.now();
-  carry = { x: live.x, y: live.y };
+  S.heldId = o.id; holdMode = mode; holdOff = off || { x: 0, y: 0 };
+  S.heldSince = performance.now();
+  S.carry = { x: live.x, y: live.y };
   flingVel.x = 0; flingVel.y = 0; lastCarryPos = null; lastCarryT = 0; // fresh velocity
   o.held = true;                                  // optimistic; the server confirms via pickup_ack
   setLift(o.id, 1, LIFT_MS, EASE_RISE);
@@ -992,30 +991,30 @@ function beginHold(o, mode, off) {
   Audio.event('pickup', { seed: o.seed, family: o.family, x: o.x }); // a generative lift tone (silent unless sound is on)
 }
 function carryTo(cx, cy) {                         // keep the grab point under the pointer
-  if (!heldId) return;
+  if (!S.heldId) return;
   const w = screenToWorld(cx, cy);
-  carry = { x: w.x + holdOff.x, y: w.y + holdOff.y };
-  const o = objects.get(heldId); if (o) { o.x = carry.x; o.y = carry.y; }
+  S.carry = { x: w.x + holdOff.x, y: w.y + holdOff.y };
+  const o = objects.get(S.heldId); if (o) { o.x = S.carry.x; o.y = S.carry.y; }
   trackVel();
   maybeSendCarry();
 }
-// Sample carry velocity (EMA toward the latest), so a release can throw the object.
+// Sample S.carry velocity (EMA toward the latest), so a release can throw the object.
 function trackVel() {
   const t = performance.now();
   if (lastCarryPos && lastCarryT) {
     const dt = (t - lastCarryT) / 1000;
     if (dt > 0.001) {
-      flingVel.x = ema(flingVel.x, (carry.x - lastCarryPos.x) / dt, 0.6);
-      flingVel.y = ema(flingVel.y, (carry.y - lastCarryPos.y) / dt, 0.6);
+      flingVel.x = ema(flingVel.x, (S.carry.x - lastCarryPos.x) / dt, 0.6);
+      flingVel.y = ema(flingVel.y, (S.carry.y - lastCarryPos.y) / dt, 0.6);
     }
   }
-  lastCarryPos = { x: carry.x, y: carry.y }; lastCarryT = t;
+  lastCarryPos = { x: S.carry.x, y: S.carry.y }; lastCarryT = t;
 }
 // A drag released while moving is THROWN: the object detaches from the pointer
 // immediately (so you can pan or grab again at once) and glides free under friction
 // until it settles into a place. It stays server-held by our token mid-flight.
 function startFling() {
-  const id = heldId;
+  const id = S.heldId;
   const o = objects.get(id);
   let vx = flingVel.x, vy = flingVel.y;
   // A non-finite velocity (the THROW_MAX clamp divides by speed — Infinity/Infinity →
@@ -1024,8 +1023,8 @@ function startFling() {
   const sp = Math.hypot(vx, vy);
   if (sp > THROW_MAX) { const k = THROW_MAX / sp; vx *= k; vy *= k; }
   // Remember a KNOWN-FINITE launch point so a corrupted glide can always settle home.
-  const x0 = Number.isFinite(o.x) ? o.x : (carry ? carry.x : 0);
-  const y0 = Number.isFinite(o.y) ? o.y : (carry ? carry.y : 0);
+  const x0 = Number.isFinite(o.x) ? o.x : (S.carry ? S.carry.x : 0);
+  const y0 = Number.isFinite(o.y) ? o.y : (S.carry ? S.carry.y : 0);
   flying.set(id, { vx, vy, x0, y0 });               // stays lifted (from the drag) for the whole arc — settles on land
   clearHold();                                      // release the pointer NOW (the object flies on its own)
 }
@@ -1035,15 +1034,15 @@ function startFling() {
 // follows and matches within the clock skew (an imperceptible settle).
 function reanchorCreature(o) { if (o && o.family === 'creature') o.wanderT0 = Date.now() + S.clockSkew; }
 function placeHold(kind) {                         // settle the held object where it is
-  if (!heldId) return;
-  const o = objects.get(heldId);
-  if (o) { o.x = carry.x; o.y = carry.y; o._tx = carry.x; o._ty = carry.y; o.held = false; reanchorCreature(o); }
-  send({ t: 'place', id: heldId, token, x: carry.x, y: carry.y, ts: Date.now() });
-  setLift(heldId, 0, SETTLE_MS, EASE_SETTLE);
+  if (!S.heldId) return;
+  const o = objects.get(S.heldId);
+  if (o) { o.x = S.carry.x; o.y = S.carry.y; o._tx = S.carry.x; o._ty = S.carry.y; o.held = false; reanchorCreature(o); }
+  send({ t: 'place', id: S.heldId, token, x: S.carry.x, y: S.carry.y, ts: Date.now() });
+  setLift(S.heldId, 0, SETTLE_MS, EASE_SETTLE);
   if (o) Audio.event(kind || 'place', { seed: o.seed, family: o.family, x: o.x }); // generative settle/land tone
   clearHold();
 }
-function clearHold() { heldId = null; holdMode = null; carry = null; preGrab = null; grab = null; }
+function clearHold() { S.heldId = null; holdMode = null; S.carry = null; preGrab = null; grab = null; }
 
 canvas.addEventListener('pointerdown', (e) => {
   canvas.setPointerCapture(e.pointerId);
@@ -1077,7 +1076,7 @@ canvas.addEventListener('pointermove', (e) => {
   const dx = e.clientX - p.x, dy = e.clientY - p.y;
   p.x = e.clientX; p.y = e.clientY;
   p.maxMove = Math.max(p.maxMove, Math.hypot(e.clientX - p.sx, e.clientY - p.sy));
-  if (p.maxMove > SLOP) clearLongPress(); // moved → it's a pan/carry, not an attend
+  if (p.maxMove > SLOP) clearLongPress(); // moved → it's a pan/S.carry, not an attend
 
   if (pointers.size >= 2 && pinch) {
     const [a, b] = [...pointers.values()];
@@ -1097,7 +1096,7 @@ canvas.addEventListener('pointermove', (e) => {
 
   if (holdMode === 'drag') {
     carryTo(e.clientX, e.clientY);                       // actively carrying
-  } else if (grab && p.maxMove > SLOP) {                 // a press on a movable object that moved → pick it up + carry
+  } else if (grab && p.maxMove > SLOP) {                 // a press on a movable object that moved → pick it up + S.carry
     const o = objects.get(grab.id);
     if (!o) { grab = null; }
     else { beginHold(o, 'drag', { x: grab.ox, y: grab.oy }); carryTo(e.clientX, e.clientY); }
@@ -1117,7 +1116,7 @@ function endPointer(e) {
   const moved = p ? p.maxMove >= SLOP : false;
 
   if (holdMode === 'drag') {
-    // released an active carry: if it was still moving, throw it (detaches); else place it.
+    // released an active S.carry: if it was still moving, throw it (detaches); else place it.
     const speed = Math.hypot(flingVel.x, flingVel.y);
     if (speed > THROW_MIN && (performance.now() - lastCarryT) < 90) startFling();
     else placeHold();
@@ -1202,7 +1201,7 @@ function maybeSendCarry() {
   const n = performance.now();
   if (n - lastCarry < CARRY_SEND_MS) return;
   lastCarry = n;
-  if (heldId && carry) send({ t: 'carry', id: heldId, token, x: carry.x, y: carry.y, ts: Date.now() });
+  if (S.heldId && S.carry) send({ t: 'carry', id: S.heldId, token, x: S.carry.x, y: S.carry.y, ts: Date.now() });
 }
 
 // ---- websocket + reconnect --------------------------------------------------
@@ -1285,7 +1284,7 @@ function scheduleReconnect() {
 function send(o) { if (ws && wsReady) { try { ws.send(JSON.stringify(o)); } catch {} } }
 function onDisconnect() {
   // Our hold is lost; the server reclaims it and drops the object server-side.
-  if (heldId) { const o = objects.get(heldId); if (o) o.held = false; setLift(heldId, 0, SETTLE_MS, EASE_SETTLE); }
+  if (S.heldId) { const o = objects.get(S.heldId); if (o) o.held = false; setLift(S.heldId, 0, SETTLE_MS, EASE_SETTLE); }
   for (const id of flying.keys()) { const o = objects.get(id); if (o) o.held = false; } // thrown objects are reclaimed too
   flying.clear();
   clearHold();
@@ -1326,12 +1325,12 @@ function onMessage(raw) {
       // A free creature's home migrates each tick (goal-seeking, Wave G1) — ALWAYS ease
       // it (never snap), so it drifts smoothly. Others ease a small water-drift hop and
       // snap larger jumps (place, initial).
-      const easeCreature = o.family === 'creature' && !m.held && m.id !== heldId;
+      const easeCreature = o.family === 'creature' && !m.held && m.id !== S.heldId;
       // A stone the server rolled out of water (m.roll), OR bounced off an already-capped
       // rock (m.bounce), ALWAYS eases to its resting spot — a smooth roll/slide, never a snap.
-      const roll = m.roll && m.id !== heldId;
-      const bounce = m.bounce && m.id !== heldId;
-      if (roll || bounce || easeCreature || (!m.held && m.id !== heldId && dx * dx + dy * dy <= POS_EASE_MAX * POS_EASE_MAX)) {
+      const roll = m.roll && m.id !== S.heldId;
+      const bounce = m.bounce && m.id !== S.heldId;
+      if (roll || bounce || easeCreature || (!m.held && m.id !== S.heldId && dx * dx + dy * dy <= POS_EASE_MAX * POS_EASE_MAX)) {
         o._tx = m.x; o._ty = m.y; // leave o.x/o.y to glide toward the target
         if (roll || bounce) o._roll = 1;    // a slower, deliberate ease until it settles (updatePositions)
       } else {
@@ -1348,7 +1347,7 @@ function onMessage(raw) {
       if (m.r != null) o.r = m.r; // a fused stone grew (regens its geometry via stoneGeom)
       if (m.kinds) o.kinds = m.kinds; // a fused anomaly's hybrid kinds (blended form + breakability)
       o.heldBy = m.heldBy || ''; // who's carrying it (ephemeral pid) — drives the felt-presence tether
-      if (m.id !== heldId) {
+      if (m.id !== S.heldId) {
         if (o.held && !wasHeld) setLift(o.id, 1, LIFT_MS, EASE_RISE);
         else if (!o.held && wasHeld) setLift(o.id, 0, SETTLE_MS, EASE_SETTLE);
       }
@@ -1404,7 +1403,7 @@ function onMessage(raw) {
         grits.push({ x: og.x, y: og.y, seed: og.seed, r: objRadius(og), start: performance.now() });
       else if (og && og.family === 'creature') { const p = creaturePos(og); creatureEvts.push({ x: p.x, y: p.y, start: performance.now(), birth: false }); } // a passing — a soft puff
       objects.delete(m.id); lifts.delete(m.id); flying.delete(m.id);
-      if (heldId === m.id) clearHold();
+      if (S.heldId === m.id) clearHold();
       break;
     }
     case 'pickup_ack': {
@@ -1413,9 +1412,9 @@ function onMessage(raw) {
         const o = objects.get(m.id);
         // held=false so the server's corrective object_state (held:true, from the real
         // holder) re-lifts it; leaving it true would suppress that re-lift.
-        if (o) { if (heldId === m.id && preGrab) { o.x = preGrab.x; o.y = preGrab.y; o._tx = preGrab.x; o._ty = preGrab.y; } o.held = false; }
+        if (o) { if (S.heldId === m.id && preGrab) { o.x = preGrab.x; o.y = preGrab.y; o._tx = preGrab.x; o._ty = preGrab.y; } o.held = false; }
         setLift(m.id, 0, SETTLE_MS, EASE_SETTLE);
-        if (heldId === m.id) clearHold();
+        if (S.heldId === m.id) clearHold();
       }
       break;
     }
@@ -1504,7 +1503,7 @@ function frame(now) {
     if (!inViewport(s.x, s.y, vw, vh, CULL_MARGIN)) continue;
     // Depth = ground line; a free creature sorts by its LIVE wander y (where it's
     // actually drawn, not its home), and a flier rides above ground clutter.
-    o._sortY = ((o.family === 'creature' || o.family === 'fish') && o.id !== heldId && !o.held)
+    o._sortY = ((o.family === 'creature' || o.family === 'fish') && o.id !== S.heldId && !o.held)
       ? p.y + (o.kind === 'flier' ? flierLift(o) : 0)
       : groundY(o);
     o._depthScale = depthScaleAt(s.y); // size-by-depth (Wave K) — used by draw + hit-test
@@ -1555,7 +1554,7 @@ function frame(now) {
   // overlays (screen space)
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   let warmth = 0;
-  const active = []; // live presences this frame — reused for shared warmth + carry tethers
+  const active = []; // live presences this frame — reused for shared warmth + S.carry tethers
   for (const [pid, p] of presences) {
     const inten = presenceIntensity(p, now);
     if (inten <= 0) {
@@ -1599,10 +1598,10 @@ function frame(now) {
 
   for (const o of objects.values()) {
     if (!isLifted(o.id)) continue;
-    const s = (o.id === heldId && carry) ? worldToScreen(carry.x, carry.y) : worldToScreen(o.x, o.y);
+    const s = (o.id === S.heldId && S.carry) ? worldToScreen(S.carry.x, S.carry.y) : worldToScreen(o.x, o.y);
     let alpha = 1;
-    if (o.id === heldId && o.family === 'anomaly') { // fade out over the last seconds of the 10s hold
-      alpha = 1 - clamp((now - heldSince - (ANOM_DISSOLVE_MS - ANOM_FADE_MS)) / ANOM_FADE_MS, 0, 1);
+    if (o.id === S.heldId && o.family === 'anomaly') { // fade out over the last seconds of the 10s hold
+      alpha = 1 - clamp((now - S.heldSince - (ANOM_DISSOLVE_MS - ANOM_FADE_MS)) / ANOM_FADE_MS, 0, 1);
     }
     ctx.globalAlpha = alpha;
     drawHeldScreen(o, s.x, s.y, liftValue(o.id));
@@ -1668,7 +1667,7 @@ function frame(now) {
 // ---- helpers ----------------------------------------------------------------
 // NaN-safe: a NaN slips through Math.max/min unchanged, which once let a degenerate
 // pinch (coincident touch points → 0/0) poison camera.z and, through it, every
-// throw/carry position. Collapsing NaN to `lo` keeps the camera (and everything
+// throw/S.carry position. Collapsing NaN to `lo` keeps the camera (and everything
 // derived from it) finite no matter what upstream produced.
 function clamp(v, lo, hi) { return v !== v ? lo : v < lo ? lo : v > hi ? hi : v; }
 function cubicBezier(x1, y1, x2, y2) {
