@@ -180,5 +180,41 @@ check(formOf('seed').lightness({ maturity: 0.05 }) === 1 && formOf('seed').light
 check([['stone', 0.4], ['crystal', 0.7], ['anomaly', 0], ['creature', 0], ['fish', 0], ['mark', 0]].every(([f, v]) => formOf(f).collisionGive({}) === v), 'collisionGive: stone 0.4 / crystal 0.7 / anomaly·creature·fish·mark 0');
 check(formOf('seed').collisionGive({ maturity: 0.05 }) === 0.8 && formOf('seed').collisionGive({ maturity: 0.5 }) === 0, 'collisionGive: a loose seed yields 0.8; a sprouted plant 0');
 
+// ---- forms.js: the per-family DRAW dispatch (4.14d.2 — the folded 3.9 paint cascade) ----
+// The client leaf modules run no node test, but forms.js stays pure/Node-importable, so we
+// can exercise every FORM.draw against a recording mock ctx + the REAL procgen primitives.
+// This locks the draw CONTRACT: each family's descriptor is present, takes (o,cx,cy,ang,env),
+// and executes without throwing (it caught the drawPlantForm arg-slot bug that no static
+// screenshot could — the paused-rAF preview never runs a frame).
+const DRAW_FAMILIES = ['stone', 'seed', 'anomaly', 'crystal', 'creature', 'fish', 'mark', 'giant'];
+check(DRAW_FAMILIES.every((f) => typeof FORM[f].draw === 'function'), 'every drawable family has a draw() fn');
+check(typeof formOf('zzz').draw === 'function', 'an unknown family falls back to a draw() fn (the plant default)');
+const mockGrad = { addColorStop() {} };
+const mockCtx = new Proxy({}, { get(_, k) {
+  if (k === 'createRadialGradient' || k === 'createLinearGradient' || k === 'createPattern') return () => mockGrad;
+  if (k === 'canvas') return { width: 100, height: 100 };
+  return () => {};
+} });
+const drawEnv = { ctx: mockCtx, t: 1.23, glowOf: (o) => (o.glowUntil ? 42 : null), tameOf: (o) => (o.tameUntil ? 0.5 : 0) };
+const drawCases = [
+  ['stone', { family: 'stone', seed: 12345, handling: 3, r: 40 }],
+  ['seed(loose)', { family: 'seed', seed: 7, maturity: 0.05 }],
+  ['seed(rooted)', { family: 'seed', seed: 8, maturity: 0.9, aged: 0.3 }],
+  ['seed(bend)', { family: 'seed', seed: 9, maturity: 0.5, _bend: 0.2 }],
+  ['crystal', { family: 'crystal', seed: 99 }],
+  ['anomaly(fused)', { family: 'anomaly', seed: 5, kinds: ['point', 'heart'] }],
+  ['anomaly(1)', { family: 'anomaly', seed: 6, kind: 'breath' }],
+  ['creature', { family: 'creature', seed: 22, kind: 'crawler' }],
+  ['creature(glow)', { family: 'creature', seed: 23, kind: 'flier', glowUntil: 9e15, tameUntil: 9e15, _tameStart: 0 }],
+  ['fish', { family: 'fish', seed: 33 }],
+  ['mark', { family: 'mark', seed: 44, maturity: 0.05 }],
+  ['unknown', { family: 'zzz', seed: 10, maturity: 0.4 }],
+];
+let drawOk = true;
+for (const [label, o] of drawCases) {
+  try { formOf(o.family).draw(o, 10, 20, 0.1, drawEnv); } catch (e) { drawOk = false; check(false, `FORM.draw ${label} threw: ${e.message}`); }
+}
+check(drawOk, `every FORM.draw executes cleanly against a mock ctx (${drawCases.length} family/branch cases)`);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -10,11 +10,9 @@
 // lives on S so the cull pass (client.js) and these readers share it by reference.
 import { ctx, camera, feedRushes, S } from './state.js';
 import { Q } from './view.js';
-import { SPROUT_C, BIG_TREE_MAT, GIANT_R, shownMat, shownAged, stoneGeom, anomalyR, crystalR, formOf } from './forms.js';
-import { wanderAt, drawCreature, creatureR, drawFish } from './creatures.js';
-import { drawGiant } from './giant.js';
+import { SPROUT_C, shownMat, formOf } from './forms.js'; // per-family FORM.draw dispatch owns the primitives now (4.14d.2)
+import { wanderAt, creatureR } from './creatures.js';
 import { deflectCircles } from './physics.js';
-import { seedScale } from './shared/sizing.js';
 import * as PG from './drift-procgen.js';
 
 // Client render consts owned here (only the moved draw code reads them).
@@ -82,33 +80,14 @@ function posOf(o) {
   return { x: o.x + (o._ox || 0), y: o.y + (o._oy || 0) };
 }
 function objRadius(o) { return formOf(o.family).sizeFn(o); } // per-family footprint — see forms.js
-function drawAnomalyForm(ctx, o, t, cx, cy, R) {
-  const kinds = (o.kinds && o.kinds.length) ? o.kinds : [o.kind || 'breath'];
-  if (kinds.length === 1) { PG.drawAnomaly(ctx, kinds[0], t, cx, cy, R); return; }
-  ctx.save();
-  ctx.globalAlpha = 0.55 + 0.4 / kinds.length; // translucent layers merge instead of occluding
-  for (let i = 0; i < kinds.length; i++) PG.drawAnomaly(ctx, kinds[i], t + i * 1.7, cx, cy, R * (1 - i * 0.06));
-  ctx.restore();
-}
+// Paint the full form of any object at (cx, cy) in the current transform by dispatching to
+// its family's FORM.draw descriptor (forms.js — the 3.9 registry, folded in at 4.14d.2).
+// `env` is a SHARED object: only `t` (=animT) changes per call; glowOf/tameOf are the
+// creature-buff readers, injected here because they read S (forms.js stays pure).
+const paintEnv = { ctx, t: 0, glowOf: glowHueOf, tameOf: tameFactor };
 function paintObject(o, cx, cy, ang = 0) {
-  if (o.family === 'stone') { PG.drawStone(ctx, stoneGeom(o), cx, cy); return; }
-  if (o.family === 'anomaly') { drawAnomalyForm(ctx, o, S.animT, cx, cy, anomalyR(o)); return; }
-  if (o.family === 'crystal') { PG.drawCrystal(ctx, o.seed >>> 0, cx, cy, crystalR(o), S.animT); return; }
-  if (o.family === 'giant') { // the journeyer (a being apart) — see giant.js
-    drawGiant(ctx, cx, cy, GIANT_R, S.animT, Math.atan2(o.hy || 0, o.hx || 1), { gait: o.gait, tend: o.tend, lookX: o.lookX, lookY: o.lookY });
-    return;
-  }
-  if (o.family === 'creature') { drawCreature(ctx, o.seed >>> 0, o.kind || 'crawler', cx, cy, S.animT, ang, glowHueOf(o), tameFactor(o)); return; }
-  if (o.family === 'fish') { drawFish(ctx, o.seed >>> 0, cx, cy, S.animT, ang); return; }
-  const mat = shownMat(o), aged = shownAged(o);
-  if (mat < SPROUT_C) { PG.drawSeed(ctx, o.seed >>> 0, cx, cy, seedScale(o.seed) * (1 + mat * 1.4)); return; }
-  if (mat >= BIG_TREE_MAT) drawRoots(ctx, o.seed >>> 0, cx, cy, mat); // roots only on the biggest (rooted) plants
-  // Any sprouted plant SWAYS by leaning its canopy about its base (trunk anchored at
-  // the ground) — used by the rooted-tree drag AND the cursor brush (Wave M). Never a
-  // whole-object slide.
-  const bend = o._bend || 0;
-  if (bend) { ctx.save(); ctx.translate(cx, cy); ctx.rotate(bend); PG.drawPlant(ctx, o.seed >>> 0, 0, 0, mat, aged); ctx.restore(); return; }
-  PG.drawPlant(ctx, o.seed >>> 0, cx, cy, mat, aged);
+  paintEnv.t = S.animT;
+  formOf(o.family).draw(o, cx, cy, ang, paintEnv);
 }
 function paintGroundShadow(o, cx, cy, rad) {
   if (!formOf(o.family).castsShadow) return; // anomalies float, fish are under the water, the giant draws its own foot shadow
@@ -120,29 +99,6 @@ function paintGroundShadow(o, cx, cy, rad) {
   ctx.save();
   ctx.fillStyle = PG.rgba('#000000', a);
   ctx.beginPath(); ctx.ellipse(cx + rad * 0.14, baseY + (flier ? rad * 0.5 : 0), rx, rx * 0.32, 0, 0, Math.PI * 2); ctx.fill();
-  ctx.restore();
-}
-function drawRoots(ctx, seed, cx, cy, mat) {
-  const r = PG.rng((seed ^ 0x9b7c3) >>> 0);
-  const n = 4 + Math.floor(r() * 3);                 // 4..6 surface roots
-  const reach = 12 + mat * 28;                        // grows with the tree
-  ctx.save();
-  ctx.lineCap = 'round';
-  const col = PG.mix(PG.PALETTE.growthDeep, '#1c1206', 0.7); // deep green → dark earth
-  for (let i = 0; i < n; i++) {
-    const a = (i + 0.5) / n * Math.PI * 2 + (r() - 0.5) * 0.5;
-    const len = reach * (0.6 + r() * 0.7);
-    const ex = cx + Math.cos(a) * len;
-    const ey = cy + Math.sin(a) * len * 0.42 + len * 0.16; // ground-plane compression + a touch toward the viewer
-    const mx = cx + (ex - cx) * 0.45 + (r() * 2 - 1) * len * 0.16;
-    const my = cy + (ey - cy) * 0.45 + (r() * 2 - 1) * len * 0.08;
-    ctx.beginPath();
-    ctx.moveTo(cx, cy - 1);
-    ctx.quadraticCurveTo(mx, my, ex, ey);
-    ctx.lineWidth = Math.max(0.7, (2.6 - i * 0.18) * (0.55 + mat * 0.45));
-    ctx.strokeStyle = PG.rgba(col, 0.55);
-    ctx.stroke();
-  }
   ctx.restore();
 }
 function markGeom(o) { if (!o._mg) o._mg = PG.makeStone(o.seed >>> 0, MARK_SIZE, 0.4); return o._mg; }
