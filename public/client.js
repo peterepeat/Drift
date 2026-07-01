@@ -12,7 +12,7 @@ import { wanderAt, drawCreature, creatureR, drawFish, fishR } from './creatures.
 import { drawGiant } from './giant.js';
 import { seedScale } from './shared/sizing.js';
 import { SPROUT_C, BIG_TREE_MAT, GIANT_R, shownMat, shownAged, stoneSize, stoneGeom, anomalyR, crystalR, formOf } from './forms.js';
-import { canvas, ctx, camera, objects, presences, lifts, flashes, ripples, feedRushes, grits, creatureEvts, giantFootprints } from './state.js'; // shared client state (4.14 mirror)
+import { canvas, ctx, camera, objects, presences, lifts, flashes, ripples, feedRushes, grits, creatureEvts, giantFootprints, S } from './state.js'; // shared client state (4.14 mirror)
 
 // ---- tuning constants -------------------------------------------------------
 const Z0 = 1.0, ZMIN = 0.2, ZMAX = 4.0;     // zoom = CSS px per world unit
@@ -170,7 +170,7 @@ resize();
 // ---- camera + transforms (all in CSS px; dpr only folded into the matrix) ---
 // camera now lives in state.js (shared substrate; initial z === Z0 === 1.0).
 let arrive = null; // soft-pan-to-active-area animation
-let worldBounds = null; // {x,y} half-extents of the object field (from the server) — the camera is clamped to it
+// worldBounds now lives on S (state.js) — net writes it, view (clampCam) reads it.
 
 // Return thread (PRD §6.3): the area a visitor was last active in is remembered
 // CLIENT-side (never sent as identity — only as a transient viewport hint) so a
@@ -195,17 +195,17 @@ function worldToScreen(wx, wy) {
 }
 // Is the water pool's drift band anywhere on screen? (gates the flow-trace pass)
 function poolOnScreen() {
-  if (!pool) return false;
-  const s = worldToScreen(pool.x, pool.y), rr = pool.r * camera.z * 1.4;
+  if (!S.pool) return false;
+  const s = worldToScreen(S.pool.x, S.pool.y), rr = S.pool.r * camera.z * 1.4;
   return s.x + rr >= 0 && s.x - rr <= vw && s.y + rr >= 0 && s.y - rr <= vh;
 }
 // How far the camera CENTRE may stray from origin on each axis right now. Shrinks as
 // you zoom out (the viewport already covers more world), so the view always overlaps
 // the object field — collapses toward 0 once the whole world fits on screen.
 function camLimits() {
-  if (!worldBounds) return { x: Infinity, y: Infinity };
+  if (!S.worldBounds) return { x: Infinity, y: Infinity };
   const h = viewHalf();
-  return { x: Math.max(0, worldBounds.x + EDGE_MARGIN - h.hw), y: Math.max(0, worldBounds.y + EDGE_MARGIN - h.hh) };
+  return { x: Math.max(0, S.worldBounds.x + EDGE_MARGIN - h.hw), y: Math.max(0, S.worldBounds.y + EDGE_MARGIN - h.hh) };
 }
 // Zoom-out is LIMITED so you can't take in the whole world at once (more to discover, and
 // it keeps the on-screen object count sane). At the most zoomed-out, the viewport covers
@@ -213,8 +213,8 @@ function camLimits() {
 // limit scales as the world grows. (Zoom-IN is unchanged, up to ZMAX.)
 const VIEW_FRAC = 0.10;
 function zMin() {
-  if (!worldBounds || !vw || !vh) return ZMIN;
-  const bx = Math.max(500, worldBounds.x), by = Math.max(500, worldBounds.y);
+  if (!S.worldBounds || !vw || !vh) return ZMIN;
+  const bx = Math.max(500, S.worldBounds.x), by = Math.max(500, S.worldBounds.y);
   const z = Math.sqrt((vw * vh) / (VIEW_FRAC * 4 * bx * by)); // (vw/z)(vh/z) = VIEW_FRAC · worldArea
   return clamp(z, 0.05, ZMAX * 0.9);
 }
@@ -262,15 +262,10 @@ const FISH_SWIM_SPEED = 150;   // world u/s the fish swim toward food (a brisk, 
 const FEED_RELEASE = 0.9;      // seconds for fish to ease back to their wander once the bug is eaten
 const FEED_RUSH_CAP_MS = 5000; // hard cap on a feed-rush (safety; normally it ends when the bug is eaten)
 const CREATURE_EVT_MS = 760;   // lifetime of a birth/death cue
-let pool = null;               // the central water pool { x, y, r } (flow + audio anchor)
-let pools = [];                // every pond the world carries (Wave P) — all rendered as water
-let giants = [];               // the TWO gardener NPCs { x, y, hx, hy, walk, tending, _tx, _ty } — server-authoritative; walked continuously client-side
-let myPid = null;
-let seasonPhase = 0;           // monotonic season clock from the server (feels, never labelled)
+// pool/pools/giants/myPid/seasonPhase/animT/clockSkew now live on S (state.js) — the
+// world MODEL: net writes them, render/draw/view read them (4.14 mirror).
 let lastSat = -1;              // last-applied canvas saturation (avoids per-frame style writes)
-let animT = 0;                 // seconds, drives the only animated objects (anomalies)
-let clockSkew = 0;             // (server now − local now), from world_state — aligns the creature wander clock across clients
-function syncedT() { return (Date.now() + clockSkew) / 1000; }
+function syncedT() { return (Date.now() + S.clockSkew) / 1000; }
 
 // local hold
 let heldId = null, carry = null, preGrab = null;
@@ -329,13 +324,13 @@ function creatureWarpT(o, t) {
   return gs + GLOW_SEC * 2 + (t - gu);         // after: normal speed, phase-shifted (invisible)
 }
 // Is this creature currently glowing? → its rainbow hue, else null.
-function glowHueOf(o) { return (o.glowUntil && (Date.now() + clockSkew) < o.glowUntil) ? (o.glowHue || 0) : null; }
+function glowHueOf(o) { return (o.glowUntil && (Date.now() + S.clockSkew) < o.glowUntil) ? (o.glowHue || 0) : null; }
 // How strong the BOND is right now, 0..1: eases in when befriended, holds, then FADES over
 // the final ~10s as it lapses — a visible end (the red glow wanes and the creature drifts
 // back to its own life). The server moves a bonded creature; this only drives the glow.
 function tameFactor(o) {
   if (!o.tameUntil) return 0;
-  const remain = o.tameUntil - (Date.now() + clockSkew);
+  const remain = o.tameUntil - (Date.now() + S.clockSkew);
   if (remain <= 0) return 0;
   const inF = o._tameStart ? Math.min(1, (performance.now() - o._tameStart) / 2500) : 1;
   return Math.max(0, Math.min(1, Math.min(inF, remain / 10000)));
@@ -343,7 +338,7 @@ function tameFactor(o) {
 // A friendly little 3-note flourish when you greet the giant — all on the season
 // pentatonic (so it's consonant + musical), silent unless sound is on.
 function giantChime() {
-  const x = giants[0] ? giants[0].x : 0;
+  const x = S.giants[0] ? S.giants[0].x : 0;
   Audio.event('pickup', { seed: 0x51b1, family: 'anomaly', x });
   setTimeout(() => Audio.event('pickup', { seed: 0x7c33, family: 'anomaly', x }), 120);
   setTimeout(() => Audio.event('place', { seed: 0x2e9f, family: 'anomaly', x }), 250);
@@ -366,7 +361,7 @@ function creaturePos(o) {
     let target = null, bestF = 0;
     for (const fr of feedRushes) {
       if (Math.hypot(x - fr.pond.x, y - fr.pond.y) > fr.pond.r + 40) continue; // only the food's own pond
-      const elapsed = (animT * 1000 - fr.start) / 1000;
+      const elapsed = (S.animT * 1000 - fr.start) / 1000;
       if (elapsed < 0) continue;
       const dist = Math.hypot(fr.x - x, fr.y - y) || 1;
       const approachT = dist / FISH_SWIM_SPEED;                 // secs for THIS fish to reach the bug at swim speed
@@ -399,14 +394,14 @@ function isMovable(o) { return formOf(o.family).movable(o); } // a rooted big tr
 // FORM is always regenerated from seed (+ maturity/aged for growth) — never stored.
 function paintObject(o, cx, cy, ang = 0) {
   if (o.family === 'stone') { PG.drawStone(ctx, stoneGeom(o), cx, cy); return; }
-  if (o.family === 'anomaly') { drawAnomalyForm(ctx, o, animT, cx, cy, anomalyR(o)); return; }
-  if (o.family === 'crystal') { PG.drawCrystal(ctx, o.seed >>> 0, cx, cy, crystalR(o), animT); return; }
+  if (o.family === 'anomaly') { drawAnomalyForm(ctx, o, S.animT, cx, cy, anomalyR(o)); return; }
+  if (o.family === 'crystal') { PG.drawCrystal(ctx, o.seed >>> 0, cx, cy, crystalR(o), S.animT); return; }
   if (o.family === 'giant') { // the journeyer (a being apart) — see giant.js
-    drawGiant(ctx, cx, cy, GIANT_R, animT, Math.atan2(o.hy || 0, o.hx || 1), { gait: o.gait, tend: o.tend, lookX: o.lookX, lookY: o.lookY });
+    drawGiant(ctx, cx, cy, GIANT_R, S.animT, Math.atan2(o.hy || 0, o.hx || 1), { gait: o.gait, tend: o.tend, lookX: o.lookX, lookY: o.lookY });
     return;
   }
-  if (o.family === 'creature') { drawCreature(ctx, o.seed >>> 0, o.kind || 'crawler', cx, cy, animT, ang, glowHueOf(o), tameFactor(o)); return; }
-  if (o.family === 'fish') { drawFish(ctx, o.seed >>> 0, cx, cy, animT, ang); return; }
+  if (o.family === 'creature') { drawCreature(ctx, o.seed >>> 0, o.kind || 'crawler', cx, cy, S.animT, ang, glowHueOf(o), tameFactor(o)); return; }
+  if (o.family === 'fish') { drawFish(ctx, o.seed >>> 0, cx, cy, S.animT, ang); return; }
   const mat = shownMat(o), aged = shownAged(o);
   if (mat < SPROUT_C) { PG.drawSeed(ctx, o.seed >>> 0, cx, cy, seedScale(o.seed) * (1 + mat * 1.4)); return; }
   if (mat >= BIG_TREE_MAT) drawRoots(ctx, o.seed >>> 0, cx, cy, mat); // roots only on the biggest (rooted) plants
@@ -541,7 +536,7 @@ function paintAttend(o, t) {
   const age = ageFactor(o);
   const c = posOf(o);                                   // bloom at the live position (a creature wanders)
   const rad = objRadius(o) * (1.7 + 1.3 * age);
-  const breath = 0.6 + 0.4 * Math.sin(animT * 1.6);     // slow pulse = the object responding
+  const breath = 0.6 + 0.4 * Math.sin(S.animT * 1.6);     // slow pulse = the object responding
   const a = 0.16 * t * breath * (0.55 + 0.45 * age);    // older → warmer reveal
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
@@ -616,7 +611,7 @@ function updatePositions(now) {
     o.y += (o._ty - o.y) * r;
     if (o._roll && Math.hypot(o._tx - o.x, o._ty - o.y) < 0.6) o._roll = 0; // arrived at the bank — back to normal easing
   }
-  for (const giant of giants) {
+  for (const giant of S.giants) {
     if (giant._tx == null) continue;
     // It WALKS continuously along its heading between the (slow) broadcasts, only gently
     // correcting toward the latest broadcast spot — so it always looks like it's going
@@ -850,7 +845,7 @@ function updateLeaves(now) {
 function drawLeaves() {
   if (!leaves.length) return;
   const base = PG.mix(PG.PALETTE.growthLight, PG.PALETTE.growthDeep, 0.35);
-  const col = PG.applySat(base, seasonSat(seasonPhase));
+  const col = PG.applySat(base, seasonSat(S.seasonPhase));
   ctx.save();
   for (const lf of leaves) {
     if (!lf.placed) continue;
@@ -1038,7 +1033,7 @@ function startFling() {
 // from the drop point immediately — without waiting for the server's echo, which would
 // otherwise leave it jumped-out for one round-trip. The server's authoritative t0
 // follows and matches within the clock skew (an imperceptible settle).
-function reanchorCreature(o) { if (o && o.family === 'creature') o.wanderT0 = Date.now() + clockSkew; }
+function reanchorCreature(o) { if (o && o.family === 'creature') o.wanderT0 = Date.now() + S.clockSkew; }
 function placeHold(kind) {                         // settle the held object where it is
   if (!heldId) return;
   const o = objects.get(heldId);
@@ -1130,7 +1125,7 @@ function endPointer(e) {
     const tnow = performance.now();
     const wpt = p ? screenToWorld(p.sx, p.sy) : null;
     const o = grab ? objects.get(grab.id) : null;
-    if (wpt && giants.some((g) => Math.hypot(wpt.x - g.x, wpt.y - g.y) < GIANT_R * 0.55)) { // a friendly tap on a journeyer
+    if (wpt && S.giants.some((g) => Math.hypot(wpt.x - g.x, wpt.y - g.y) < GIANT_R * 0.55)) { // a friendly tap on a journeyer
       giantChime();                                       // a warm little chime...
       send({ t: 'giant_skip', token, ts: Date.now() });   // ...and it lets go of this task and ambles to the next
     } else if (o && (o.family === 'stone' || (o.family === 'anomaly' && o.kinds && o.kinds.length > 1))) { // double-tap a stone → smaller stones; a fused anomaly → split back into its kinds
@@ -1230,7 +1225,7 @@ const snd = document.getElementById('snd');
 const sndhit = document.getElementById('sndhit');
 let sndTimer = null;
 let aDensity = 0, aWarmth = 0, aWater = 0;            // world -> sound, gathered each frame
-const audioState = () => ({ seasonPhase, density: aDensity, warmth: aWarmth, water: aWater });
+const audioState = () => ({ seasonPhase: S.seasonPhase, density: aDensity, warmth: aWarmth, water: aWater });
 function flashSnd() { snd.classList.add('show'); clearTimeout(sndTimer); sndTimer = setTimeout(() => snd.classList.remove('show'), 2000); }
 function reflectSnd() { snd.classList.toggle('on', Audio.isEnabled()); flashSnd(); }
 sndhit.addEventListener('pointerenter', () => { snd.classList.add('show'); clearTimeout(sndTimer); });
@@ -1300,15 +1295,15 @@ function onMessage(raw) {
   let m; try { m = JSON.parse(raw); } catch { return; }
   switch (m.t) {
     case 'world_state': {
-      myPid = m.pid;
+      S.myPid = m.pid;
       objects.clear(); lifts.clear();
       for (const o of m.objects) objects.set(o.id, { ...o, held: !!o.held, _matShown: o.maturity || 0, _agedShown: o.aged || 0, _tx: o.x, _ty: o.y });
-      if (m.season != null) seasonPhase = m.season;
-      if (m.now != null) clockSkew = m.now - Date.now(); // lock the creature wander clock to the server's
-      if (m.pool) pool = m.pool;
-      if (Array.isArray(m.pools) && m.pools.length) pools = m.pools; else if (pool) pools = [pool]; // every pond (fallback: the central one)
-      if (Array.isArray(m.giants)) giants = m.giants.map((g) => ({ ...g, _tx: g.x, _ty: g.y })); // the gardeners (snap to their spots on (re)connect)
-      if (m.bounds && Number.isFinite(m.bounds.x) && Number.isFinite(m.bounds.y)) worldBounds = m.bounds; // before the arrive, so a stranded home is pulled back in
+      if (m.season != null) S.seasonPhase = m.season;
+      if (m.now != null) S.clockSkew = m.now - Date.now(); // lock the creature wander clock to the server's
+      if (m.pool) S.pool = m.pool;
+      if (Array.isArray(m.pools) && m.pools.length) S.pools = m.pools; else if (S.pool) S.pools = [S.pool]; // every pond (fallback: the central one)
+      if (Array.isArray(m.giants)) S.giants = m.giants.map((g) => ({ ...g, _tx: g.x, _ty: g.y })); // the gardeners (snap to their spots on (re)connect)
+      if (m.bounds && Number.isFinite(m.bounds.x) && Number.isFinite(m.bounds.y)) S.worldBounds = m.bounds; // before the arrive, so a stranded home is pulled back in
       // Orient on the FIRST arrival only (a reconnect must not yank the camera back):
       // a returning visitor drifts toward their remembered home, a new one toward the cog.
       // A home saved BEFORE camera bounds existed could be out in the void — if it's
@@ -1316,7 +1311,7 @@ function onMessage(raw) {
       if (!arrivedOnce) {
         arrivedOnce = true;
         let t = home || m.cog;
-        if (t && worldBounds && (Math.abs(t.x) > worldBounds.x || Math.abs(t.y) > worldBounds.y)) t = m.cog;
+        if (t && S.worldBounds && (Math.abs(t.x) > S.worldBounds.x || Math.abs(t.y) > S.worldBounds.y)) t = m.cog;
         if (t) startArrive(t.x, t.y);
       }
       break;
@@ -1349,7 +1344,7 @@ function onMessage(raw) {
       if (m.aged != null) o.aged = m.aged;
       if (m.wanderT0 != null) o.wanderT0 = m.wanderT0; // a placed creature re-anchored its wander
       if (m.glowUntil != null) { o.glowUntil = m.glowUntil; o.glowHue = m.glowHue; } // anomaly glow buff
-      if (m.tameUntil != null) { const sNow = Date.now() + clockSkew; if (!(o.tameUntil > sNow)) o._tameStart = performance.now(); o.tameUntil = m.tameUntil; } // tamed (hovers near + follows its person); stamp when the bond began so it eases in
+      if (m.tameUntil != null) { const sNow = Date.now() + S.clockSkew; if (!(o.tameUntil > sNow)) o._tameStart = performance.now(); o.tameUntil = m.tameUntil; } // tamed (hovers near + follows its person); stamp when the bond began so it eases in
       if (m.r != null) o.r = m.r; // a fused stone grew (regens its geometry via stoneGeom)
       if (m.kinds) o.kinds = m.kinds; // a fused anomaly's hybrid kinds (blended form + breakability)
       o.heldBy = m.heldBy || ''; // who's carrying it (ephemeral pid) — drives the felt-presence tether
@@ -1360,13 +1355,13 @@ function onMessage(raw) {
       break;
     }
     case 'season': { // the world's slow clock advanced
-      if (m.phase != null) seasonPhase = m.phase;
-      if (m.bounds && Number.isFinite(m.bounds.x) && Number.isFinite(m.bounds.y)) worldBounds = m.bounds; // keep the camera bound fresh as the world grows
+      if (m.phase != null) S.seasonPhase = m.phase;
+      if (m.bounds && Number.isFinite(m.bounds.x) && Number.isFinite(m.bounds.y)) S.worldBounds = m.bounds; // keep the camera bound fresh as the world grows
       if (Array.isArray(m.giants)) { // the gardeners stepped — glide toward their new spots
         for (let i = 0; i < m.giants.length; i++) {
           const mg = m.giants[i];
-          if (giants[i]) { const g = giants[i]; g._tx = mg.x; g._ty = mg.y; g.hx = mg.hx; g.hy = mg.hy; g.walk = mg.walk; g.tending = mg.tending; g.act = mg.act; g.stuck = mg.stuck; }
-          else giants[i] = { ...mg, _tx: mg.x, _ty: mg.y };
+          if (S.giants[i]) { const g = S.giants[i]; g._tx = mg.x; g._ty = mg.y; g.hx = mg.hx; g.hy = mg.hy; g.walk = mg.walk; g.tending = mg.tending; g.act = mg.act; g.stuck = mg.stuck; }
+          else S.giants[i] = { ...mg, _tx: mg.x, _ty: mg.y };
         }
       }
       break;
@@ -1389,7 +1384,7 @@ function onMessage(raw) {
       const og = objects.get(m.id);
       if (m.splash) { // a bug dropped in a pond → fish food: a ripple + the pond's fish rush over to eat
         ripples.push({ x: m.x, y: m.y, start: performance.now() });
-        const pond = pools.find((p) => Math.hypot(m.x - p.x, m.y - p.y) <= p.r + 30);
+        const pond = S.pools.find((p) => Math.hypot(m.x - p.x, m.y - p.y) <= p.r + 30);
         if (pond) {
           // the NEAREST fish reaches the bug first + eats it — find its swim time so the rush ends then
           let minD = Infinity;
@@ -1425,7 +1420,7 @@ function onMessage(raw) {
       break;
     }
     case 'presence': {
-      if (m.pid === myPid) break;
+      if (m.pid === S.myPid) break;
       const now = performance.now();
       const p = presences.get(m.pid);
       if (!p) presences.set(m.pid, { x: m.x, y: m.y, born: now, last: now, gone: 0 });
@@ -1452,7 +1447,7 @@ setInterval(() => {
 const bgSeed = PG.seedFrom('drift-ground');
 function frame(now) {
   adaptQuality(qPrevNow ? now - qPrevNow : 16.7, now); qPrevNow = now; // measure + maybe shed/restore detail
-  animT = now / 1000;
+  S.animT = now / 1000;
   updateLifts(now);
   updateGrowth(now);
   updatePositions(now);
@@ -1470,7 +1465,7 @@ function frame(now) {
   // backdrop, which reads as subtle parallax depth.
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, vw, vh);
-  paintGround(ctx, vw, vh, seasonGround(seasonPhase));
+  paintGround(ctx, vw, vh, seasonGround(S.seasonPhase));
   if (Q.glows) paintGlows(ctx, vw, vh, bgSeed, -camera.x * camera.z * GLOW_PARALLAX, -camera.y * camera.z * GLOW_PARALLAX); // parallax drift
   if (Q.noise) paintNoise(ctx, vw, vh, bgSeed + 1);
 
@@ -1478,10 +1473,10 @@ function frame(now) {
   ctx.setTransform(dpr * camera.z, 0, 0, dpr * camera.z,
     dpr * (vw / 2 - camera.x * camera.z), dpr * (vh / 2 - camera.y * camera.z));
   if (Q.patches) paintGroundPatches(ctx); // world-anchored terrain tint (precomputed buffer, one blit), beneath water + objects
-  for (const pd of pools) paintWaterWorld(ctx, pd, animT); // every pond, beneath the objects
-  if (Q.flow && poolOnScreen()) paintFlow(ctx, pool, animT); // faint flow streaks — only the central pool's drift band
+  for (const pd of S.pools) paintWaterWorld(ctx, pd, S.animT); // every pond, beneath the objects
+  if (Q.flow && poolOnScreen()) paintFlow(ctx, S.pool, S.animT); // faint flow streaks — only the central pool's drift band
   // ground marks (Wave S): flat rock-shaped stains, beneath objects, healing over ~10 min
-  const markNow = Date.now() + clockSkew; // server clock for the heal age
+  const markNow = Date.now() + S.clockSkew; // server clock for the heal age
   for (const o of objects.values()) {
     if (o.family !== 'mark') continue;
     const life = 1 - (markNow - (o.created_at || markNow)) / MARK_LIFE_MS;
@@ -1520,11 +1515,11 @@ function frame(now) {
   // The gardeners: a synthetic draw entry each so they sort + shadow + depth-scale with
   // everything else (not in `objects`, so never hit-tested or pickable). Each one's eye
   // follows the OTHER, wherever it is in the world.
-  for (let gi = 0; gi < giants.length; gi++) {
-    const G = giants[gi]; if (G._tx == null) continue;
+  for (let gi = 0; gi < S.giants.length; gi++) {
+    const G = S.giants[gi]; if (G._tx == null) continue;
     const gs = worldToScreen(G.x, G.y);
     if (!inViewport(gs.x, gs.y, vw, vh, CULL_MARGIN)) continue;
-    const other = giants[(gi + 1) % giants.length];
+    const other = S.giants[(gi + 1) % S.giants.length];
     const ge = { family: 'giant', id: '__giant' + gi, x: G.x, y: G.y, hx: G.hx || 1, hy: G.hy || 0, gait: Math.min(1, (G._spd || 0) / GIANT_VIS_SPEED), tend: G._tend || 0 };
     if (other && other !== G) { ge.lookX = other.x; ge.lookY = other.y; } // its gaze tracks its companion
     ge._sortY = G.y; ge._depthScale = depthScaleAt(gs.y);
@@ -1589,7 +1584,7 @@ function frame(now) {
   // Carry tethers: link each object being carried by SOMEONE ELSE to that person, so
   // it reads that a person is moving it (not a thing drifting on its own).
   for (const o of objects.values()) {
-    if (!o.heldBy || o.heldBy === myPid) continue;
+    if (!o.heldBy || o.heldBy === S.myPid) continue;
     const p = presences.get(o.heldBy);
     if (!p) continue;
     const ps = worldToScreen(p.x, p.y), os = worldToScreen(o.x, o.y);
@@ -1597,10 +1592,10 @@ function frame(now) {
   }
   aWarmth = warmth; // free (piggybacks the presence pass)
   if (Audio.isEnabled()) {
-    aWater = poolOnScreen() ? 0.5 + 0.5 * Math.sin(animT * 0.4) : 0; // matches the visible sheen's shimmer
+    aWater = poolOnScreen() ? 0.5 + 0.5 * Math.sin(S.animT * 0.4) : 0; // matches the visible sheen's shimmer
     Audio.setState(audioState());
   }
-  if (Q.sky) paintSky(ctx, vw, vh, seasonPhase); // atmospheric horizon — hazes the up-screen world (depth), beneath held objects
+  if (Q.sky) paintSky(ctx, vw, vh, S.seasonPhase); // atmospheric horizon — hazes the up-screen world (depth), beneath held objects
 
   for (const o of objects.values()) {
     if (!isLifted(o.id)) continue;
@@ -1651,7 +1646,7 @@ function frame(now) {
       ctx.fillStyle = ACT_COLOR[o.act] || 'rgba(240,236,228,0.95)'; ctx.fillText(o.act, s.x, s.y + 13);
     }
     // the gardeners share their focus too (and flag when stuck — for diagnosing the wander)
-    for (const g of giants) {
+    for (const g of S.giants) {
       if (g._tx == null || !g.act) continue;
       const s = worldToScreen(g.x, g.y), word = g.act + (g.stuck >= 2 ? ' ·stuck' : ''), yo = GIANT_R * camera.z * 0.5 + 8;
       ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillText(word, s.x + 0.7, s.y + yo + 0.7);
@@ -1659,12 +1654,12 @@ function frame(now) {
     }
   }
 
-  if (Q.grade) paintSeasonGrade(ctx, vw, vh, seasonPhase); // season composite (crossfaded), last
+  if (Q.grade) paintSeasonGrade(ctx, vw, vh, S.seasonPhase); // season composite (crossfaded), last
 
   // season saturation as a GPU CSS filter on the canvas (set only on change). A struggling
   // machine drops it (Q.sat 0 → filter off): re-filtering the whole canvas every frame is
   // one of the costliest things on a weak GPU.
-  const sat = Q.sat ? seasonSat(seasonPhase) : 1;
+  const sat = Q.sat ? seasonSat(S.seasonPhase) : 1;
   if (Math.abs(sat - lastSat) > 0.001) { canvas.style.filter = sat < 0.999 ? `saturate(${sat.toFixed(3)})` : 'none'; lastSat = sat; }
 
   requestAnimationFrame(frame);

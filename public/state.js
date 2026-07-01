@@ -28,3 +28,21 @@ export const feedRushes = [];         // a pond's fish swim over to eat a droppe
 export const grits = [];              // brief stone-to-grit scatters { x, y, seed, r, start }
 export const creatureEvts = [];       // brief birth-shimmer / death-puff cues { x, y, start, birth }
 export const giantFootprints = [];    // fading prints the journeyer leaves as it walks { x, y, start }
+
+// Re-assigned SCALARS live on this holder object: an imported `let` is read-only at the
+// import site and re-assigning one across modules is a SyntaxError, so shared values that
+// get RE-ASSIGNED (not just mutated) become S.<name> and every consumer reads/writes the
+// property. (Container state above is exported by reference; only re-assigned scalars need S.)
+// 4.14 adds scalars here as each subsystem is extracted; this batch = the world MODEL
+// (server-authoritative; the net handlers write them, render/draw/view read them).
+export const S = {
+  seasonPhase: 0,     // monotonic season clock from the server (feels, never labelled)
+  clockSkew: 0,       // (server now − local now), from world_state — aligns the wander clock across clients
+  animT: 0,           // seconds, drives the only animated objects (anomalies)
+  myPid: null,        // our ephemeral per-connection presence id
+  worldBounds: null,  // {x,y} half-extents of the object field (from the server) — the camera clamps to it
+  pool: null,         // the central water pool { x, y, r } (flow + audio anchor)
+  pools: [],          // every pond the world carries (Wave P) — all rendered as water
+  giants: [],         // the TWO gardener NPCs — server-authoritative; walked continuously client-side
+};
+
