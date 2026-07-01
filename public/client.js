@@ -10,8 +10,8 @@ import { Audio } from './audio.js';
 import { flingStep, ema, nudge, spring, deflectCircles } from './physics.js';
 import { wanderAt, drawCreature, creatureR, drawFish, fishR } from './creatures.js';
 import { drawGiant } from './giant.js';
-import { seedScale } from './shared/sizing.js';
 import { SPROUT_C, BIG_TREE_MAT, GIANT_R, shownMat, shownAged, stoneSize, stoneGeom, anomalyR, crystalR, formOf } from './forms.js';
+import { objRadius, creaturePos, posOf, drawMark, drawObjectWorld, drawHeldScreen, paintAttend, FISH_SWIM_SPEED, FEED_RELEASE } from './draw.js'; // ctx-coupled object paint dispatch + position/geometry readers (4.14d)
 import { IN, OUT } from './shared/protocol.js'; // the wire single-source (2.6) — client now sends IN.* / switches on OUT.* (string-identical to the old raw types)
 import { canvas, ctx, camera, objects, presences, lifts, flashes, ripples, feedRushes, grits, creatureEvts, giantFootprints, S } from './state.js'; // shared client state (4.14 mirror)
 import { screenToWorld, worldToScreen, viewHalf, poolOnScreen, camLimits, zMin, clampCam, applyPan, startArrive, updateArrive, cancelArrive, saveHome, adaptQuality, setQTier, qStats, resize, queueResize, dpr, vw, vh, Q, home, Z0, ZMIN, ZMAX } from './view.js'; // camera/transforms/sizing/quality (4.14 mirror)
@@ -51,8 +51,6 @@ const ATTEND_MS = 450;                        // long-press dwell before an obje
 const DBLTAP_MS = 320;                        // two taps on a stone within this BREAK it into smaller stones
 const GRIT_MS = 500;                          // a worn-out stone's grit scatter lifetime (spec §4.3)
 const MARK_LIFE_MS = 10 * 60 * 1000;          // a ground mark heals over ~10 min (mirror server MARK_LIFE_MS)
-const MARK_SIZE = 24;                          // ground-mark footprint (world units) — small, rock-shaped
-const MARK_TINT = '#d3c6ab';                   // pale warm stain — a drawn mark visible on the dark ground
 const POS_EASE_MAX = 24;                       // a position change up to this (a drift hop) eases; larger snaps
 // Mouse-displacement (Wave 6): a moving cursor brushes light things (leaves, seeds)
 // aside and they spring back. PURELY LOCAL & cosmetic — a render-only offset, never
@@ -141,14 +139,11 @@ let arrivedOnce = false;
 // The shared containers — objects/presences/lifts + the cosmetic FX buffers
 // (flashes/ripples/feedRushes/grits/creatureEvts/giantFootprints) — now live in
 // state.js so the extracted subsystems mutate the same references (4.14 mirror).
-const FISH_SWIM_SPEED = 150;   // world u/s the fish swim toward food (a brisk, natural pursuit — the NEAREST reaches first + eats it)
-const FEED_RELEASE = 0.9;      // seconds for fish to ease back to their wander once the bug is eaten
 const FEED_RUSH_CAP_MS = 5000; // hard cap on a feed-rush (safety; normally it ends when the bug is eaten)
 const CREATURE_EVT_MS = 760;   // lifetime of a birth/death cue
 // pool/pools/giants/myPid/seasonPhase/animT/clockSkew now live on S (state.js) — the
 // world MODEL: net writes them, render/draw/view read them (4.14 mirror).
 let lastSat = -1;              // last-applied canvas saturation (avoids per-frame style writes)
-function syncedT() { return (Date.now() + S.clockSkew) / 1000; }
 
 // local hold
 let preGrab = null; // S.heldId / S.carry / S.heldSince now live on S (state.js) — the HOLD state (input+net write, draw+localfx read)
@@ -177,46 +172,9 @@ function updateLifts(now) {
 // (locally or remotely) or while it is settling. The world pass skips these.
 function isLifted(id) { return id === S.heldId || liftValue(id) > 0.002; }
 
-// ---- deterministic-from-seed forms (footprints + render flags now in forms.js) ----
-// A plain anomaly draws its one kind; a fused hybrid layers each constituent kind
-// (offset in time + slightly shrunk, translucent) so its form reads as a luminous blend.
-function drawAnomalyForm(ctx, o, t, cx, cy, R) {
-  const kinds = (o.kinds && o.kinds.length) ? o.kinds : [o.kind || 'breath'];
-  if (kinds.length === 1) { PG.drawAnomaly(ctx, kinds[0], t, cx, cy, R); return; }
-  ctx.save();
-  ctx.globalAlpha = 0.55 + 0.4 / kinds.length; // translucent layers merge instead of occluding
-  for (let i = 0; i < kinds.length; i++) PG.drawAnomaly(ctx, kinds[i], t + i * 1.7, cx, cy, R * (1 - i * 0.06));
-  ctx.restore();
-}
-// shownMat/shownAged (the tweened lifecycle readers) + the footprints live in forms.js.
-function objRadius(o) { return formOf(o.family).sizeFn(o); } // per-family footprint — see forms.js
-// A creature's LIVE position: home (its stored x/y) + the deterministic wander
-// ANCHORED at wanderT0, so the offset is exactly zero at t0 and the creature sits ON
-// its home the instant it's placed — then drifts out on a new route (no snap). Heading
-// is the wander's near-future direction (the anchor cancels in the delta). Same
-// (seed, kind, home, wanderT0, clock) → same point on every client.
-const GLOW_SEC = 180; // glow-buff duration in seconds (mirror server GLOW_MS)
-// Warp a creature's wander time: 2× during a glow buff. Continuous at both edges of the
-// buff (no jump) — after it ends the wander simply carries a constant phase offset.
-function creatureWarpT(o, t) {
-  if (!o.glowUntil) return t;
-  const gu = o.glowUntil / 1000, gs = gu - GLOW_SEC;
-  if (t <= gs) return t;
-  if (t < gu) return gs + (t - gs) * 2;       // 2× speed while glowing
-  return gs + GLOW_SEC * 2 + (t - gu);         // after: normal speed, phase-shifted (invisible)
-}
-// Is this creature currently glowing? → its rainbow hue, else null.
-function glowHueOf(o) { return (o.glowUntil && (Date.now() + S.clockSkew) < o.glowUntil) ? (o.glowHue || 0) : null; }
-// How strong the BOND is right now, 0..1: eases in when befriended, holds, then FADES over
-// the final ~10s as it lapses — a visible end (the red glow wanes and the creature drifts
-// back to its own life). The server moves a bonded creature; this only drives the glow.
-function tameFactor(o) {
-  if (!o.tameUntil) return 0;
-  const remain = o.tameUntil - (Date.now() + S.clockSkew);
-  if (remain <= 0) return 0;
-  const inF = o._tameStart ? Math.min(1, (performance.now() - o._tameStart) / 2500) : 1;
-  return Math.max(0, Math.min(1, Math.min(inF, remain / 10000)));
-}
+// ---- object paint dispatch + geometry/position readers — now in draw.js (4.14d) ----
+// (paintObject cascade + drawObjectWorld/drawLOD/drawMark/paintAttend/drawHeldScreen +
+//  creaturePos/posOf/objRadius + glow/tame/warp; the form footprints live in forms.js.)
 // A friendly little 3-note flourish when you greet the giant — all on the season
 // pentatonic (so it's consonant + musical), silent unless sound is on.
 function giantChime() {
@@ -225,210 +183,9 @@ function giantChime() {
   setTimeout(() => Audio.event('pickup', { seed: 0x7c33, family: 'anomaly', x }), 120);
   setTimeout(() => Audio.event('place', { seed: 0x2e9f, family: 'anomaly', x }), 250);
 }
-function creaturePos(o) {
-  const t = syncedT(), seed = o.seed >>> 0, kind = o.family === 'fish' ? 'fish' : (o.kind || 'crawler');
-  const t0 = (o.wanderT0 || 0) / 1000;
-  const tg = creatureWarpT(o, t), tg2 = creatureWarpT(o, t + 0.2);
-  const w = wanderAt(seed, kind, tg), a = wanderAt(seed, kind, t0), w2 = wanderAt(seed, kind, tg2);
-  let x = o.x + (w.x - a.x), y = o.y + (w.y - a.y);
-  let ang = Math.atan2(w2.y - w.y, w2.x - w.x);
-  // A befriended creature is NOT glued to the viewport — its HOME drifts toward you on the
-  // server (slow, at its own pace), and here it just wanders normally around that moving
-  // home. So it approaches and trails you naturally, never snapping to centre or vanishing.
-  // A bug dropped in a pond becomes every nearby fish's objective: each SWIMS toward it at
-  // a constant speed (turning to face it), so the closest reaches it first + eats it (`eatT`,
-  // set when the rush began). Once eaten, the fish ease back to their wander. Purely local &
-  // cosmetic (the splash event drives it on every client); the fish's home/wander is untouched.
-  if (kind === 'fish' && feedRushes.length) {
-    let target = null, bestF = 0;
-    for (const fr of feedRushes) {
-      if (Math.hypot(x - fr.pond.x, y - fr.pond.y) > fr.pond.r + 40) continue; // only the food's own pond
-      const elapsed = (S.animT * 1000 - fr.start) / 1000;
-      if (elapsed < 0) continue;
-      const dist = Math.hypot(fr.x - x, fr.y - y) || 1;
-      const approachT = dist / FISH_SWIM_SPEED;                 // secs for THIS fish to reach the bug at swim speed
-      let f;
-      if (elapsed <= fr.eatT) f = Math.min(1, elapsed / approachT); // still swimming in (constant speed)
-      else { const fAtEat = Math.min(1, fr.eatT / approachT); f = fAtEat * Math.max(0, 1 - (elapsed - fr.eatT) / FEED_RELEASE); } // eaten → ease back from where it had got to
-      if (f > bestF) { bestF = f; target = fr; }
-    }
-    if (target) { ang = Math.atan2(target.y - y, target.x - x); x += (target.x - x) * bestF; y += (target.y - y) * bestF; }
-  }
-  // Unit ⑥: a ground creature steers AROUND rock footprints instead of walking over
-  // them — solids read as solid. Purely local & cosmetic: the creature's server-side
-  // home/wander is untouched, only where it's drawn (so two viewports can fence it
-  // slightly differently against their own visible rocks — fine, like the cursor nudge).
-  // frameStones is last frame's visible rocks (a frame's lag is imperceptible).
-  if (kind === 'crawler' && frameStones.length) { const p = deflectCircles(x, y, creatureR(seed, kind) * 0.7, frameStones, 5); x = p.x; y = p.y; }
-  return { x, y, ang };
-}
-// Where an object is drawn / tested THIS frame: a free creature wanders; everything
-// else sits at its true position plus any local cursor-displacement offset.
-function posOf(o) {
-  if ((o.family === 'creature' || o.family === 'fish') && !o.held && o.id !== S.heldId) return creaturePos(o);
-  return { x: o.x + (o._ox || 0), y: o.y + (o._oy || 0) };
-}
 // The biggest trees have ROOTED — they're immovable landmarks (never grabbed; you
 // drag straight across them to pan). Everything else can be picked up.
 function isMovable(o) { return formOf(o.family).movable(o); } // a rooted big tree can't be lifted — see forms.js
-// stoneGeom (the cached stone procgen) lives in forms.js — its LOD colour reads it too.
-// Draw any object (stone, seed, or plant) at (cx, cy) in the current transform.
-// FORM is always regenerated from seed (+ maturity/aged for growth) — never stored.
-function paintObject(o, cx, cy, ang = 0) {
-  if (o.family === 'stone') { PG.drawStone(ctx, stoneGeom(o), cx, cy); return; }
-  if (o.family === 'anomaly') { drawAnomalyForm(ctx, o, S.animT, cx, cy, anomalyR(o)); return; }
-  if (o.family === 'crystal') { PG.drawCrystal(ctx, o.seed >>> 0, cx, cy, crystalR(o), S.animT); return; }
-  if (o.family === 'giant') { // the journeyer (a being apart) — see giant.js
-    drawGiant(ctx, cx, cy, GIANT_R, S.animT, Math.atan2(o.hy || 0, o.hx || 1), { gait: o.gait, tend: o.tend, lookX: o.lookX, lookY: o.lookY });
-    return;
-  }
-  if (o.family === 'creature') { drawCreature(ctx, o.seed >>> 0, o.kind || 'crawler', cx, cy, S.animT, ang, glowHueOf(o), tameFactor(o)); return; }
-  if (o.family === 'fish') { drawFish(ctx, o.seed >>> 0, cx, cy, S.animT, ang); return; }
-  const mat = shownMat(o), aged = shownAged(o);
-  if (mat < SPROUT_C) { PG.drawSeed(ctx, o.seed >>> 0, cx, cy, seedScale(o.seed) * (1 + mat * 1.4)); return; }
-  if (mat >= BIG_TREE_MAT) drawRoots(ctx, o.seed >>> 0, cx, cy, mat); // roots only on the biggest (rooted) plants
-  // Any sprouted plant SWAYS by leaning its canopy about its base (trunk anchored at
-  // the ground) — used by the rooted-tree drag AND the cursor brush (Wave M). Never a
-  // whole-object slide.
-  const bend = o._bend || 0;
-  if (bend) { ctx.save(); ctx.translate(cx, cy); ctx.rotate(bend); PG.drawPlant(ctx, o.seed >>> 0, 0, 0, mat, aged); ctx.restore(); return; }
-  PG.drawPlant(ctx, o.seed >>> 0, cx, cy, mat, aged);
-}
-// A soft contact shadow grounds an object on the plane (a little perspective — it
-// sits ON the ground instead of floating like clip-art). Flattened ellipse, offset
-// for a high upper-left light; plants root at their base, compact things sit below
-// centre. Anomalies (luminous, floating) and fliers (airborne) cast none/less.
-function paintGroundShadow(o, cx, cy, rad) {
-  if (!formOf(o.family).castsShadow) return; // anomalies float, fish are under the water, the giant draws its own foot shadow
-  const rooted = o.family === 'seed' && shownMat(o) >= SPROUT_C;   // a plant roots at cy; everything else sits below centre
-  const flier = o.family === 'creature' && (o.kind === 'flier');
-  const baseY = rooted ? cy + rad * 0.12 : cy + rad * 0.42;
-  const rx = rad * (o.family === 'creature' ? 0.7 : 0.82) * (flier ? 0.7 : 1);
-  const a = (0.12 + Math.min(0.13, rad / 380)) * (flier ? 0.45 : 1); // bigger casts darker; a flier's is faint
-  ctx.save();
-  ctx.fillStyle = PG.rgba('#000000', a);
-  ctx.beginPath(); ctx.ellipse(cx + rad * 0.14, baseY + (flier ? rad * 0.5 : 0), rx, rx * 0.32, 0, 0, Math.PI * 2); ctx.fill();
-  ctx.restore();
-}
-// Roots for the biggest plants (those rooted immovable, maturity ≥ BIG_TREE_MAT):
-// short tapering tendrils splaying from the base across the ground plane (vertically
-// compressed, like the contact shadow), so it READS why the tree won't be lifted.
-// Deterministic from seed; drawn beneath the trunk so the canopy overlaps them.
-function drawRoots(ctx, seed, cx, cy, mat) {
-  const r = PG.rng((seed ^ 0x9b7c3) >>> 0);
-  const n = 4 + Math.floor(r() * 3);                 // 4..6 surface roots
-  const reach = 12 + mat * 28;                        // grows with the tree
-  ctx.save();
-  ctx.lineCap = 'round';
-  const col = PG.mix(PG.PALETTE.growthDeep, '#1c1206', 0.7); // deep green → dark earth
-  for (let i = 0; i < n; i++) {
-    const a = (i + 0.5) / n * Math.PI * 2 + (r() - 0.5) * 0.5;
-    const len = reach * (0.6 + r() * 0.7);
-    const ex = cx + Math.cos(a) * len;
-    const ey = cy + Math.sin(a) * len * 0.42 + len * 0.16; // ground-plane compression + a touch toward the viewer
-    const mx = cx + (ex - cx) * 0.45 + (r() * 2 - 1) * len * 0.16;
-    const my = cy + (ey - cy) * 0.45 + (r() * 2 - 1) * len * 0.08;
-    ctx.beginPath();
-    ctx.moveTo(cx, cy - 1);
-    ctx.quadraticCurveTo(mx, my, ex, ey);
-    ctx.lineWidth = Math.max(0.7, (2.6 - i * 0.18) * (0.55 + mat * 0.45));
-    ctx.strokeStyle = PG.rgba(col, 0.55);
-    ctx.stroke();
-  }
-  ctx.restore();
-}
-// A ground mark (Wave S): a rock-shaped tinted STAIN drawn flat on the ground (it's a
-// disturbance of the earth, not an object sitting on it — so no shadow/depth), fading
-// as it heals. `life` runs 1→0 over the mark's ~10-min life. Shape reuses the stone
-// polygon (so it's "oddly shaped like a rock"); a soft radial alpha keeps the edge calm.
-function markGeom(o) { if (!o._mg) o._mg = PG.makeStone(o.seed >>> 0, MARK_SIZE, 0.4); return o._mg; }
-function drawMark(o, life) {
-  const g = markGeom(o), a = 0.34 * Math.min(1, life * 1.4); // hold near-full, then ease out as it heals
-  const P = g.pts.map((p) => ({ x: o.x + Math.cos(p.a) * p.rad, y: o.y + Math.sin(p.a) * p.rad }));
-  ctx.save();
-  ctx.beginPath();
-  for (let i = 0; i <= P.length; i++) { // rounded polygon — quad-smooth through edge midpoints (like a stone)
-    const b0 = P[i % P.length], b1 = P[(i + 1) % P.length];
-    const mx = (b0.x + b1.x) / 2, my = (b0.y + b1.y) / 2;
-    if (i === 0) ctx.moveTo(mx, my); else ctx.quadraticCurveTo(b0.x, b0.y, mx, my);
-  }
-  ctx.closePath();
-  // Feather the fill FULLY to nothing at the rim (was 0.35·a) so the rock's hard edge
-  // vanishes — overlapping digs then melt into one soft stain instead of stacking into
-  // crisp lens-shaped overlaps. The dug centre stays as visible as before.
-  const rg = ctx.createRadialGradient(o.x, o.y, 0, o.x, o.y, g.radius * 1.18);
-  rg.addColorStop(0, PG.rgba(MARK_TINT, a));
-  rg.addColorStop(0.5, PG.rgba(MARK_TINT, a * 0.5));
-  rg.addColorStop(1, PG.rgba(MARK_TINT, 0));
-  ctx.fillStyle = rg; ctx.fill();
-  ctx.restore();
-}
-function drawObjectWorld(o) {
-  let cx, cy, ang = 0;
-  if (o.family === 'creature' || o.family === 'fish') { const p = creaturePos(o); cx = p.x; cy = p.y; ang = p.ang; } // live wander + heading
-  else { cx = o.x + (o._ox || 0); cy = o.y + (o._oy || 0); } // + local cursor-displacement (Wave 6)
-  const ds = o._depthScale || 1; // size-by-depth (Wave K) — set in the cull pass
-  const rad = objRadius(o) * ds;
-  // LOD (zoom-out perf): when an object is only a handful of pixels on screen, a full
-  // procedural tree is hundreds of wasted strokes — draw one colour blob instead. This
-  // is the standard "when a tree is 5px, draw a dot" technique; only the zoomed-out view
-  // is affected, close-up is untouched. Anomalies (luminous, rare) + fish always draw full.
-  // LOD only when over the detail budget (frameLodCut > 0, set in the cull pass): the
-  // smallest-on-screen overflow draws as a cheap blob, everything else full. Plus a hard
-  // sub-pixel floor (a thing under ~1.5px is invisible anyway). Anomalies/fish/giant: always full.
-  if (!formOf(o.family).alwaysFull) { // anomalies/fish/giant always draw full (never LOD-blobbed)
-    const px = rad * camera.z;
-    if (px < 1.5 || (frameLodCut > 0 && px < frameLodCut)) { drawLOD(o, cx, cy, rad); return; }
-  }
-  if (Q.shadows) paintGroundShadow(o, cx, cy, rad);
-  if (ds === 1) { paintObject(o, cx, cy, ang); return; }
-  ctx.save();
-  ctx.translate(cx, cy); ctx.scale(ds, ds); ctx.translate(-cx, -cy); // scale about the object's base point
-  paintObject(o, cx, cy, ang);
-  ctx.restore();
-}
-// A cheap stand-in for a far/tiny object: one opaque disc in its family colour (the
-// global season grade tints it to match), at the foliage height for plants (which rise
-// from their base). No shadow, no procgen — this is the whole point of the LOD.
-function drawLOD(o, cx, cy, rad) {
-  if (o.family === 'seed') {
-    const mat = shownMat(o), col = lodColor(o);
-    if (mat >= SPROUT_C) { // a sprouted plant reads as a thin vertical LINE approximating its height (not a dot) + a small crown
-      const h = rad * (1.5 + mat * 2.3);
-      ctx.strokeStyle = col; ctx.lineWidth = Math.max(0.5, rad * 0.14); ctx.lineCap = 'round';
-      ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx, cy - h); ctx.stroke();
-      ctx.beginPath(); ctx.arc(cx, cy - h, rad * 0.5, 0, Math.PI * 2); ctx.fillStyle = col; ctx.fill();
-      return;
-    }
-    ctx.beginPath(); ctx.arc(cx, cy, rad * 0.42, 0, Math.PI * 2); ctx.fillStyle = col; ctx.fill(); // a loose seed/leaf → a small green dab (half the old size)
-    return;
-  }
-  ctx.beginPath(); ctx.arc(cx, cy, rad * 0.85, 0, Math.PI * 2);
-  ctx.fillStyle = lodColor(o); ctx.fill();
-}
-// The representative base colour of an object for its LOD blob — matched to the full
-// form's colour (the plant `core` ramp / the stone's fill) so zooming in/out doesn't shift hue.
-function lodColor(o) { return formOf(o.family).lodColor(o); } // per-family LOD blob colour — see forms.js
-// The "reveal of age" (PRD §5.2): how far along its life an attended object is, so
-// the attend-bloom is larger and warmer the older/more-worn the object — its history
-// made briefly legible without a single word or number.
-function ageFactor(o) { return formOf(o.family).ageFactor(o); } // "reveal of age" 0..1 — see forms.js
-// A soft warm bloom that breathes around the attended object (its "response").
-function paintAttend(o, t) {
-  const age = ageFactor(o);
-  const c = posOf(o);                                   // bloom at the live position (a creature wanders)
-  const rad = objRadius(o) * (1.7 + 1.3 * age);
-  const breath = 0.6 + 0.4 * Math.sin(S.animT * 1.6);     // slow pulse = the object responding
-  const a = 0.16 * t * breath * (0.55 + 0.45 * age);    // older → warmer reveal
-  ctx.save();
-  ctx.globalCompositeOperation = 'lighter';
-  const g = ctx.createRadialGradient(c.x, c.y, 0, c.x, c.y, rad);
-  g.addColorStop(0, PG.rgba('#e8c87a', a));
-  g.addColorStop(1, PG.rgba('#e8c87a', 0));
-  ctx.fillStyle = g;
-  ctx.beginPath(); ctx.arc(c.x, c.y, rad, 0, Math.PI * 2); ctx.fill();
-  ctx.restore();
-}
 // An object's ground line — where it sits and sorts in the painter's order.
 function groundY(o) { return o.y; }
 // Fliers are airborne, so their DEPTH (paint order) is lifted above ground clutter —
@@ -441,26 +198,6 @@ function flierLift(o) { return 56 + PG.rng((o.seed ^ 0x5f5e10) >>> 0)() * 120; }
 // breath of pseudo-depth; subtle so the pan-time "breathing" stays imperceptible.
 // Stored per object each frame (in the cull pass) so the draw AND the hit-test agree.
 function depthScaleAt(screenY) { return 1 - (1 - clamp(screenY / vh, 0, 1)) * DEPTH_TOP; }
-// Lifted object drawn in screen space so the 10px rise / shadow stay constant
-// regardless of zoom; intrinsic size still scales with zoom via camera.z.
-function drawHeldScreen(o, sx, sy, lift) {
-  const z = camera.z, sc = 1 + lift * 0.06, rise = lift * 10, rad = objRadius(o) * z;
-  ctx.save();
-  ctx.fillStyle = PG.rgba('#000000', 0.34 * (1 - lift * 0.4));
-  ctx.beginPath();
-  ctx.ellipse(sx, sy + rad * 0.55 + 4, rad * 0.9 * (1 + lift * 0.5), rad * 0.3 + (4 + lift * 10) * 0.18, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
-  ctx.save();
-  ctx.translate(sx, sy - rise);
-  ctx.scale(z * sc, z * sc);
-  // A held creature keeps facing its live wander heading (not a fixed "up"), so
-  // picking it up and setting it down don't snap its rotation — the in-hand heading
-  // is continuous with the wander it resumes (heading is position-independent).
-  const ang = o.family === 'creature' ? creaturePos(o).ang : 0;
-  paintObject(o, 0, 0, ang);
-  ctx.restore();
-}
 // Ease each object's rendered maturity/aged toward the server's value.
 let _lastGrowthFrame = 0;
 function updateGrowth(now) {
@@ -854,8 +591,6 @@ function trackMouseHover(cx, cy) {
 }
 let grab = null;                 // pending press on an object: { id, ox, oy } (object-centre − pointer, world units)
 let lastTapId = null, lastTapT = 0; // double-tap-a-stone detection (→ break)
-let frameStones = [];            // visible rock footprints {x,y,r} this frame — ground creatures steer around them (Unit ⑥)
-let frameLodCut = 0;             // on-screen radius below which to LOD this frame (0 = LOD nothing); set by the detail budget in the cull pass
 let holdMode = null;             // null | 'drag' (an object carried by a pressed pointer)
 let holdOff = { x: 0, y: 0 };    // world-unit offset object-centre − pointer, so a grab doesn't snap to centre
 
@@ -1391,7 +1126,7 @@ function frame(now) {
     if (o.family === 'stone') nextStones.push({ x: p.x, y: p.y, r: stoneSize(o) }); // a rock fences ground creatures
     list.push(o);
   }
-  frameStones = nextStones; // creaturePos reads this next frame (a frame's lag is invisible)
+  S.frameStones = nextStones; // creaturePos reads this next frame (a frame's lag is invisible)
   // The gardeners: a synthetic draw entry each so they sort + shadow + depth-scale with
   // everything else (not in `objects`, so never hit-tested or pickable). Each one's eye
   // follows the OTHER, wherever it is in the world.
@@ -1408,11 +1143,11 @@ function frame(now) {
   // LOD-by-LOAD: if more objects are visible than the detail budget, LOD the smallest-on-
   // screen overflow (find the budget-th largest size → cut below it). Under budget → 0 → all
   // full detail, however small. So chunkiness is purely a function of on-screen count (cost).
-  frameLodCut = 0;
+  S.frameLodCut = 0;
   if (list.length > Q.detailBudget) {
     const sizes = [];
     for (const o of list) { if (formOf(o.family).alwaysFull) continue; sizes.push(objRadius(o) * (o._depthScale || 1) * camera.z); }
-    if (sizes.length > Q.detailBudget) { sizes.sort((a, b) => b - a); frameLodCut = sizes[Q.detailBudget] || 0; }
+    if (sizes.length > Q.detailBudget) { sizes.sort((a, b) => b - a); S.frameLodCut = sizes[Q.detailBudget] || 0; }
   }
   // painter's depth by ground line; ties broken by id for a stable, deterministic order
   list.sort((a, b) => (a._sortY - b._sortY) || (a.id < b.id ? -1 : 1));
@@ -1542,14 +1277,14 @@ function frame(now) {
     const lines = [
       `tier ${q.tier}${q.pinned ? ' ·pinned' : ''}   ~${fps}fps (${q.ema.toFixed(1)}ms)`,
       `on-screen ${list.length} / budget ${q.budget}`,
-      frameLodCut > 0 ? `LOD: chunk < ${frameLodCut.toFixed(1)}px on screen` : 'LOD: all full detail',
+      S.frameLodCut > 0 ? `LOD: chunk < ${S.frameLodCut.toFixed(1)}px on screen` : 'LOD: all full detail',
     ];
     ctx.font = '600 11px ui-monospace, SFMono-Regular, monospace';
     ctx.textAlign = 'left'; ctx.textBaseline = 'top';
     let yy = 12;
     for (const ln of lines) {
       ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillText(ln, 12.7, yy + 0.7);
-      ctx.fillStyle = frameLodCut > 0 && ln.startsWith('LOD') ? 'rgba(240,200,150,0.96)' : 'rgba(210,230,205,0.95)'; ctx.fillText(ln, 12, yy);
+      ctx.fillStyle = S.frameLodCut > 0 && ln.startsWith('LOD') ? 'rgba(240,200,150,0.96)' : 'rgba(210,230,205,0.95)'; ctx.fillText(ln, 12, yy);
       yy += 15;
     }
   }
