@@ -13,7 +13,7 @@ import { drawGiant } from './giant.js';
 import { seedScale } from './shared/sizing.js';
 import { SPROUT_C, BIG_TREE_MAT, GIANT_R, shownMat, shownAged, stoneSize, stoneGeom, anomalyR, crystalR, formOf } from './forms.js';
 import { canvas, ctx, camera, objects, presences, lifts, flashes, ripples, feedRushes, grits, creatureEvts, giantFootprints, S } from './state.js'; // shared client state (4.14 mirror)
-import { screenToWorld, worldToScreen, viewHalf, poolOnScreen, camLimits, zMin, clampCam, applyPan, startArrive, updateArrive, saveHome, adaptQuality, setQTier, resize, queueResize, dpr, vw, vh, Q, home, Z0, ZMIN, ZMAX } from './view.js'; // camera/transforms/sizing/quality (4.14 mirror)
+import { screenToWorld, worldToScreen, viewHalf, poolOnScreen, camLimits, zMin, clampCam, applyPan, startArrive, updateArrive, cancelArrive, saveHome, adaptQuality, setQTier, resize, queueResize, dpr, vw, vh, Q, home, Z0, ZMIN, ZMAX } from './view.js'; // camera/transforms/sizing/quality (4.14 mirror)
 
 // ---- tuning constants -------------------------------------------------------
 // Z0/ZMIN/ZMAX (zoom range) now live in view.js (imported above).
@@ -963,7 +963,7 @@ canvas.addEventListener('pointermove', (e) => {
     applyPan(-(mx - pinch.mx) / camera.z, -(my - pinch.my) / camera.z); // + two-finger pan (resisted at the edge)
     pinch.mx = mx; pinch.my = my;
     clampCam(); // keep the zoom-anchor jump inside the world too
-    arrive = null;
+    cancelArrive();
     return;
   }
   if (pointers.size !== 1) return;
@@ -976,7 +976,7 @@ canvas.addEventListener('pointermove', (e) => {
     else { beginHold(o, 'drag', { x: grab.ox, y: grab.oy }); carryTo(e.clientX, e.clientY); }
   } else if (!grab && p.maxMove > SLOP) {                // empty ground or a rooted tree → pan
     if (swayId) { const o = objects.get(swayId); if (o) { o._bendV = (o._bendV || 0) + dx * SWAY_IMPULSE; swaying.add(swayId); } } // lean the pressed tree with the drag
-    applyPan(-dx / camera.z, -dy / camera.z); arrive = null;
+    applyPan(-dx / camera.z, -dy / camera.z); cancelArrive();
   }
 });
 
@@ -1048,7 +1048,7 @@ canvas.addEventListener('wheel', (e) => {
     const k = e.deltaMode === 1 ? 16 : 1;
     applyPan((e.deltaX * k) / camera.z, (e.deltaY * k) / camera.z);
   }
-  arrive = null;
+  cancelArrive();
 }, { passive: false });
 
 // Safari (desktop) reports a trackpad pinch as non-standard gesture* events, NOT a
@@ -1066,7 +1066,7 @@ document.addEventListener('gesturechange', (e) => {
   const before = screenToWorld(ax, ay);
   camera.z = clamp(gestureZ0 * (e.scale || 1), zMin(), ZMAX);
   const after = screenToWorld(ax, ay);
-  camera.x += before.x - after.x; camera.y += before.y - after.y; clampCam(); arrive = null;
+  camera.x += before.x - after.x; camera.y += before.y - after.y; clampCam(); cancelArrive();
 }, { passive: false });
 document.addEventListener('gestureend', (e) => e.preventDefault(), { passive: false });
 

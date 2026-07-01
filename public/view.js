@@ -139,6 +139,11 @@ export function applyPan(wdx, wdy) {
 export function startArrive(tx, ty) {
   arrive = { fromX: camera.x, fromY: camera.y, toX: tx, toY: ty, start: performance.now(), dur: 1200 };
 }
+// Cancel any in-flight return-thread animation. Manual camera control (pan/zoom/pinch)
+// calls this so the soft-arrive doesn't fight the user's own movement. `arrive` is
+// module-private (an imported `let` is read-only at the import site), so client.js
+// clears it through this setter rather than assigning the binding.
+export function cancelArrive() { arrive = null; }
 export function updateArrive(now) {
   if (!arrive) return;
   const t = Math.min(1, (now - arrive.start) / arrive.dur), e = 1 - Math.pow(1 - t, 3);
