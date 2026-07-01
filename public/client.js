@@ -12,7 +12,8 @@ import { wanderAt, drawCreature, creatureR, drawFish, fishR } from './creatures.
 import { drawGiant } from './giant.js';
 import { SPROUT_C, BIG_TREE_MAT, GIANT_R, shownMat, shownAged, stoneSize, stoneGeom, anomalyR, crystalR, formOf } from './forms.js';
 import { objRadius, isMovable, creaturePos, posOf, drawMark, drawObjectWorld, drawHeldScreen, paintAttend, FISH_SWIM_SPEED, FEED_RELEASE } from './draw.js'; // ctx-coupled object paint dispatch + position/geometry readers (4.14d)
-import { IN, OUT } from './shared/protocol.js'; // the wire single-source (2.6) — client now sends IN.* / switches on OUT.* (string-identical to the old raw types)
+import { IN, OUT } from './shared/protocol.js';
+import { setLift, liftValue, isLifted, updateLifts, updateGrowth, updatePositions, updateNudge, updateCollision, updateSway, updateLeaves, drawLeaves, drawCreatureEvts, GIANT_VIS_SPEED } from './localfx.js'; // lift anim + per-frame cosmetic-fx passes (4.14e) // the wire single-source (2.6) — client now sends IN.* / switches on OUT.* (string-identical to the old raw types)
 import { canvas, ctx, camera, objects, presences, lifts, flashes, ripples, feedRushes, grits, creatureEvts, giantFootprints, flying, swaying, mouseVelW, S } from './state.js'; // shared client state (4.14 mirror)
 import { screenToWorld, worldToScreen, viewHalf, poolOnScreen, camLimits, zMin, clampCam, applyPan, startArrive, updateArrive, cancelArrive, saveHome, adaptQuality, setQTier, qStats, resize, queueResize, dpr, vw, vh, Q, home, Z0, ZMIN, ZMAX } from './view.js'; // camera/transforms/sizing/quality (4.14 mirror)
 
@@ -40,10 +41,7 @@ const P_IN = 1500, P_OUT = 2500, P_IDLE = 2000; // bloom fade-in / fade-out / id
 const SHARED_RADIUS = 620;                   // world units within which two presences share warmth
 const SHARED_BOOST = 3.2;                     // strength of the extra between-them bloom (intensifies the shared patch)
 // SPROUT_C / BIG_TREE_MAT / GIANT_R now live in forms.js (the client form-const home)
-const GIANT_EASE = 0.4;                       // per-second retention for the giant's correction toward each broadcast spot
-const GIANT_VIS_SPEED = 13;                   // world u/s it WALKS along its heading between ticks (≈ GIANT_STEP/tick) — brisk, continuous motion (not rushed, never parked)
 const FOOT_FADE_MS = 4200;                    // a footprint fades this fast (so the giant doesn't track prints all over the world)
-const FOOT_STEP = 52;                         // drop a print every this-many world units walked
 const GLOW_PARALLAX = 0.04;                   // ambient glows drift this fraction of the camera (Wave H depth)
 const DEPTH_TOP = 0.2;                         // objects at the TOP of the screen draw this much smaller (Wave K recession — subtle)
 const ANOM_DISSOLVE_MS = 10000, ANOM_FADE_MS = 3000; // hold an anomaly 10s and it fades from your hands
@@ -52,36 +50,11 @@ const DBLTAP_MS = 320;                        // two taps on a stone within this
 const GRIT_MS = 500;                          // a worn-out stone's grit scatter lifetime (spec §4.3)
 const MARK_LIFE_MS = 10 * 60 * 1000;          // a ground mark heals over ~10 min (mirror server MARK_LIFE_MS)
 const POS_EASE_MAX = 24;                       // a position change up to this (a drift hop) eases; larger snaps
-// Mouse-displacement (Wave 6): a moving cursor brushes light things (leaves, seeds)
-// aside and they spring back. PURELY LOCAL & cosmetic — a render-only offset, never
-// the object's real position, so it touches no network, no storage, and can't desync.
-const NUDGE_RADIUS = 78;                      // world units the cursor disturbs around itself
-const NUDGE_STR = 6;                          // how strongly cursor speed transfers into a nudge
-const NUDGE_SPRING = 95;                      // spring pulling a displaced thing back to rest
-const NUDGE_DAMP = 0.02;                      // velocity retained per second (heavy damping → quick settle)
-const NUDGE_MAX = 150;                        // clamp the displacement so nothing flies off absurdly
-const NUDGE_MIN_SPEED = 45;                   // cursor must move faster than this (wu/s) to stir anything
-// Collision (Wave E): a held / thrown object bumps nearby movable things aside (a
-// render-only push on the same _ox/_oy spring — local & cosmetic, no network).
-const COLLIDE_R = 26;                         // bump reach beyond the carried object's own radius
-const COLLIDE_STR = 620;                      // how hard it shoves neighbours out of the way (gentle — they part, not fly)
-// Cosmetic leaf litter (Wave F): a sparse field of small leaves drifting on the breeze,
-// brushed aside by the cursor and stirred when you pan — purely LOCAL & cosmetic (no
-// network, no storage, like the nudge), so moving through the world feels alive.
-const LEAF_N = 46;                            // leaves populating the viewport
-const LEAF_MARGIN = 1.15;                      // keep them within this many viewport half-extents (respawn beyond)
-const LEAF_DRIFT = 9;                          // initial drift speed (world units/s)
-const LEAF_BREEZE = 13;                        // gentle wandering-breeze drift amplitude (world units/s)
-const LEAF_PAN = 0.35;                          // fraction of pan velocity the leaves are blown by (bounded — no streaking)
-const LEAF_CURSOR = 4;                         // how strongly the moving cursor scatters them
+// The nudge / collision / leaf-litter / sway-spring tuning consts now live in localfx.js (4.14e).
 // Rooted trees (Wave C): the biggest plants are immovable landmarks. They show ROOTS
 // gripping the earth (so it reads WHY they won't come) and SWAY in the drag direction,
 // then spring back, when you try to drag across them — a render-only canopy lean.
-const SWAY_K = 150;                           // spring stiffness pulling a swayed tree upright
-const SWAY_DAMP = 0.05;                        // velocity retained/s (light → a small bounce on the way back)
-const SWAY_MAX = 0.17;                         // max lean in radians (~10°) — a sway, never a topple
 const SWAY_IMPULSE = 0.0011;                   // how much a px of drag feeds the lean
-const BEND_FROM_CURSOR = 0.0011;               // a cursor brush sways a plant's canopy (per wu/s of cursor speed, falloff-scaled)
 
 // Spec easing curves (Visual Bible §06).
 const EASE_RISE = cubicBezier(0.22, 1, 0.36, 1);     // pickup / place lift
@@ -140,7 +113,6 @@ let arrivedOnce = false;
 // (flashes/ripples/feedRushes/grits/creatureEvts/giantFootprints) — now live in
 // state.js so the extracted subsystems mutate the same references (4.14 mirror).
 const FEED_RUSH_CAP_MS = 5000; // hard cap on a feed-rush (safety; normally it ends when the bug is eaten)
-const CREATURE_EVT_MS = 760;   // lifetime of a birth/death cue
 // pool/pools/giants/myPid/seasonPhase/animT/clockSkew now live on S (state.js) — the
 // world MODEL: net writes them, render/draw/view read them (4.14 mirror).
 let lastSat = -1;              // last-applied canvas saturation (avoids per-frame style writes)
@@ -155,21 +127,8 @@ let flingVel = { x: 0, y: 0 }, lastCarryPos = null, lastCarryT = 0;
 // stays server-held by our token until it lands (so S.carry streams), then places.
 
 // ---- lift animation ---------------------------------------------------------
-function setLift(id, target, dur, ease) {
-  const cur = lifts.get(id), from = cur ? cur.value : 0;
-  lifts.set(id, { value: from, from, target, start: performance.now(), dur, ease });
-}
-function liftValue(id) { const l = lifts.get(id); return l ? l.value : 0; }
-function updateLifts(now) {
-  for (const [id, l] of lifts) {
-    const t = l.dur > 0 ? Math.min(1, (now - l.start) / l.dur) : 1;
-    l.value = l.from + (l.target - l.from) * l.ease(t);
-    if (t >= 1 && l.target === 0) lifts.delete(id);
-  }
-}
 // An object is rendered in the lifted screen-space pass while it is being held
 // (locally or remotely) or while it is settling. The world pass skips these.
-function isLifted(id) { return id === S.heldId || liftValue(id) > 0.002; }
 
 // ---- object paint dispatch + geometry/position readers — now in draw.js (4.14d) ----
 // (paintObject cascade + drawObjectWorld/drawLOD/drawMark/paintAttend/drawHeldScreen +
@@ -182,8 +141,6 @@ function giantChime() {
   setTimeout(() => Audio.event('pickup', { seed: 0x7c33, family: 'anomaly', x }), 120);
   setTimeout(() => Audio.event('place', { seed: 0x2e9f, family: 'anomaly', x }), 250);
 }
-// The biggest trees have ROOTED — they're immovable landmarks (never grabbed; you
-// drag straight across them to pan). Everything else can be picked up.
 // An object's ground line — where it sits and sorts in the painter's order.
 function groundY(o) { return o.y; }
 // Fliers are airborne, so their DEPTH (paint order) is lifted above ground clutter —
@@ -196,66 +153,6 @@ function flierLift(o) { return 56 + PG.rng((o.seed ^ 0x5f5e10) >>> 0)() * 120; }
 // breath of pseudo-depth; subtle so the pan-time "breathing" stays imperceptible.
 // Stored per object each frame (in the cull pass) so the draw AND the hit-test agree.
 function depthScaleAt(screenY) { return 1 - (1 - clamp(screenY / vh, 0, 1)) * DEPTH_TOP; }
-// Ease each object's rendered maturity/aged toward the server's value.
-let _lastGrowthFrame = 0;
-function updateGrowth(now) {
-  const dt = _lastGrowthFrame ? (now - _lastGrowthFrame) / 1000 : 0;
-  _lastGrowthFrame = now;
-  const k = dt > 0 ? 1 - Math.pow(0.0002, dt) : 0; // ~reaches target in ~1s
-  for (const o of objects.values()) {
-    if (o.family === 'stone') continue;
-    if (o._matShown == null) o._matShown = o.maturity || 0;
-    if (o._agedShown == null) o._agedShown = o.aged || 0;
-    o._matShown += ((o.maturity || 0) - o._matShown) * k;
-    o._agedShown += ((o.aged || 0) - o._agedShown) * k;
-  }
-}
-// Ease each object's rendered position toward its target so a water-drift hop
-// (a small server position update) creeps instead of popping. Snap updates set
-// _tx==x so this is a no-op for them; the locally-carried object is excluded.
-let _lastPosFrame = 0;
-function updatePositions(now) {
-  const dt = _lastPosFrame ? (now - _lastPosFrame) / 1000 : 0;
-  _lastPosFrame = now;
-  const k = dt > 0 ? 1 - Math.pow(0.0002, dt) : 0;  // most objects: settle in ~1s
-  const kc = dt > 0 ? 1 - Math.pow(0.15, dt) : 0;    // creatures: a gentle ~2-3s glide for the migrating home
-  const kr = dt > 0 ? 1 - Math.pow(0.06, dt) : 0;    // a rock rolling out of water: a slower, visible ~1.2s roll to the bank
-  for (const o of objects.values()) {
-    if (o._tx == null) { o._tx = o.x; o._ty = o.y; continue; }
-    if (o.id === S.heldId) { o._tx = o.x; o._ty = o.y; continue; } // locally carried — follows the finger
-    const r = o._roll ? kr : (o.family === 'creature' ? kc : k);
-    o.x += (o._tx - o.x) * r;
-    o.y += (o._ty - o.y) * r;
-    if (o._roll && Math.hypot(o._tx - o.x, o._ty - o.y) < 0.6) o._roll = 0; // arrived at the bank — back to normal easing
-  }
-  for (const giant of S.giants) {
-    if (giant._tx == null) continue;
-    // It WALKS continuously along its heading between the (slow) broadcasts, only gently
-    // correcting toward the latest broadcast spot — so it always looks like it's going
-    // somewhere instead of teleport-then-wait. When tending (walk 0) it just settles.
-    const ox = giant.x, oy = giant.y;
-    const moving = (giant.walk || 0) > 0.1;
-    if (moving) { giant.x += (giant.hx || 0) * GIANT_VIS_SPEED * dt; giant.y += (giant.hy || 0) * GIANT_VIS_SPEED * dt; }
-    const kg = dt > 0 ? 1 - Math.pow(GIANT_EASE, dt) : 0;
-    const corr = moving ? 0.5 : 1;
-    giant.x += (giant._tx - giant.x) * kg * corr;
-    giant.y += (giant._ty - giant.y) * kg * corr;
-    // GAIT from ACTUAL frame speed (so ANY motion — including a correction slide — walks
-    // the legs, never a frozen slide); the neck-dip eases toward the server's tending flag.
-    const spd = dt > 0 ? Math.hypot(giant.x - ox, giant.y - oy) / dt : 0;
-    giant._spd = (giant._spd || 0) + (spd - (giant._spd || 0)) * Math.min(1, dt * 6);
-    giant._tend = (giant._tend || 0) + ((giant.tending || 0) - (giant._tend || 0)) * Math.min(1, dt * 3);
-    // leave a fading footprint every so many units walked (perpendicular L/R of the heading)
-    if (giant._fx == null) { giant._fx = giant.x; giant._fy = giant.y; giant._fside = 1; }
-    if (moving && Math.hypot(giant.x - giant._fx, giant.y - giant._fy) >= FOOT_STEP) {
-      const px = -(giant.hy || 0), py = (giant.hx || 0); // perpendicular to heading
-      giant._fside = -giant._fside;
-      giantFootprints.push({ x: giant.x + px * GIANT_R * 0.1 * giant._fside, y: giant.y + py * GIANT_R * 0.1 * giant._fside, start: now });
-      giant._fx = giant.x; giant._fy = giant.y;
-      if (giantFootprints.length > 60) giantFootprints.shift();
-    }
-  }
-}
 // Holding an anomaly for 10s dissolves it (it fades from your hands — never explained).
 function updateDissolve(now) {
   if (!S.heldId) return;
@@ -312,193 +209,8 @@ function settleFlying() {
   flying.clear();
 }
 
-// How easily a thing is stirred by a passing cursor (Wave 6): seeds & leaves fly,
-// growing plants get heavier as they mature and root, crystals stir a little, and
-// stones / anomalies / held things don't move at all.
-// only a LOOSE pre-sprout seed/leaf (no trunk) slides under the cursor; a sprouted plant
-// SWAYS instead (updateNudge) — never slides; stones/anomalies/held things don't move.
-function lightnessOf(o) { return o.held ? 0 : formOf(o.family).lightness(o); } // per-family — see forms.js
-// How much an object YIELDS to being bumped by a carried/thrown object — lighter
-// things give a lot, stones bump but resist, held/rooted/luminous things don't move.
-function collisionGive(o) {
-  if (o.held || o.id === S.heldId || flying.has(o.id) || !isMovable(o)) return 0; // held / carried / flying / rooted don't yield
-  return formOf(o.family).collisionGive(o); // per-family give — see forms.js
-}
-// Local, cosmetic displacement: a moving cursor brushes light things aside (a render
-// offset _ox/_oy on a damped spring), and they settle back to rest. Never the real
-// position — no network, no storage. Idle objects are skipped, so a still cursor is
-// free and a moving one costs ~the cull pass already does.
-let _lastNudgeT = 0;
-function updateNudge(now) {
-  const dt = _lastNudgeT ? Math.min(0.05, (now - _lastNudgeT) / 1000) : 0; _lastNudgeT = now;
-  if (dt <= 0) return;
-  const speed = (now - S.lastHoverT) < 60 ? Math.hypot(mouseVelW.x, mouseVelW.y) : 0;
-  const active = speed > NUDGE_MIN_SPEED;
-  for (const o of objects.values()) {
-    // A sprouted plant SWAYS when the moving cursor brushes it — the canopy leans in the
-    // cursor's travel direction (trunk anchored at the base), never sliding the whole
-    // tree. Feeds the same _bend spring updateSway settles (Wave M).
-    if (active && o.family === 'seed' && shownMat(o) >= SPROUT_C && !o.held && o.id !== S.heldId &&
-        Math.abs(o.x - S.mouseWorld.x) < NUDGE_RADIUS && Math.abs(o.y - S.mouseWorld.y) < NUDGE_RADIUS) {
-      const d = Math.hypot(o.x - S.mouseWorld.x, o.y - S.mouseWorld.y);
-      if (d < NUDGE_RADIUS) { const fall = 1 - d / NUDGE_RADIUS; o._bendV = (o._bendV || 0) + mouseVelW.x * fall * fall * BEND_FROM_CURSOR; swaying.add(o.id); }
-    }
-    const resting = !o._ox && !o._oy && !o._ovx && !o._ovy;
-    // Only objects near the moving cursor are stirred; already-displaced ones still
-    // spring back. A resting object that's neither is skipped — so the cost is ~the
-    // few things near the cursor + the few in motion, not the whole population.
-    const near = active && Math.abs(o.x - S.mouseWorld.x) < NUDGE_RADIUS && Math.abs(o.y - S.mouseWorld.y) < NUDGE_RADIUS;
-    if (resting && !near) continue;
-    // light things are stirred by the cursor; heavier things still spring back from a
-    // collision bump (collisionGive) — only truly fixed things (held/anomaly) are zeroed.
-    if (lightnessOf(o) <= 0 && collisionGive(o) <= 0) { if (!resting) { o._ox = o._oy = o._ovx = o._ovy = 0; } continue; }
-    o._ox = o._ox || 0; o._oy = o._oy || 0; o._ovx = o._ovx || 0; o._ovy = o._ovy || 0;
-    if (near && o.id !== S.heldId) {
-      const n = nudge(S.mouseWorld.x, S.mouseWorld.y, o.x + o._ox, o.y + o._oy, NUDGE_RADIUS, speed, NUDGE_STR, lightnessOf(o));
-      o._ovx += n.vx * dt; o._ovy += n.vy * dt;
-    }
-    const sx = spring(o._ox, o._ovx, dt, NUDGE_SPRING, NUDGE_DAMP); // damped spring-back to rest
-    const sy = spring(o._oy, o._ovy, dt, NUDGE_SPRING, NUDGE_DAMP);
-    o._ox = sx.pos; o._ovx = sx.vel; o._oy = sy.pos; o._ovy = sy.vel;
-    const off = Math.hypot(o._ox, o._oy);
-    if (off > NUDGE_MAX) { const k = NUDGE_MAX / off; o._ox *= k; o._oy *= k; }
-    if (Math.abs(o._ox) < 0.02 && Math.abs(o._oy) < 0.02 && Math.abs(o._ovx) < 0.5 && Math.abs(o._ovy) < 0.5)
-      { o._ox = o._oy = o._ovx = o._ovy = 0; }        // settle exactly to rest (no lingering jitter)
-  }
-}
-// Collision: a carried / thrown object shoves nearby movable things out of its way
-// (adds to the same _ox/_oy spring updateNudge settles). Runs only while something is
-// in hand or in flight; the displacement is cosmetic (real positions never change).
-let _lastColT = 0;
-function updateCollision(now) {
-  const dt = _lastColT ? Math.min(0.05, (now - _lastColT) / 1000) : 0; _lastColT = now;
-  if (dt <= 0) return;
-  const bumpers = [];
-  if (S.heldId && S.carry) { const ho = objects.get(S.heldId); if (ho) bumpers.push({ x: S.carry.x, y: S.carry.y, r: objRadius(ho) }); }
-  for (const id of flying.keys()) { const o = objects.get(id); if (o) bumpers.push({ x: o.x, y: o.y, r: objRadius(o) }); }
-  if (!bumpers.length) return;
-  for (const b of bumpers) {
-    const R = b.r + COLLIDE_R;
-    for (const o of objects.values()) {
-      if (Math.abs(o.x - b.x) > R || Math.abs(o.y - b.y) > R) continue;
-      const give = collisionGive(o); if (give <= 0) continue;
-      const ex = (o.x + (o._ox || 0)) - b.x, ey = (o.y + (o._oy || 0)) - b.y, d = Math.hypot(ex, ey);
-      if (d >= R) continue;
-      const ux = d > 0.001 ? ex / d : 0, uy = d > 0.001 ? ey / d : 1;
-      const f = 1 - d / R, push = COLLIDE_STR * f * f * give;
-      o._ovx = (o._ovx || 0) + ux * push * dt; o._ovy = (o._ovy || 0) + uy * push * dt;
-    }
-  }
-}
-// Rooted-tree sway (Wave C): a tree being drag-panned across leans in the drag
-// direction (impulses fed in from pointermove) and springs back upright when released,
-// with a small bounce. Purely a render-only canopy lean (o._bend) — no network, no
-// real movement; the tree never actually goes anywhere. Only swaying trees are
-// touched (tracked in `swaying`), so a still world costs nothing.
-let _lastSwayT = 0;
-function updateSway(now) {
-  const dt = _lastSwayT ? Math.min(0.05, (now - _lastSwayT) / 1000) : 0; _lastSwayT = now;
-  if (dt <= 0 || !swaying.size) return;
-  for (const id of swaying) {
-    const o = objects.get(id);
-    if (!o) { swaying.delete(id); continue; }
-    const s = spring(o._bend || 0, o._bendV || 0, dt, SWAY_K, SWAY_DAMP);
-    o._bend = clamp(s.pos, -SWAY_MAX, SWAY_MAX); o._bendV = s.vel;
-    if (id !== S.swayId && Math.abs(o._bend) < 1e-4 && Math.abs(o._bendV) < 1e-3) { o._bend = 0; o._bendV = 0; swaying.delete(id); }
-  }
-}
-// ---- cosmetic leaf litter (Wave F) ------------------------------------------
-// A sparse field of drifting leaves that follows the camera (respawning at the far
-// edge as you pan), wanders on a breeze, scatters from a fast cursor, and is STIRRED
-// when you pan — so movement feels alive. Purely local & cosmetic: never networked,
-// never the true world, so it can't desync and costs only these few dozen leaves.
-const leaves = [];
-function initLeaves() {
-  const r = PG.rng(0x1eaf5);
-  for (let i = 0; i < LEAF_N; i++) leaves.push({ x: 0, y: 0, vx: 0, vy: 0, rot: r() * Math.PI * 2, rotV: (r() * 2 - 1) * 0.5, seed: (r() * 4294967296) >>> 0, scale: 0.6 + r() * 0.8, placed: false });
-}
-let _lastLeafT = 0, _leafCamX = null, _leafCamY = null;
-function updateLeaves(now) {
-  const dt = _lastLeafT ? Math.min(0.05, (now - _lastLeafT) / 1000) : 0; _lastLeafT = now;
-  if (dt <= 0) return;
-  if (!leaves.length) initLeaves();
-  let pvx = 0, pvy = 0;                                    // camera pan velocity (world units/s)
-  if (_leafCamX != null) { pvx = (camera.x - _leafCamX) / dt; pvy = (camera.y - _leafCamY) / dt; }
-  _leafCamX = camera.x; _leafCamY = camera.y;
-  const hw = (vw / 2) / camera.z * LEAF_MARGIN, hh = (vh / 2) / camera.z * LEAF_MARGIN;
-  const minX = camera.x - hw, maxX = camera.x + hw, minY = camera.y - hh, maxY = camera.y + hh;
-  const cursorSpeed = (now - S.lastHoverT) < 60 ? Math.hypot(mouseVelW.x, mouseVelW.y) : 0;
-  const relax = 1 - Math.pow(0.02, dt); // velocity relaxes toward its ambient drift in ~0.5s
-  for (const lf of leaves) {
-    if (!lf.placed) {                                       // first fill: spread across the whole view
-      lf.x = minX + Math.random() * (maxX - minX); lf.y = minY + Math.random() * (maxY - minY);
-      lf.vx = (Math.random() * 2 - 1) * LEAF_DRIFT; lf.vy = (Math.random() * 2 - 1) * LEAF_DRIFT;
-      lf.placed = true;
-    } else if (lf.x < minX || lf.x > maxX || lf.y < minY || lf.y > maxY) { // drifted out → re-enter from an EDGE (streams in, no mid-view pop)
-      const e = Math.floor(Math.random() * 4);
-      if (e === 0) { lf.x = minX; lf.y = minY + Math.random() * (maxY - minY); }
-      else if (e === 1) { lf.x = maxX; lf.y = minY + Math.random() * (maxY - minY); }
-      else if (e === 2) { lf.y = minY; lf.x = minX + Math.random() * (maxX - minX); }
-      else { lf.y = maxY; lf.x = minX + Math.random() * (maxX - minX); }
-      lf.vx = (Math.random() * 2 - 1) * LEAF_DRIFT; lf.vy = (Math.random() * 2 - 1) * LEAF_DRIFT;
-    }
-    // velocity relaxes toward an AMBIENT drift = breeze minus a fraction of the pan,
-    // so panning gently blows the leaves but can never accumulate into a streak.
-    const ambVx = Math.sin(now * 0.0003 + lf.seed) * LEAF_BREEZE - pvx * LEAF_PAN;
-    const ambVy = Math.cos(now * 0.00027 + lf.seed * 1.3) * LEAF_BREEZE * 0.6 - pvy * LEAF_PAN;
-    lf.vx += (ambVx - lf.vx) * relax; lf.vy += (ambVy - lf.vy) * relax;
-    if (cursorSpeed > NUDGE_MIN_SPEED && Math.abs(lf.x - S.mouseWorld.x) < NUDGE_RADIUS && Math.abs(lf.y - S.mouseWorld.y) < NUDGE_RADIUS) {
-      const n = nudge(S.mouseWorld.x, S.mouseWorld.y, lf.x, lf.y, NUDGE_RADIUS, cursorSpeed, LEAF_CURSOR, 1);
-      lf.vx += n.vx * dt; lf.vy += n.vy * dt;                               // a cursor swipe scatters them
-    }
-    lf.x += lf.vx * dt; lf.y += lf.vy * dt;
-    lf.rot += lf.rotV * dt + lf.vx * 0.0008;                               // tumble, swayed by motion
-  }
-}
-// Drawn in the world transform (faint, small), so the litter sits in the world and
-// parallaxes with it. Season-tinted to match the growth palette.
-function drawLeaves() {
-  if (!leaves.length) return;
-  const base = PG.mix(PG.PALETTE.growthLight, PG.PALETTE.growthDeep, 0.35);
-  const col = PG.applySat(base, seasonSat(S.seasonPhase));
-  ctx.save();
-  for (const lf of leaves) {
-    if (!lf.placed) continue;
-    const s = 3.0 * lf.scale;
-    ctx.save(); ctx.translate(lf.x, lf.y); ctx.rotate(lf.rot);
-    ctx.fillStyle = PG.rgba(col, 0.32);
-    ctx.beginPath(); ctx.moveTo(0, -s * 1.6); ctx.bezierCurveTo(s, -s * 0.3, s, s, 0, s * 1.6); ctx.bezierCurveTo(-s, s, -s, -s * 0.3, 0, -s * 1.6); ctx.closePath(); ctx.fill();
-    ctx.restore();
-  }
-  ctx.restore();
-}
-// Birth / death cues (Wave L): a birth shimmers a soft warm-green bloom where new life
-// appears; a passing disperses a faint grey puff. Brief and subtle — the ecosystem made
-// legible without a word, in the same spirit as the crystal flash and stone grit.
-function drawCreatureEvts(now) {
-  for (let i = creatureEvts.length - 1; i >= 0; i--) {
-    const e = creatureEvts[i], age = now - e.start;
-    if (age > CREATURE_EVT_MS) { creatureEvts.splice(i, 1); continue; }
-    const p = age / CREATURE_EVT_MS;                  // 0..1
-    const fade = (1 - p) * Math.min(1, p * 5);        // fade in fast, out slow
-    ctx.save();
-    if (e.birth) {                                    // a spark of new life: an expanding warm-green ring + bloom
-      const r = 6 + p * 30;
-      ctx.globalCompositeOperation = 'lighter';
-      ctx.strokeStyle = PG.rgba('#cfe6a8', 0.5 * fade); ctx.lineWidth = 1.6;
-      ctx.beginPath(); ctx.arc(e.x, e.y, r, 0, Math.PI * 2); ctx.stroke();
-      const g = ctx.createRadialGradient(e.x, e.y, 0, e.x, e.y, r * 0.7);
-      g.addColorStop(0, PG.rgba('#cfe6a8', 0.38 * fade)); g.addColorStop(1, PG.rgba('#cfe6a8', 0));
-      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(e.x, e.y, r * 0.7, 0, Math.PI * 2); ctx.fill();
-    } else {                                          // a passing: a soft grey puff dispersing
-      const r = 7 + p * 18, a = 0.42 * (1 - p);
-      const g = ctx.createRadialGradient(e.x, e.y, 0, e.x, e.y, r);
-      g.addColorStop(0, PG.rgba('#8a8076', a)); g.addColorStop(0.6, PG.rgba('#5a5048', a * 0.6)); g.addColorStop(1, PG.rgba('#5a5048', 0));
-      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(e.x, e.y, r, 0, Math.PI * 2); ctx.fill();
-    }
-    ctx.restore();
-  }
-}
+// The lift animation + per-frame cosmetic-fx passes (growth/positions/nudge/collision/
+// sway/leaves + the leaf & creature-event draws) now live in localfx.js (4.14e).
 
 // ---- presence fade envelope -------------------------------------------------
 function presenceIntensity(p, now) {
