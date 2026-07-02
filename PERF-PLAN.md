@@ -5,13 +5,24 @@ option set + risks live in the `perf-roadmap` memory; this file is the ordered, 
 **execution checklist**. Ship each numbered step as its own verified commit (build → verify →
 commit → push; assets auto-deploy). Re-profile between stages.
 
-## Resume here → STAGE B phase 2 / re-profile / STAGE C (Stage A + Stage B phase 1 + a fix are DONE)
-- **`HEAD == origin/main == 1ee8939`.** **✅ ZOOM-OUT REGRESSION FIX** (`1ee8939`): the user field-tested
-  phase 1 — pan got smoother ✅ but zoom-OUT got jankier (~10fps; HUD `sprites 226 (95.8/96MB)` = cache
-  PEGGED + thrashing) because phase 1 baked at FIXED world-resolution regardless of display size. Fixed
-  by resolution-MATCHING the bake to zoom: `K = dpr*bakeZoom(camera.z)` (√2 buckets in [0.25,1.4]); same
-  grove now 8-16MB, tier holds at 0. `SPRITE_Z_MAX` 1.8→1.4. **LESSON: sprite resolution must track
-  DISPLAY size, not world size** — applies to phase 2 (stones/big trees) too.
+## Resume here → user re-profiles zoom-out / STAGE C (Stage A + Stage B phase 1 + 2 zoom-out fixes DONE)
+- **`HEAD == origin/main == 512ccc5`.** The user field-tested each increment. Pan ✅ smoother. Zoom-out
+  needed TWO fixes (both shipped):
+  - **`1ee8939` resolution-match:** cache was PEGGED (`sprites 226 (95.8/96MB)` thrashing) — baked at FIXED
+    world-res regardless of display size → resolution-MATCH the bake to zoom (`K=dpr*bakeZoom(camera.z)`,
+    √2 buckets [0.25,1.4]); `SPRITE_Z_MAX` 1.8→1.4. Memory fixed, but still 7fps.
+  - **`512ccc5` big-tree caching + blob-fallback:** a shipped `?perftrace` per-pass timer + draw-path
+    counter pinned it — ~160 BIG TREES (mat≥BIG_TREE_MAT)/frame were drawing LIVE via drawPlant (~90µs
+    each), because phase 1 EXCLUDED big trees. Fix: cache big-tree canopies too (roots live+unbent, skipped
+    sub-pixel; bbox widened UP_F 4.5/HALF_F 3.0, MAX_SPRITE_PX 1200 — 0 clips mat 0.2-1.0) + a LOD-BLOB
+    FALLBACK (un-baked plant → cheap blob, never the ~90µs live drawPlant → no cold-cache fps collapse) +
+    BAKES_PER_FRAME 6→10. Measured drawObj 15.4→1.8ms fully warm (8×).
+  - **LESSONS:** (1) sprite RESOLUTION must track DISPLAY size, not world size; (2) a cache MISS must never
+    cost more than the cached path — fall back CHEAP (blob), never to the expensive live render.
+- **▶ NEXT:** user re-profiles the zoomed-out world (should be much smoother now; `?perftrace` gives the
+  per-pass + draw-path breakdown if not). Then STAGE C (visible-set iteration + GC) if the remaining
+  fixed cost at very-high on-screen counts still bites; Stage B phase 2 (stones) is lower priority (stones
+  are cheap single polygons — the perftrace `paint` line will say if they matter).
 - **`HEAD == 82e6a4e`.** **✅ STAGE B phase 1 SHIPPED** (`82e6a4e`): the plant-canopy
   sprite cache (`public/spritecache.js`). Bakes `drawPlant` once per (seed | `floor(mat*20)` |
   `floor(aged*8)` | dpr) and blits it; per-frame sway/depth/zoom + a maturity SIZE-CORRECTION (scale
