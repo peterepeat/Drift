@@ -100,6 +100,13 @@ export function queueResize() {
 
 // ---- camera + transforms (all in CSS px; dpr only folded into the matrix) ---
 let arrive = null; // soft-pan-to-active-area animation
+// Pan INERTIA (momentum): a flick-pan keeps gliding after release, decaying with friction until it
+// rests — like a thrown object settling. input.js starts it (startPanGlide) on a fast pan-release;
+// client.js's frame() integrates it (updatePanGlide); any new manual camera move cancels it (via
+// cancelArrive). applyPan's edge-resistance eases the glide to a stop at the world edge.
+let panGlide = null, panGlideT = 0;   // { vx, vy } world units/s while gliding
+const PAN_GLIDE_RETAIN = 0.055;       // velocity retained per second (calm; matches the throw's settle)
+const PAN_GLIDE_STOP = 10;            // world u/s below which the glide comes to rest
 
 // Return thread (PRD §6.3): the area a visitor was last active in is remembered
 // CLIENT-side (never sent as identity — only as a transient viewport hint) so a
@@ -170,12 +177,13 @@ export function applyPan(wdx, wdy) {
 }
 export function startArrive(tx, ty) {
   arrive = { fromX: camera.x, fromY: camera.y, toX: tx, toY: ty, start: performance.now(), dur: 1200 };
+  panGlide = null; // an arrive supersedes any in-flight inertia glide (both animate the camera — they must not run together)
 }
-// Cancel any in-flight return-thread animation. Manual camera control (pan/zoom/pinch)
-// calls this so the soft-arrive doesn't fight the user's own movement. `arrive` is
-// module-private (an imported `let` is read-only at the import site), so client.js
-// clears it through this setter rather than assigning the binding.
-export function cancelArrive() { arrive = null; }
+// Cancel any in-flight camera AUTO-motion — the return-thread arrive AND the pan-inertia glide.
+// Manual camera control (pan/zoom/pinch/a new touch) calls this so neither fights the user's own
+// movement. Both are module-private (an imported `let` is read-only at the import site), so callers
+// clear them through this setter rather than assigning the bindings.
+export function cancelArrive() { arrive = null; panGlide = null; }
 export function updateArrive(now) {
   if (!arrive) return;
   const t = Math.min(1, (now - arrive.start) / arrive.dur), e = 1 - Math.pow(1 - t, 3);
@@ -183,6 +191,23 @@ export function updateArrive(now) {
   camera.y = arrive.fromY + (arrive.toY - arrive.fromY) * e;
   clampCam(); // a remembered home from before bounds existed (or a stranded one) is pulled back into the world
   if (t >= 1) arrive = null;
+}
+// Start a pan-inertia glide from a release velocity (world units/s). NaN-guarded (a degenerate
+// dt could produce a non-finite velocity, which would glide forever).
+export function startPanGlide(vx, vy) {
+  if (!Number.isFinite(vx) || !Number.isFinite(vy)) return;
+  panGlide = { vx, vy }; panGlideT = performance.now();
+}
+// Integrate the glide each frame: pan by velocity·dt (edge-resistance eases it to a stop at the
+// world edge), decay the velocity by friction, and rest once it slows below PAN_GLIDE_STOP.
+export function updatePanGlide(now) {
+  if (!panGlide) return;
+  const dt = Math.min(0.05, (now - panGlideT) / 1000); panGlideT = now;
+  if (dt <= 0) return;
+  applyPan(panGlide.vx * dt, panGlide.vy * dt);
+  const k = Math.pow(PAN_GLIDE_RETAIN, dt);
+  panGlide.vx *= k; panGlide.vy *= k;
+  if (Math.hypot(panGlide.vx, panGlide.vy) < PAN_GLIDE_STOP) panGlide = null;
 }
 
 // ---- load-time effects (run when this module is imported, before client.js's body) ----

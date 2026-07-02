@@ -7,7 +7,7 @@
 // the visibilitychange coordinator imports settleFlying; the bootstrap registers clearHold
 // into net via setOnClearHold. The session token + giantChime live here (input-only).
 import { canvas, camera, objects, lifts, S, mouseVelW, flying, swaying, creatureEvts } from './state.js';
-import { screenToWorld, applyPan, clampCam, zMin, ZMAX, Z0, cancelArrive, vw, vh } from './view.js';
+import { screenToWorld, applyPan, clampCam, zMin, ZMAX, Z0, cancelArrive, startPanGlide, vw, vh } from './view.js';
 import { creaturePos, posOf, objRadius, isMovable } from './draw.js';
 import { ema, flingStep } from './physics.js'; // hover/carry velocity EMA + the throw integrator (used by trackMouseHover + the fling)
 import { setLift, isLifted, LIFT_MS, SETTLE_MS, EASE_RISE, EASE_SETTLE } from './localfx.js';
@@ -23,10 +23,11 @@ const SLOP = 8;                              // px of movement that turns a tap 
 const HIT_MIN = 26;                          // min tap radius in CSS px (accessibility)
 const HIT_PAD = 3, HIT_GROW = 1.18;          // grab area modestly exceeds the drawn form — easy to grab, but not so greedy it steals pans
 const CARRY_SEND_MS = 50;                    // throttle for streaming a carried object
-const THROW_MIN = 180;                       // release speed (world units/s) below which a drag just places — no fling
-const THROW_FRICTION = 0.045;                // velocity retained per second mid-fling (fast, natural settle)
+const THROW_MIN = 140;                       // release speed (world units/s) below which a drag just places — no fling (lowered: a gentler toss now flings)
+const THROW_FRICTION = 0.08;                 // velocity retained per second mid-fling (a touch more glide → more momentum, still a calm settle)
 const THROW_STOP = 28;                        // a fling settles to a place once it slows below this (wu/s)
 const THROW_MAX = 1600;                       // cap the launch speed so a hard flick can't hurl a thing across the world
+const PAN_MIN = 170;                          // release speed (world u/s) below which a pan just stops — no inertia glide
 const ATTEND_MS = 450;                        // long-press dwell before an object is "attended" (PRD §5.2)
 const DBLTAP_MS = 320;                        // two taps on a stone within this BREAK it into smaller stones
 const SWAY_IMPULSE = 0.0011;                   // how much a px of drag feeds the lean
@@ -45,6 +46,7 @@ export let attendId = null; // the object currently under attention (hover/long-
 // Anomaly-dissolve timings owned here (updateDissolve lives in this module); client.js imports them.
 export const ANOM_DISSOLVE_MS = 10000, ANOM_FADE_MS = 3000; // hold an anomaly 10s → it fades from your hands over the last 3s
 let flingVel = { x: 0, y: 0 }, lastCarryPos = null, lastCarryT = 0;
+let panVel = { x: 0, y: 0 }, lastPanT = 0; // pan velocity (world u/s, ema-smoothed) for release-inertia
 let _lastFlingT = 0, _flyCarryAt = 0; // updateFlying's per-frame throttle anchors
 let lpTimer = null, lpFired = false;   // long-press arming (touch)
 let befriendTrack = null, befriendSince = 0, befriendSent = false;
@@ -215,6 +217,10 @@ function endPointer(e) {
     }
     grab = null;                                          // a single tap does nothing (no sticky pickup)
   } else {
+    // a single-finger PAN release: if it was still flicking (recent + fast), glide on with momentum
+    if (moved && !multiTouched && (performance.now() - lastPanT) < 100 && Math.hypot(panVel.x, panVel.y) > PAN_MIN) {
+      startPanGlide(panVel.x, panVel.y);
+    }
     grab = null;
   }
   if (e.pointerType !== 'mouse') attendId = null; // touch attend ends on release (a mouse keeps hovering)
@@ -275,6 +281,8 @@ canvas.addEventListener('pointerdown', (e) => {
   canvas.setPointerCapture(e.pointerId);
   pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, maxMove: 0 });
   attendId = null; clearLongPress(); lpFired = false;   // any press interrupts a hover/long-press
+  cancelArrive();                                        // a new touch stops any camera auto-motion (arrive OR pan-inertia glide)
+  panVel.x = 0; panVel.y = 0; lastPanT = 0;              // fresh pan-velocity for a possible new pan
   if (pointers.size >= 2) {                              // second finger → pinch-zoom + two-finger pan
     multiTouched = true; grab = null;
     if (holdMode === 'drag') placeHold();                // a second finger sets a dragged thing down
@@ -328,6 +336,12 @@ canvas.addEventListener('pointermove', (e) => {
     else { beginHold(o, 'drag', { x: grab.ox, y: grab.oy }); carryTo(e.clientX, e.clientY); }
   } else if (!grab && p.maxMove > SLOP) {                // empty ground or a rooted tree → pan
     if (S.swayId) { const o = objects.get(S.swayId); if (o) { o._bendV = (o._bendV || 0) + dx * SWAY_IMPULSE; swaying.add(S.swayId); } } // lean the pressed tree with the drag
+    const tp = performance.now();                         // track pan velocity (world u/s) for release-inertia
+    if (lastPanT) { const dtp = (tp - lastPanT) / 1000; if (dtp > 0.001) {
+      panVel.x = ema(panVel.x, (-dx / camera.z) / dtp, 0.4);
+      panVel.y = ema(panVel.y, (-dy / camera.z) / dtp, 0.4);
+    } }
+    lastPanT = tp;
     applyPan(-dx / camera.z, -dy / camera.z); cancelArrive();
   }
 });

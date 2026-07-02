@@ -18,7 +18,7 @@ import { attendId, clearHold, updateBefriend, updateDissolve, updateFlying, sett
 import { send, connect, setOnClearHold } from './net.js'; // WS connect/reconnect/send + the 9 message handlers + presence (4.14b)
 import { setLift, liftValue, isLifted, updateLifts, updateGrowth, updatePositions, updateNudge, updateCollision, updateSway, updateLeaves, drawLeaves, drawCreatureEvts, GIANT_VIS_SPEED, LIFT_MS, SETTLE_MS, EASE_RISE, EASE_SETTLE } from './localfx.js'; // lift anim + per-frame cosmetic-fx passes (4.14e) // the wire single-source (2.6) — client now sends IN.* / switches on OUT.* (string-identical to the old raw types)
 import { canvas, ctx, camera, objects, presences, lifts, flashes, ripples, feedRushes, grits, creatureEvts, giantFootprints, flying, swaying, mouseVelW, S } from './state.js'; // shared client state (4.14 mirror)
-import { screenToWorld, worldToScreen, viewHalf, poolOnScreen, camLimits, zMin, clampCam, applyPan, startArrive, updateArrive, cancelArrive, saveHome, adaptQuality, setQTier, qStats, resize, queueResize, dpr, vw, vh, Q, home, Z0, ZMIN, ZMAX } from './view.js'; // camera/transforms/sizing/quality (4.14 mirror)
+import { screenToWorld, worldToScreen, viewHalf, poolOnScreen, camLimits, zMin, clampCam, applyPan, startArrive, updateArrive, updatePanGlide, cancelArrive, saveHome, adaptQuality, setQTier, qStats, resize, queueResize, dpr, vw, vh, Q, home, Z0, ZMIN, ZMAX } from './view.js'; // camera/transforms/sizing/quality (4.14 mirror)
 
 // ---- tuning constants -------------------------------------------------------
 // Z0/ZMIN/ZMAX (zoom range) now live in view.js (imported above).
@@ -202,6 +202,7 @@ function frame(now) {
   updateDissolve(now);
   updateBefriend(now); // steady attention on a creature bonds it to you (come-back hook)
   updateArrive(now);
+  updatePanGlide(now); // pan inertia: a flicked pan keeps gliding, decaying to rest
   clampCam(); // backstop: keep the camera in bounds across resize / a shrinking world bound
   if (showTrace) { const t = performance.now(); _tr.updates += t - _tm; _tm = t; }
 
