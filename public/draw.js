@@ -10,7 +10,7 @@
 // lives on S so the cull pass (client.js) and these readers share it by reference.
 import { ctx, camera, feedRushes, S } from './state.js';
 import { Q, dpr } from './view.js';
-import { SPROUT_C, BIG_TREE_MAT, shownMat, shownAged, formOf } from './forms.js'; // per-family FORM.draw dispatch owns the primitives now (4.14d.2)
+import { SPROUT_C, BIG_TREE_MAT, shownMat, shownAged, formOf, drawRoots } from './forms.js'; // per-family FORM.draw dispatch owns the primitives now (4.14d.2)
 import { getPlantSprite } from './spritecache.js'; // Stage B: cache the static plant-canopy render (blit vs re-stroke)
 import { wanderAt, creatureR } from './creatures.js';
 import { deflectCircles } from './physics.js';
@@ -142,7 +142,7 @@ function drawObjectWorld(o) {
   // sub-pixel floor (a thing under ~1.5px is invisible anyway). Anomalies/fish/giant: always full.
   if (!formOf(o.family).alwaysFull) { // anomalies/fish/giant always draw full (never LOD-blobbed)
     const px = rad * camera.z;
-    if (px < 1.5 || (S.frameLodCut > 0 && px < S.frameLodCut)) { drawLOD(o, cx, cy, rad); return; }
+    if (px < 1.5 || (S.frameLodCut > 0 && px < S.frameLodCut)) { _ds.blob++; drawLOD(o, cx, cy, rad); return; }
   }
   if (Q.shadows) paintGroundShadow(o, cx, cy, rad);
   // Sprite cache (Stage B): a mid-maturity plant's canopy is a static ~590-stroke form — blit a
@@ -151,14 +151,30 @@ function drawObjectWorld(o) {
   // handoff, or when the cache defers/declines this frame (bake budget / oversize).
   if (o.family === 'seed' && camera.z <= SPRITE_Z_MAX) {
     const mat = shownMat(o);
-    if (mat >= SPROUT_C && mat < BIG_TREE_MAT && blitPlantSprite(o, cx, cy, ds, mat)) return;
+    if (mat >= SPROUT_C) { // ALL sprouted plants cache their canopy — incl. big rooted trees (the
+      // dominant zoom-out cost in a mature world: they were re-stroking drawPlant live every frame).
+      if (mat >= BIG_TREE_MAT && rad * camera.z > 5) { // roots drawn LIVE + unbent (must not sway); skip when sub-pixel (zoomed out)
+        ctx.save(); ctx.translate(cx, cy); if (ds !== 1) ctx.scale(ds, ds); drawRoots(ctx, o.seed >>> 0, 0, 0, mat); ctx.restore();
+      }
+      if (blitPlantSprite(o, cx, cy, ds, mat)) { _ds.sprite++; return; }
+      // Sprite not ready this frame (bake budget spent / oversize): draw the CHEAP LOD blob (~1µs),
+      // NOT the ~590-stroke live drawPlant (~90µs). It pops to the full sprite once baked (a few
+      // frames). This caps a plant's per-frame cost so a cold/churning cache can't collapse the
+      // frame-rate into a feedback loop (slow fps → slow warmup → slower fps). Key zoom-out win.
+      _ds.plantMiss++; drawLOD(o, cx, cy, rad); return;
+    }
   }
+  _ds.paint++;
   if (ds === 1) { paintObject(o, cx, cy, ang); return; }
   ctx.save();
   ctx.translate(cx, cy); ctx.scale(ds, ds); ctx.translate(-cx, -cy); // scale about the object's base point
   paintObject(o, cx, cy, ang);
   ctx.restore();
 }
+// Per-frame draw-path tally (perftrace diagnosis): sprite-blit vs plant-cache-MISS (fell to live
+// drawPlant, ~590 strokes) vs LOD blob vs other full paintObject. drawStats() reads + resets it.
+const _ds = { sprite: 0, plantMiss: 0, blob: 0, paint: 0 };
+export function drawStats() { const s = { ..._ds }; _ds.sprite = _ds.plantMiss = _ds.blob = _ds.paint = 0; return s; }
 // Blit the cached canopy sprite at (cx,cy), composing the per-frame transforms at BLIT time: the
 // sway `bend` rotates about the base (uniform scale + rotation commute, so the order vs depthScale
 // is free), depth `ds` scales about the base. Returns false (→ draw live) if no sprite is available.

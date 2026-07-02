@@ -11,7 +11,7 @@ import { flingStep, ema, nudge, spring, deflectCircles } from './physics.js';
 import { wanderAt, drawCreature, creatureR, drawFish, fishR } from './creatures.js';
 import { drawGiant } from './giant.js';
 import { SPROUT_C, BIG_TREE_MAT, GIANT_R, shownMat, shownAged, stoneSize, stoneGeom, anomalyR, crystalR, formOf } from './forms.js';
-import { objRadius, isMovable, creaturePos, posOf, drawMark, drawObjectWorld, drawHeldScreen, paintAttend, SPRITE_Z_MAX, FISH_SWIM_SPEED, FEED_RELEASE, FEED_RUSH_CAP_MS } from './draw.js'; // ctx-coupled object paint dispatch + position/geometry readers (4.14d)
+import { objRadius, isMovable, creaturePos, posOf, drawMark, drawObjectWorld, drawHeldScreen, paintAttend, drawStats, SPRITE_Z_MAX, FISH_SWIM_SPEED, FEED_RELEASE, FEED_RUSH_CAP_MS } from './draw.js'; // ctx-coupled object paint dispatch + position/geometry readers (4.14d)
 import { spriteStats } from './spritecache.js'; // Stage B plant-canopy sprite cache — stats for the perf HUD
 import { IN, OUT } from './shared/protocol.js';
 import { attendId, clearHold, updateBefriend, updateDissolve, updateFlying, settleFlying } from './input.js'; // pointer/gesture/hold/throw/attend/befriend (4.14f)
@@ -73,6 +73,11 @@ const ACT_COLOR = { feed: 'rgba(150,210,120,0.95)', drink: 'rgba(130,190,235,0.9
 // "tier dropped" vs "genuinely over budget". Off by default; ?perf=1 or press 'p'. To
 // force full detail while testing, pin the tier with ?q=0 (see view.js adaptQuality).
 let showPerf = new URLSearchParams(location.search).has('perf');
+// PERF TRACE (deep diagnosis): ?perftrace=1 accumulates per-pass wall-time and console.logs the
+// averaged breakdown every 30 frames — to find WHICH pass dominates a slow frame (e.g. a dense
+// zoomed-out view). Near-zero overhead when off.
+const showTrace = new URLSearchParams(location.search).has('perftrace');
+const _tr = { updates: 0, backdrop: 0, cull: 0, sort: 0, drawObj: 0, overlay: 0, tail: 0, total: 0, n: 0, sprite: 0, plantMiss: 0, blob: 0, paint: 0 };
 addEventListener('keydown', (e) => {
   if (e.key === 'f' || e.key === 'F') showFocus = !showFocus;
   else if (e.key === 'p' || e.key === 'P') showPerf = !showPerf;
@@ -183,6 +188,7 @@ document.addEventListener('visibilitychange', () => {
 // ---- render loop ------------------------------------------------------------
 const bgSeed = PG.seedFrom('drift-ground');
 function frame(now) {
+  let _tm = showTrace ? performance.now() : 0; const _t0 = _tm;
   adaptQuality(qPrevNow ? now - qPrevNow : 16.7, now); qPrevNow = now; // measure + maybe shed/restore detail
   S.animT = now / 1000;
   updateLifts(now);
@@ -197,6 +203,7 @@ function frame(now) {
   updateBefriend(now); // steady attention on a creature bonds it to you (come-back hook)
   updateArrive(now);
   clampCam(); // backstop: keep the camera in bounds across resize / a shrinking world bound
+  if (showTrace) { const t = performance.now(); _tr.updates += t - _tm; _tm = t; }
 
   // background (screen space) — world-locked objects pan over a near-fixed backdrop,
   // which reads as subtle parallax depth. Ground + glows are pre-baked buffers (A3): a
@@ -205,6 +212,7 @@ function frame(now) {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   paintGlowsBuffered(ctx, vw, vh, dpr, bgSeed, -camera.x * camera.z * GLOW_PARALLAX, -camera.y * camera.z * GLOW_PARALLAX); // ambient glows — always on (a clamped blit of the baked glow field); parallax drift
   paintNoise(ctx, vw, vh, bgSeed + 1); // the ground GRAIN — always on (a cached blit): the backdrop's texture must never pop in/out with the quality tier
+  if (showTrace) { const t = performance.now(); _tr.backdrop += t - _tm; _tm = t; }
 
   // objects (world space) — single matrix folds dpr + zoom + pan
   ctx.setTransform(dpr * camera.z, 0, 0, dpr * camera.z,
@@ -262,6 +270,7 @@ function frame(now) {
     ge._sortY = G.y; ge._depthScale = depthScaleAt(gs.y);
     list.push(ge);
   }
+  if (showTrace) { const t = performance.now(); _tr.cull += t - _tm; _tm = t; }
   // LOD-by-LOAD: if more objects are visible than the detail budget, LOD the smallest-on-
   // screen overflow (find the budget-th largest size → cut below it). Under budget → 0 → all
   // full detail, however small. So chunkiness is purely a function of on-screen count (cost).
@@ -273,6 +282,7 @@ function frame(now) {
   }
   // painter's depth by ground line; ties broken by id for a stable, deterministic order
   list.sort((a, b) => (a._sortY - b._sortY) || (a.id < b.id ? -1 : 1));
+  if (showTrace) { const t = performance.now(); _tr.sort += t - _tm; _tm = t; }
   // attend (§5.2): ease the reveal in/out and bloom it behind the attended object
   attendT += ((attendId ? 1 : 0) - attendT) * 0.14;
   if (attendT > 0.01 && attendId) { const ao = objects.get(attendId); if (ao && !isLifted(ao.id)) paintAttend(ao, attendT); }
@@ -286,6 +296,7 @@ function frame(now) {
   }
   if (Q.leaves) drawLeaves(); // cosmetic drifting litter, above the objects (Wave F)
   drawCreatureEvts(now); // brief birth/death cues (world space)
+  if (showTrace) { const t = performance.now(); _tr.drawObj += t - _tm; _tm = t; }
 
   aDensity = list.length; // objects on screen — feeds the ambient sound's richness
 
@@ -370,6 +381,7 @@ function frame(now) {
     ctx.restore();
   }
   for (let i = feedRushes.length - 1; i >= 0; i--) { const fr = feedRushes[i]; if (now - fr.start > Math.min(FEED_RUSH_CAP_MS, (fr.eatT + FEED_RELEASE) * 1000)) feedRushes.splice(i, 1); } // expire once the bug is eaten + the fish have eased back
+  if (showTrace) { const t = performance.now(); _tr.overlay += t - _tm; _tm = t; }
 
   // FOCUS LABELS (debug): the world's only text — a small word under each on-screen creature
   // naming its current focus (feed/drink/rest/roam/follow). Screen space, so zoom-independent.
@@ -419,6 +431,16 @@ function frame(now) {
   // one of the costliest things on a weak GPU.
   const sat = Q.sat ? seasonSat(S.seasonPhase) : 1;
   if (Math.abs(sat - lastSat) > 0.001) { canvas.style.filter = sat < 0.999 ? `saturate(${sat.toFixed(3)})` : 'none'; lastSat = sat; }
+
+  if (showTrace) {
+    const t = performance.now(); _tr.tail += t - _tm; _tr.total += t - _t0; _tr.n++;
+    const s = drawStats(); _tr.sprite += s.sprite; _tr.plantMiss += s.plantMiss; _tr.blob += s.blob; _tr.paint += s.paint;
+    if (_tr.n >= 30) {
+      const p = (k) => (_tr[k] / _tr.n).toFixed(1);
+      console.log(`[perftrace] on-screen ${list.length} | total ${p('total')}ms = updates ${p('updates')} + backdrop ${p('backdrop')} + cull ${p('cull')} + sort ${p('sort')} + drawObj ${p('drawObj')} + overlay ${p('overlay')} + tail ${p('tail')}  ||  per-frame draws: sprite ${p('sprite')} + plantMISS ${p('plantMiss')} + blob ${p('blob')} + paint ${p('paint')}`);
+      for (const k in _tr) _tr[k] = 0;
+    }
+  }
 
   requestAnimationFrame(frame);
 }

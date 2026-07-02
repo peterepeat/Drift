@@ -89,7 +89,7 @@ const drawAnomalyForm = (ctx, o, t, cx, cy, R) => {
 // Roots for the biggest plants (rooted immovable, maturity ≥ BIG_TREE_MAT): short tapering
 // tendrils splaying from the base across the ground plane (vertically compressed, like the
 // contact shadow), so it READS why the tree won't be lifted. Deterministic from seed.
-const drawRoots = (ctx, seed, cx, cy, mat) => {
+export const drawRoots = (ctx, seed, cx, cy, mat) => {
   const r = PG.rng((seed ^ 0x9b7c3) >>> 0);
   const n = 4 + Math.floor(r() * 3);                 // 4..6 surface roots
   const reach = 12 + mat * 28;                        // grows with the tree

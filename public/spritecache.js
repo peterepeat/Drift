@@ -27,8 +27,9 @@ import * as PG from './drift-procgen.js';
 
 const MAT_BUCKETS = 20, AGED_BUCKETS = 8; // floor-quantization steps (mat aligned to maxDepth regimes)
 const SPRITE_BAKE_Z = 1.4;   // bake-resolution CAP (px/world-unit = dpr*this); also the sprite↔live handoff
-const MAX_SPRITE_PX = 1024;  // a sprite larger than this on a side → return null (caller draws live)
-const BAKES_PER_FRAME = 6;   // cap fresh bakes/frame so panning into new grove can't hitch
+const MAX_SPRITE_PX = 1200;  // a sprite larger than this on a side → return null (caller draws live). Sized so the
+                             // biggest fully-mature tree at the z=1.4 handoff (dpr2 → ~1027px) still caches, not just below.
+const BAKES_PER_FRAME = 10;  // cap fresh bakes/frame so panning/zoom into new grove can't hitch (the blob-fallback covers the rest until baked)
 
 // Resolution-MATCH the bake to the on-screen zoom: bake ~display-resolution, NOT world-resolution,
 // so a zoomed-OUT grove (trees shown at ~20px) bakes tiny sprites instead of world-res ones that peg
@@ -40,12 +41,12 @@ function bakeZoom(z) {
   const zc = z > SPRITE_BAKE_Z ? SPRITE_BAKE_Z : z < 0.25 ? 0.25 : z;
   return Math.pow(2, Math.round(Math.log2(zc) * 2) / 2); // √2 steps
 }
-// Plant bbox from the base point as multiples of baseLen. A 90-seed-per-bucket sweep found worst
-// extents of up ~3.79× and half ~2.56× baseLen within the cached mat<0.8 range (the 10-seed sample
-// under-counted the widest fans at 2.21×); these factors add ~7-15% headroom over that so no branch
-// tip clips, incl. rarer outliers. Nothing renders below the base (canopy grows up), so DOWN is a
-// small fixed pad for the base stroke width.
-const UP_F = 4.35, HALF_F = 2.8, DOWN_WU = 8;
+// Plant bbox from the base point as multiples of baseLen. Seed sweeps (80-160/bucket) found worst
+// extents of up ~4.07× and half ~2.56× baseLen across the FULL cached range now (mat up to ~1.0,
+// since big trees are cached too); these factors add ~10-15% headroom so no branch tip clips even
+// for the widest/tallest mature outliers. Nothing renders below the base (canopy grows up), so DOWN
+// is a small fixed pad for the base stroke width.
+const UP_F = 4.5, HALF_F = 3.0, DOWN_WU = 8;
 
 let _cap = 96 * 1024 * 1024;             // total sprite-bytes cap (tier-tunable via setSpriteCap)
 let _bytes = 0;
