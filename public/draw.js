@@ -23,7 +23,7 @@ export const FEED_RUSH_CAP_MS = 5000; // hard cap on a feed-rush (safety; normal
 const GLOW_SEC = 180;               // glow-buff duration in seconds (mirror server GLOW_MS)
 const MARK_SIZE = 24;               // ground-mark footprint (world units) — small, rock-shaped
 const MARK_TINT = '#d3c6ab';        // pale warm stain — a drawn mark visible on the dark ground
-export const SPRITE_Z_MAX = 1.8;    // above this zoom, draw plants LIVE (few visible when zoomed in; crispness wins) — see spritecache.js
+export const SPRITE_Z_MAX = 1.4;    // above this zoom, draw plants LIVE (few visible when zoomed in; crispness wins). = the sprite bake-res cap, so sprites are always crisp + the handoff is seamless — see spritecache.js
 
 function syncedT() { return (Date.now() + S.clockSkew) / 1000; }
 function creatureWarpT(o, t) {
@@ -163,7 +163,7 @@ function drawObjectWorld(o) {
 // sway `bend` rotates about the base (uniform scale + rotation commute, so the order vs depthScale
 // is free), depth `ds` scales about the base. Returns false (→ draw live) if no sprite is available.
 function blitPlantSprite(o, cx, cy, ds, mat) {
-  const sp = getPlantSprite(o.seed >>> 0, mat, shownAged(o), dpr, S.animT);
+  const sp = getPlantSprite(o.seed >>> 0, mat, shownAged(o), dpr, camera.z, S.animT);
   if (!sp) return false;
   const bend = o._bend || 0;
   // Size-correct: the canopy is baked at the bucket's maturity, so scale the blit by the ratio of

@@ -26,9 +26,20 @@
 import * as PG from './drift-procgen.js';
 
 const MAT_BUCKETS = 20, AGED_BUCKETS = 8; // floor-quantization steps (mat aligned to maxDepth regimes)
-const SPRITE_BAKE_Z = 1.4;   // bake at dpr*this px/world-unit → crisp up to ~this zoom
+const SPRITE_BAKE_Z = 1.4;   // bake-resolution CAP (px/world-unit = dpr*this); also the sprite↔live handoff
 const MAX_SPRITE_PX = 1024;  // a sprite larger than this on a side → return null (caller draws live)
 const BAKES_PER_FRAME = 6;   // cap fresh bakes/frame so panning into new grove can't hitch
+
+// Resolution-MATCH the bake to the on-screen zoom: bake ~display-resolution, NOT world-resolution,
+// so a zoomed-OUT grove (trees shown at ~20px) bakes tiny sprites instead of world-res ones that peg
+// the cache and thrash (the zoom-out regression). Quantize z to √2 multiplicative buckets in
+// [0.25, SPRITE_BAKE_Z] → a sprite is always within ~19% of the display resolution (crisp) while the
+// zoom dimension adds only ~5 buckets to the key. Capped at SPRITE_BAKE_Z (zoom-IN past the caller's
+// SPRITE_Z_MAX draws live-vector); floored so tiny sprites keep some resolution.
+function bakeZoom(z) {
+  const zc = z > SPRITE_BAKE_Z ? SPRITE_BAKE_Z : z < 0.25 ? 0.25 : z;
+  return Math.pow(2, Math.round(Math.log2(zc) * 2) / 2); // √2 steps
+}
 // Plant bbox from the base point as multiples of baseLen. A 90-seed-per-bucket sweep found worst
 // extents of up ~3.79× and half ~2.56× baseLen within the cached mat<0.8 range (the 10-seed sample
 // under-counted the widest fans at 2.21×); these factors add ~7-15% headroom over that so no branch
@@ -51,13 +62,14 @@ function evictLRU() {
   _bytes -= _cache.get(oldK).bytes; _cache.delete(oldK);
 }
 
-// Return the cached canopy sprite {canvas, half, up, K} for a plant, or null if it should be drawn
-// live THIS frame (bake budget exhausted, or the sprite would be too large). `dpr` folds into the
-// bake scale K; `nowStamp` is any per-frame-unique value (resets the bake budget on a new frame).
-export function getPlantSprite(seed, mat, aged, dpr, nowStamp) {
+// Return the cached canopy sprite {canvas, half, up, K, bakeMat} for a plant, or null if it should be
+// drawn live THIS frame (bake budget exhausted, or the sprite would be too large). `dpr` and the
+// zoom `z` set the bake resolution K (display-matched); `nowStamp` is any per-frame-unique value
+// (resets the bake budget on a new frame).
+export function getPlantSprite(seed, mat, aged, dpr, z, nowStamp) {
   if (nowStamp !== _frameT) { _frameT = nowStamp; _bakesThisFrame = 0; } // new frame → reset the bake budget
   const mb = Math.floor(mat * MAT_BUCKETS), ab = Math.floor(aged * AGED_BUCKETS);
-  const K = dpr * SPRITE_BAKE_Z;
+  const K = dpr * bakeZoom(z); // resolution matched to the display zoom (a zoomed-out grove bakes small, not world-res)
   const key = seed + '|' + mb + '|' + ab + '|' + K;
   let e = _cache.get(key);
   if (e) { e.used = ++_tick; return e; }
