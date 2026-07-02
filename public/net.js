@@ -90,6 +90,11 @@ function onMessage(raw) {
     case OUT.OBJECT_STATE: {
       const o = objects.get(m.id);
       if (!o) break; // unknown (already dissolved) — ignore
+      // A locally-flung object (in `flying`) is CLIENT-authoritative until it settles: updateFlying
+      // computes its arc + streams CARRY. Applying the server's (lagging) echo of our own CARRY here
+      // would snap its position back and/or clear o.held — and a cleared o.held makes updateFlying drop
+      // it. That's why a thrown object "just dropped" despite the fling firing. Ignore it until it lands.
+      if (flying.has(m.id)) break;
       const wasHeld = o.held;
       // A small move on a free object is water-drift — ease it (no pop), like growth.
       // Larger jumps (place, initial) snap. Held objects always snap.

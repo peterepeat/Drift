@@ -283,6 +283,7 @@ function updateFlying(now) {
     } else if (sendNow) {
       send({ t: IN.CARRY, id, token, x: o.x, y: o.y, ts: Date.now() });
     }
+    if (throwDbg) showThrowDbg(`FLYING  pos(${o.x.toFixed(0)},${o.y.toFixed(0)})  v ${Math.hypot(f.vx, f.vy).toFixed(0)}  held ${o.held}`);
   }
   if (sendNow) _flyCarryAt = now;
 }
