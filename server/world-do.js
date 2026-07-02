@@ -124,6 +124,7 @@ const ANOMALY_SEASONS = { growing: true, rising: true }; // "new creation possib
 const ANOMALY_RADIUS = 200;               // world units an anomaly influences
 const ANOMALY_GROW_BOOST = 0.02;          // extra maturity/tick for seeds near an anomaly
 const ANOMALY_AGE_SLOW = 0.4;             // aging multiplier near an anomaly (slows decay)
+const ANOMALY_SHED_RELAX = 0.35;          // near an anomaly, density-suppression is cut to this fraction → plants pack denser into a "sacred grove" around the wonder (idea #4). Still bounded by maxObjects + the ceiling-trim pass.
 // ---- anomaly POWERS (Wave R): drop an anomaly on a plant, or a plant on an anomaly,
 // and the anomaly works a power on the plant — NON-uniform by kind. The anomaly is NOT
 // consumed (it persists, a reusable wonder). Life-giving kinds RIPEN a seed/leaf into a
@@ -1310,7 +1311,8 @@ export class WorldRoom {
           o.shedAccum += 1;
           if (o.shedAccum >= SHED_TICKS && this.objects.size + ctx.spawned.length < this.maxObjects) {
             o.shedAccum = 0; // reset whether or not it sheds — a crowded plant simply waits another cycle (no burst when the patch later clears)
-            if (Math.random() >= this.#shedSuppression(o)) ctx.spawn(this.#shed(o, now));
+            if (Math.random() >= this.#shedSuppression(o) * (nearAnomaly ? ANOMALY_SHED_RELAX : 1)) ctx.spawn(this.#shed(o, now)); // near a wonder, crowding relaxes → a denser grove forms
+
           }
         }
         if (o.aged >= 1) {                  // dissolve: release final seeds, then gone

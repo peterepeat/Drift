@@ -129,6 +129,23 @@ const wc1 = creatures(await snap()).find((o) => o.id === wc.creature.id);
 const warmAfter = SPOT.x + 500 - wc1.x;
 check(warmAfter < warmBefore - 60, `a roaming creature drifts toward left-behind warmth (east gap ${warmBefore.toFixed(0)}u -> ${warmAfter.toFixed(0)}u)`);
 
+// 8d. ANOMALY HUBS (idea #4): a roaming creature drifts toward a nearby WONDER, so anomalies become
+// felt gathering-places. Spawn an anomaly at a pond-free spot, clear feed/rest targets around a
+// creature placed ~600u east of it, and it eases west toward the wonder during its roam phase.
+const anom = (x, y, kind) => fetch(`${base}/admin/anomaly?x=${x}&y=${y}&kind=${kind}`, { method: 'POST', headers: key }).then((r) => r.json());
+const AX = 1500, AY = 1400;                              // >SEEK_R (720u) from every pond rim
+await anom(AX, AY, 'point');
+const CX = AX + 600, CY = AY;                            // creature 600u east of the wonder (within SEEK_R=720)
+const preA = await snap();
+for (const o of preA.objects) { if ((o.family === 'seed' || o.family === 'stone') && Math.hypot(o.x - CX, o.y - CY) < 1000) await place(o.id, 9200, 9200); }
+const ac = await spawn('crawler', CX, CY);
+const ac0 = creatures(await snap()).find((o) => o.id === ac.creature.id);
+const anomBefore = ac0.x - AX;                           // signed east-gap to the wonder
+await tickG(30);
+const ac1 = creatures(await snap()).find((o) => o.id === ac.creature.id);
+const anomAfter = ac1.x - AX;
+check(anomAfter < anomBefore - 60, `a roaming creature drifts toward a nearby wonder (east gap ${anomBefore.toFixed(0)}u -> ${anomAfter.toFixed(0)}u)`);
+
 // 9. ANTI-CROWD: a tight pile of creatures spreads into a scatter (no dense blob). Far
 // out (-9000) so the only creatures here are ours; same-species so no clashes scatter them.
 const PILE = { x: -9000, y: -9000 }, NPILE = 16, pileIds = [];

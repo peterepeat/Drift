@@ -79,6 +79,7 @@ const looseGive = (o) => (shownMat(o) < SPROUT_C ? 0.8 : 0);
 // A plain anomaly draws its one kind; a fused hybrid layers each constituent kind (offset
 // in time + slightly shrunk, translucent) so its form reads as a luminous blend.
 const drawAnomalyForm = (ctx, o, t, cx, cy, R) => {
+  PG.drawAnomalyHalo(ctx, t, cx, cy, R);   // the wonder's field of influence, made visible (once per anomaly, under the bright core)
   const kinds = (o.kinds && o.kinds.length) ? o.kinds : [o.kind || 'breath'];
   if (kinds.length === 1) { PG.drawAnomaly(ctx, kinds[0], t, cx, cy, R); return; }
   ctx.save();

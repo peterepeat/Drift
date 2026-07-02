@@ -43,6 +43,7 @@ const CURIOSITY_STANDOFF = 95;            // it stops this far off (curious, not
 const CREATURE_FOLLOW_R = 1500;           // a bonded creature follows a person within this (beyond it, it just stays put + lives — no snap)
 const CREATURE_FOLLOW_STANDOFF = 70;      // ...and settles this close to its person
 const CREATURE_FOLLOW_STEP = 130;         // home units it closes toward its person per tick (≈3× a normal drive step — keeps up, but at its own pace, not glued)
+const ANOMALY_STANDOFF = 130;             // a roaming creature drawn to a wonder rings it this far off (inside its ~200u halo, not piled on its centre) — anomalies become felt hubs where life gathers (idea #4)
 const GRAZE_CHANCE = 0.5;                 // per-tick chance a FED creature (arrived at its plant) shows a visible nibble — seeded per (creature,tick), NOT global RNG (keeps the tick's RNG stream byte-identical)
 const GRAZE_CUES_MAX = 24;                // cap graze cues per tick (bounds the wire chatter — the effect stays calm/legible, never a flood)
 const WARM_SEEK_EPS = 0.06;               // a neighbouring cell must be at least this much warmer than HERE for a roaming creature to drift toward it (below → the field is flat/noise → free wander). Makes the warmth people LEAVE visibly gather life.
@@ -169,6 +170,10 @@ export class CreatureManager {
     if (drive === 'roam') {                            // a free-wander phase — but if someone is lingering nearby, amble over to them
       const p = this.world.nearestPresence(c.x, c.y, CURIOSITY_R);
       if (p) { const dx = c.x - p.x, dy = c.y - p.y, d = Math.hypot(dx, dy) || 1; return { x: p.x + (dx / d) * CURIOSITY_STANDOFF, y: p.y + (dy / d) * CURIOSITY_STANDOFF }; } // mill a little way off, curious
+      // a nearby WONDER draws roaming life toward it — anomalies become felt hubs where creatures gather
+      // (idea #4). Anomalies are rare (≤4 world-wide), so this is a gentle, occasional pull, not a stampede.
+      const an = this.world.gridNearest(c.x, c.y, this.tune.SEEK_R, (a) => a.family === 'anomaly' && a.held === '');
+      if (an) { const dx = c.x - an.x, dy = c.y - an.y, d = Math.hypot(dx, dy) || 1; return { x: an.x + (dx / d) * ANOMALY_STANDOFF, y: an.y + (dy / d) * ANOMALY_STANDOFF }; }
       // no one lingering in sight → drift toward the WARMTH people have left (the heat field decays
       // over ~an hour, so life visibly gathers at tended spots even after you leave) — idea #1.
       const here = this.world.heatAt(c.x, c.y); let bh = here + WARM_SEEK_EPS, bx = 0, by = 0;

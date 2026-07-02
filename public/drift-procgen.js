@@ -311,6 +311,16 @@ export function drawWaterPatch(ctx, seed, w, h, t = 0) {
 // Rare, beautiful, unlike the other families. No lifecycle — they persist
 // until deliberately dissolved. Four committed directions. t is seconds.
 // =============================================================================
+// The wonder's FIELD made visible: a large, soft, slow-breathing halo out to ~the influence radius
+// (~200wu) so an anomaly reads as a PLACE of quiet power where life gathers — not just a small bright
+// icon. Drawn once per anomaly (see forms.drawAnomalyForm), additive + very low alpha so it stays calm.
+export function drawAnomalyHalo(ctx, t, cx, cy, R) {
+  const hb = 0.6 + 0.4 * Math.sin(t * 0.7), hr = R * 6.5;   // ~195wu at a base R≈30; a fused (bigger R) wonder glows wider
+  const g = ctx.createRadialGradient(cx, cy, R * 0.5, cx, cy, hr);
+  g.addColorStop(0, rgba('#ffe9b8', 0.10 * hb)); g.addColorStop(0.5, rgba('#ffe9b8', 0.045 * hb)); g.addColorStop(1, rgba('#ffe9b8', 0));
+  ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(cx, cy, hr, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+}
 export function drawAnomaly(ctx, kind, t, cx, cy, R) {
   ctx.save(); ctx.translate(cx, cy);
   if (kind === 'rotor') {                                  // a slowly rotating geometric form
