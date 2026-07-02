@@ -28,6 +28,7 @@ export const feedRushes = [];         // a pond's fish swim over to eat a droppe
 export const grits = [];              // brief stone-to-grit scatters { x, y, seed, r, start }
 export const creatureEvts = [];       // brief birth-shimmer / death-puff cues { x, y, start, birth }
 export const giantFootprints = [];    // fading prints the journeyer leaves as it walks { x, y, start }
+export const worldEvts = [];          // wordless "something happened HERE" cues { x, y, start, kind } — kind: 'tend'(gardener) | 'graze'(creature fed) | 'bloom'(communion); makes hidden interactions legible
 
 // shared cross-module refs (input WRITES, localfx READS — by-reference so no circular
 // import). flying: thrown objects gliding free of the pointer (input arms, localfx eases +

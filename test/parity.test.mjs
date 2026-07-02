@@ -58,10 +58,11 @@ check(MSG.PICKUP === 'pickup' && MSG.CARRY === 'carry' && MSG.PLACE === 'place' 
   'every inbound wire string is pinned to its literal value (the client sends these verbatim)');
 check(MSG.WORLD_STATE === 'world_state' && MSG.WORLD_PATCH === 'world_patch' && MSG.OBJECT_NEW === 'object_new'
   && MSG.OBJECT_STATE === 'object_state' && MSG.OBJECT_GONE === 'object_gone' && MSG.PICKUP_ACK === 'pickup_ack'
-  && MSG.SEASON === 'season' && MSG.PRESENCE === 'presence' && MSG.PRESENCE_GONE === 'presence_gone',
+  && MSG.SEASON === 'season' && MSG.PRESENCE === 'presence' && MSG.PRESENCE_GONE === 'presence_gone'
+  && MSG.TEND === 'tend' && MSG.GRAZE === 'graze' && MSG.BLOOM === 'bloom',
   'every outbound wire string is pinned to its literal value (the client handles these verbatim)');
-check(Object.keys(MSG).length === Object.keys(IN).length + Object.keys(OUT).length && Object.keys(MSG).length === 18,
-  `MSG is the union of IN(${Object.keys(IN).length}) + OUT(${Object.keys(OUT).length}) = 18 message types`);
+check(Object.keys(MSG).length === Object.keys(IN).length + Object.keys(OUT).length && Object.keys(MSG).length === 21,
+  `MSG is the union of IN(${Object.keys(IN).length}) + OUT(${Object.keys(OUT).length}) = 21 message types`);
 check(new Set(Object.values(MSG)).size === Object.keys(MSG).length, 'no two message types share a wire value (no collision an integration suite could mask)');
 check(Object.values(MSG).every((v) => typeof v === 'string'), 'every MSG value is a string the wire carries verbatim');
 check(Object.isFrozen(MSG) && Object.isFrozen(WIRE_OBJECT_FIELDS) && Object.isFrozen(FORBIDDEN_WIRE_FIELDS), 'the protocol tables are frozen (single source, no mutation)');

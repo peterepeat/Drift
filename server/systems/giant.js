@@ -132,8 +132,10 @@ export class GiantManager {
       }
       // arrived
       const tends = this.giantJobs[g.goal.kind]?.tend;
+      const gx = g.goal.x, gy = g.goal.y;               // the work spot (captured before g.goal is cleared) — for the visible tend cue
       await this.#giantAct(g, now); g.goal = null; g.bestDist = Infinity;
       if (tends) {
+        this.world.tendCue(gx, gy);                     // a soft shimmer where the gardener just tended — its hidden work made felt (wordless, zero-write)
         if (++tended >= GIANT_TENDS_PER_TICK) { g.walk = 0; g.tending = 1; return; } // worked its quota — a beat of visible work
         // else loop: it may reach + tend ANOTHER nearby job this same tick (2× throughput in a cluster)
       }

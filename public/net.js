@@ -5,7 +5,7 @@
 // the pure providers (state/view/draw/localfx/audio/protocol) one-directionally; the one
 // call BACK into client.js — release-the-hold on disconnect/reclaim — is inverted into a
 // registered callback (setOnClearHold), so net imports nothing from client.js (no cycle).
-import { objects, presences, lifts, S, creatureEvts, ripples, flashes, feedRushes, flying, grits } from './state.js';
+import { objects, presences, lifts, S, creatureEvts, worldEvts, ripples, flashes, feedRushes, flying, grits } from './state.js';
 import { viewHalf, home, startArrive, saveHome, screenToWorld, vw, vh } from './view.js';
 import { creaturePos, objRadius, FISH_SWIM_SPEED, FEED_RUSH_CAP_MS } from './draw.js';
 import { setLift, LIFT_MS, SETTLE_MS, EASE_RISE, EASE_SETTLE } from './localfx.js';
@@ -205,6 +205,10 @@ function onMessage(raw) {
     }
     case OUT.PRESENCE_GONE: {
       const p = presences.get(m.pid); if (p) p.gone = performance.now();
+      break;
+    }
+    case OUT.TEND: case OUT.GRAZE: case OUT.BLOOM: { // a wordless "something happened HERE" cue → a light bloom at (x,y)
+      if (Number.isFinite(m.x) && Number.isFinite(m.y)) worldEvts.push({ x: m.x, y: m.y, start: performance.now(), kind: m.t });
       break;
     }
   }

@@ -28,6 +28,10 @@ export const OUT = Object.freeze({
   OBJECT_NEW: 'object_new', OBJECT_STATE: 'object_state', OBJECT_GONE: 'object_gone',
   PICKUP_ACK: 'pickup_ack', SEASON: 'season',
   PRESENCE: 'presence', PRESENCE_GONE: 'presence_gone',
+  // wordless world-event cues at a LOCATION (no surviving object to flag) — a bespoke
+  // bcast the client turns into a light/ripple bloom. Zero-persist (never stored): TEND =
+  // a gardener just tended here; GRAZE = a creature just fed here; BLOOM = a communion bloom.
+  TEND: 'tend', GRAZE: 'graze', BLOOM: 'bloom',
 });
 export const MSG = Object.freeze({ ...IN, ...OUT });
 

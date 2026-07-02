@@ -16,7 +16,7 @@ import { spriteStats } from './spritecache.js'; // Stage B plant-canopy sprite c
 import { IN, OUT } from './shared/protocol.js';
 import { attendId, clearHold, updateBefriend, updateDissolve, updateFlying, settleFlying, ANOM_DISSOLVE_MS, ANOM_FADE_MS } from './input.js'; // pointer/gesture/hold/throw/attend/befriend (4.14f)
 import { send, connect, setOnClearHold } from './net.js'; // WS connect/reconnect/send + the 9 message handlers + presence (4.14b)
-import { setLift, liftValue, isLifted, updateLifts, updateGrowth, updatePositions, updateNudge, updateCollision, updateSway, updateLeaves, drawLeaves, drawCreatureEvts, GIANT_VIS_SPEED, LIFT_MS, SETTLE_MS, EASE_RISE, EASE_SETTLE } from './localfx.js'; // lift anim + per-frame cosmetic-fx passes (4.14e) // the wire single-source (2.6) — client now sends IN.* / switches on OUT.* (string-identical to the old raw types)
+import { setLift, liftValue, isLifted, updateLifts, updateGrowth, updatePositions, updateNudge, updateCollision, updateSway, updateLeaves, drawLeaves, drawCreatureEvts, drawWorldEvts, GIANT_VIS_SPEED, LIFT_MS, SETTLE_MS, EASE_RISE, EASE_SETTLE } from './localfx.js'; // lift anim + per-frame cosmetic-fx passes (4.14e) // the wire single-source (2.6) — client now sends IN.* / switches on OUT.* (string-identical to the old raw types)
 import { canvas, ctx, camera, objects, presences, lifts, flashes, ripples, feedRushes, grits, creatureEvts, giantFootprints, flying, swaying, mouseVelW, S } from './state.js'; // shared client state (4.14 mirror)
 import { screenToWorld, worldToScreen, viewHalf, poolOnScreen, camLimits, zMin, clampCam, applyPan, startArrive, updateArrive, updatePanGlide, cancelArrive, saveHome, adaptQuality, setQTier, qStats, resize, queueResize, dpr, vw, vh, Q, home, Z0, ZMIN, ZMAX } from './view.js'; // camera/transforms/sizing/quality (4.14 mirror)
 
@@ -297,6 +297,7 @@ function frame(now) {
   }
   if (Q.leaves) drawLeaves(); // cosmetic drifting litter, above the objects (Wave F)
   drawCreatureEvts(now); // brief birth/death cues (world space)
+  drawWorldEvts(now); // wordless "something happened here" cues — gardener tending / grazing / communion (world space)
   if (showTrace) { const t = performance.now(); _tr.drawObj += t - _tm; _tm = t; }
 
   aDensity = list.length; // objects on screen — feeds the ambient sound's richness

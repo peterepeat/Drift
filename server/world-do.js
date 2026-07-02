@@ -396,6 +396,9 @@ export class WorldRoom {
       stateMsg: (o, now) => self.#stateMsg(o, now),
       tryFuse: (o, now) => self.#tryFuse(o, now),
       breakStone: (o, now) => self.#breakStone(o, now),
+      // a wordless "a gardener just tended here" cue — a bespoke one-shot bcast (never persisted),
+      // turned into a soft shimmer bloom on the client. Rate is bounded by GIANT_TENDS_PER_TICK.
+      tendCue: (x, y) => self.#bcast({ t: MSG.TEND, x, y }, null),
     };
     const tune = {
       get REACH() { return GIANT_REACH; }, get SIGHT() { return GIANT_SIGHT; }, get BREAK_R() { return GIANT_BREAK_R; },

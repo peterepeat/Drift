@@ -7,7 +7,7 @@
 // into client.js, so there's no circular import. The frame loop + input + net import back
 // the passes + the lift API. The hold/throw/dissolve lifecycle (send/clearHold-coupled)
 // stays in client.js; only the cosmetic fx live here.
-import { objects, lifts, camera, ctx, S, giantFootprints, creatureEvts, flying, swaying, mouseVelW } from './state.js';
+import { objects, lifts, camera, ctx, S, giantFootprints, creatureEvts, worldEvts, flying, swaying, mouseVelW } from './state.js';
 import { vw, vh } from './view.js';
 import { shownMat, SPROUT_C, formOf, GIANT_R } from './forms.js';
 import { objRadius, isMovable } from './draw.js';
@@ -295,4 +295,46 @@ function drawCreatureEvts(now) {
   }
 }
 
-export { setLift, setLiftValue, liftValue, isLifted, updateLifts, updateGrowth, updatePositions, updateNudge, updateCollision, updateSway, updateLeaves, drawLeaves, drawCreatureEvts };
+// ---- wordless "something happened HERE" cues (world space) --------------------
+// A single self-expiring buffer (state.worldEvts) makes hidden interactions legible: the
+// gardener's touch ('tend'), a creature feeding ('graze'), a communion ('bloom'). Each is a
+// soft light bloom at a world point — no text, additive 'lighter' compositing, drawn under
+// the same band as the birth/death cues. Cosmetic & client-local (rides a one-shot bcast).
+const WORLD_EVT_MS = { tend: 950, graze: 600, bloom: 1500 };
+function drawWorldEvts(now) {
+  for (let i = worldEvts.length - 1; i >= 0; i--) {
+    const e = worldEvts[i], life = WORLD_EVT_MS[e.kind] || 900, age = now - e.start;
+    if (age > life) { worldEvts.splice(i, 1); continue; }
+    const p = age / life;                             // 0..1
+    const fade = (1 - p) * Math.min(1, p * 5);        // in fast, out slow
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    if (e.kind === 'tend') {
+      // the gardener's touch: a warm parchment ring + a green nurture bloom (bigger + gentler than a birth)
+      const r = 16 + p * 52;
+      ctx.strokeStyle = PG.rgba('#f6efda', 0.40 * fade); ctx.lineWidth = 2.0;
+      ctx.beginPath(); ctx.arc(e.x, e.y, r, 0, Math.PI * 2); ctx.stroke();
+      ctx.strokeStyle = PG.rgba('#bcd79a', 0.26 * fade); ctx.lineWidth = 1.4;
+      ctx.beginPath(); ctx.arc(e.x, e.y, r * 0.66, 0, Math.PI * 2); ctx.stroke();
+      const g = ctx.createRadialGradient(e.x, e.y, 0, e.x, e.y, r * 0.6);
+      g.addColorStop(0, PG.rgba('#f6efda', 0.30 * fade)); g.addColorStop(1, PG.rgba('#f6efda', 0));
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(e.x, e.y, r * 0.6, 0, Math.PI * 2); ctx.fill();
+    } else if (e.kind === 'graze') {
+      // a creature nibbling: a small quick warm-green pulse at the plant
+      const r = 5 + p * 15;
+      const g = ctx.createRadialGradient(e.x, e.y, 0, e.x, e.y, r);
+      g.addColorStop(0, PG.rgba('#cfe6a8', 0.34 * fade)); g.addColorStop(1, PG.rgba('#cfe6a8', 0));
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(e.x, e.y, r, 0, Math.PI * 2); ctx.fill();
+    } else { // 'bloom' — a communion: a slow, wide rose-and-amber gathering of light
+      const r = 20 + p * 80;
+      ctx.strokeStyle = PG.rgba('#ff9fb0', 0.30 * fade); ctx.lineWidth = 2.2;
+      ctx.beginPath(); ctx.arc(e.x, e.y, r, 0, Math.PI * 2); ctx.stroke();
+      const g = ctx.createRadialGradient(e.x, e.y, 0, e.x, e.y, r * 0.7);
+      g.addColorStop(0, PG.rgba('#ffd0b0', 0.26 * fade)); g.addColorStop(0.6, PG.rgba('#ff9fb0', 0.12 * fade)); g.addColorStop(1, PG.rgba('#ff9fb0', 0));
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(e.x, e.y, r * 0.7, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
+  }
+}
+
+export { setLift, setLiftValue, liftValue, isLifted, updateLifts, updateGrowth, updatePositions, updateNudge, updateCollision, updateSway, updateLeaves, drawLeaves, drawCreatureEvts, drawWorldEvts };
