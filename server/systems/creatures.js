@@ -45,6 +45,11 @@ const CREATURE_FOLLOW_STANDOFF = 70;      // ...and settles this close to its pe
 const CREATURE_FOLLOW_STEP = 130;         // home units it closes toward its person per tick (≈3× a normal drive step — keeps up, but at its own pace, not glued)
 const GRAZE_CHANCE = 0.5;                 // per-tick chance a FED creature (arrived at its plant) shows a visible nibble — seeded per (creature,tick), NOT global RNG (keeps the tick's RNG stream byte-identical)
 const GRAZE_CUES_MAX = 24;                // cap graze cues per tick (bounds the wire chatter — the effect stays calm/legible, never a flood)
+const WARM_SEEK_EPS = 0.06;               // a neighbouring cell must be at least this much warmer than HERE for a roaming creature to drift toward it (below → the field is flat/noise → free wander). Makes the warmth people LEAVE visibly gather life.
+const WARM_SEEK_DIST = 320;               // how far toward the warmth the goal sits (well past ARRIVE so the home actually steps toward it, easing into the warm patch over ticks)
+// sample points ~1-2 heat cells (200u) out in 8 directions — a creature senses warmth a few cells away,
+// not just the immediate gradient, so it pools toward a warm spot from a legible distance.
+const WARM_OFFSETS = [[300, 0], [-300, 0], [0, 300], [0, -300], [212, 212], [-212, 212], [212, -212], [-212, -212]];
 
 export class CreatureManager {
   constructor(world, tune, pools) {
@@ -163,9 +168,13 @@ export class CreatureManager {
     const drive = this.driveLabel(c);
     if (drive === 'roam') {                            // a free-wander phase — but if someone is lingering nearby, amble over to them
       const p = this.world.nearestPresence(c.x, c.y, CURIOSITY_R);
-      if (!p) return null;                             // no one near → truly free wander
-      const dx = c.x - p.x, dy = c.y - p.y, d = Math.hypot(dx, dy) || 1;
-      return { x: p.x + (dx / d) * CURIOSITY_STANDOFF, y: p.y + (dy / d) * CURIOSITY_STANDOFF }; // mill a little way off, curious
+      if (p) { const dx = c.x - p.x, dy = c.y - p.y, d = Math.hypot(dx, dy) || 1; return { x: p.x + (dx / d) * CURIOSITY_STANDOFF, y: p.y + (dy / d) * CURIOSITY_STANDOFF }; } // mill a little way off, curious
+      // no one lingering in sight → drift toward the WARMTH people have left (the heat field decays
+      // over ~an hour, so life visibly gathers at tended spots even after you leave) — idea #1.
+      const here = this.world.heatAt(c.x, c.y); let bh = here + WARM_SEEK_EPS, bx = 0, by = 0;
+      for (const [ox, oy] of WARM_OFFSETS) { const h = this.world.heatAt(c.x + ox, c.y + oy); if (h > bh) { bh = h; bx = ox; by = oy; } }
+      if (bx || by) { const d = Math.hypot(bx, by); return { x: c.x + (bx / d) * WARM_SEEK_DIST, y: c.y + (by / d) * WARM_SEEK_DIST }; } // head toward the warmest nearby cell
+      return null;                                     // cold everywhere near → truly free wander
     }
     if (drive === 'drink') {                          // head to the nearest point on the NEAREST pond's rim
       let p = null, pd = Infinity;                    // (was hardcoded to the central POOL — so every thirsty bug in a huge radius streamed to 0,0)

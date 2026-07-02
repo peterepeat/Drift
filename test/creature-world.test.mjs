@@ -108,6 +108,27 @@ const dk1 = creatures(await snap()).find((o) => o.id === dc.creature.id);
 const drinkAfter = rimDist(dk1);
 check(drinkAfter < drinkBefore - 100, `a creature drinks at its NEAREST pond, not the distant central one (${drinkBefore.toFixed(0)}u -> ${drinkAfter.toFixed(0)}u from the outer pond)`);
 
+// 8c. WARMTH-SEEKING (idea #1): a roaming creature drifts toward the warmth people LEAVE (the heat
+// field decays over ~an hour), so life visibly gathers at tended spots even after you go. To ISOLATE
+// the warmth force from the feed/drink/rest drives, we pick a spot inside the ±2000 heat field that
+// is >SEEK_R from every pond (no drink target), shove away any seed/stone within 1000u (no feed/rest
+// target — and >1000u means even a fresh shed can't land within SEEK_R over the window), then warm a
+// plateau to its east. The creature can now only move during 'roam' → it eases into the warmth.
+const heatSet = (x, y, v) => fetch(`${base}/admin/heat?x=${x}&y=${y}&set=${v}`, { method: 'POST', headers: key }).then((r) => r.json());
+const SPOT = { x: -1500, y: -1200 };                    // inside ±2000; >760u from every pond rim (POOLS are all far from here)
+const preW = await snap();
+for (const o of preW.objects) {                         // clear feed/rest targets so ONLY warmth can move a creature here
+  if ((o.family === 'seed' || o.family === 'stone') && Math.hypot(o.x - SPOT.x, o.y - SPOT.y) < 1000) await place(o.id, 9000, 9000);
+}
+const wc = await spawn('crawler', SPOT.x, SPOT.y);
+for (const dx of [300, 500, 700]) await heatSet(SPOT.x + dx, SPOT.y, 1.0);     // a warm plateau due east (same y → the warmest neighbour is east)
+const wc0 = creatures(await snap()).find((o) => o.id === wc.creature.id);
+const warmBefore = SPOT.x + 500 - wc0.x;                                       // signed east-gap to the warm patch centre
+await tickG(30);                                                               // several roam ticks occur → it drifts east into the warmth
+const wc1 = creatures(await snap()).find((o) => o.id === wc.creature.id);
+const warmAfter = SPOT.x + 500 - wc1.x;
+check(warmAfter < warmBefore - 60, `a roaming creature drifts toward left-behind warmth (east gap ${warmBefore.toFixed(0)}u -> ${warmAfter.toFixed(0)}u)`);
+
 // 9. ANTI-CROWD: a tight pile of creatures spreads into a scatter (no dense blob). Far
 // out (-9000) so the only creatures here are ours; same-species so no clashes scatter them.
 const PILE = { x: -9000, y: -9000 }, NPILE = 16, pileIds = [];

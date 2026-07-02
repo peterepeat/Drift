@@ -389,6 +389,10 @@ export class WorldRoom {
       gridNearest: (x, y, r, f, score) => self.#gridNearest(x, y, r, f, score),
       gridUpdate: (o) => self.#gridUpdate(o),
       nearestPresence: (x, y, maxR) => self.#nearestPresence(x, y, maxR),
+      // read-only thermal-field sample (the warmth people leave) — a creature reads a few of these to
+      // drift toward the warmest nearby spot (idea #1). The grid is updated once/tick BEFORE creatures
+      // move, so this is a same-tick read of already-maintained state; it never writes (write-economy safe).
+      heatAt: (x, y) => self.heat.at(x, y),
       addObject: (o) => self.#addObject(o),
       removeObject: (o, extras) => self.#removeObject(o, extras),
       persist: (o) => self.#persist(o),
