@@ -9,8 +9,9 @@
 // posOf + the draw entry points). Per-frame scratch it reads (S.frameStones/S.frameLodCut)
 // lives on S so the cull pass (client.js) and these readers share it by reference.
 import { ctx, camera, feedRushes, S } from './state.js';
-import { Q } from './view.js';
-import { SPROUT_C, shownMat, formOf } from './forms.js'; // per-family FORM.draw dispatch owns the primitives now (4.14d.2)
+import { Q, dpr } from './view.js';
+import { SPROUT_C, BIG_TREE_MAT, shownMat, shownAged, formOf } from './forms.js'; // per-family FORM.draw dispatch owns the primitives now (4.14d.2)
+import { getPlantSprite } from './spritecache.js'; // Stage B: cache the static plant-canopy render (blit vs re-stroke)
 import { wanderAt, creatureR } from './creatures.js';
 import { deflectCircles } from './physics.js';
 import * as PG from './drift-procgen.js';
@@ -22,6 +23,7 @@ export const FEED_RUSH_CAP_MS = 5000; // hard cap on a feed-rush (safety; normal
 const GLOW_SEC = 180;               // glow-buff duration in seconds (mirror server GLOW_MS)
 const MARK_SIZE = 24;               // ground-mark footprint (world units) — small, rock-shaped
 const MARK_TINT = '#d3c6ab';        // pale warm stain — a drawn mark visible on the dark ground
+export const SPRITE_Z_MAX = 1.8;    // above this zoom, draw plants LIVE (few visible when zoomed in; crispness wins) — see spritecache.js
 
 function syncedT() { return (Date.now() + S.clockSkew) / 1000; }
 function creatureWarpT(o, t) {
@@ -143,11 +145,40 @@ function drawObjectWorld(o) {
     if (px < 1.5 || (S.frameLodCut > 0 && px < S.frameLodCut)) { drawLOD(o, cx, cy, rad); return; }
   }
   if (Q.shadows) paintGroundShadow(o, cx, cy, rad);
+  // Sprite cache (Stage B): a mid-maturity plant's canopy is a static ~590-stroke form — blit a
+  // baked bitmap instead, applying sway/depth per-frame at blit time. Falls through to live-vector
+  // for pre-sprout seeds, rooted big trees (roots must stay unbent), when zoomed in past the
+  // handoff, or when the cache defers/declines this frame (bake budget / oversize).
+  if (o.family === 'seed' && camera.z <= SPRITE_Z_MAX) {
+    const mat = shownMat(o);
+    if (mat >= SPROUT_C && mat < BIG_TREE_MAT && blitPlantSprite(o, cx, cy, ds, mat)) return;
+  }
   if (ds === 1) { paintObject(o, cx, cy, ang); return; }
   ctx.save();
   ctx.translate(cx, cy); ctx.scale(ds, ds); ctx.translate(-cx, -cy); // scale about the object's base point
   paintObject(o, cx, cy, ang);
   ctx.restore();
+}
+// Blit the cached canopy sprite at (cx,cy), composing the per-frame transforms at BLIT time: the
+// sway `bend` rotates about the base (uniform scale + rotation commute, so the order vs depthScale
+// is free), depth `ds` scales about the base. Returns false (→ draw live) if no sprite is available.
+function blitPlantSprite(o, cx, cy, ds, mat) {
+  const sp = getPlantSprite(o.seed >>> 0, mat, shownAged(o), dpr, S.animT);
+  if (!sp) return false;
+  const bend = o._bend || 0;
+  // Size-correct: the canopy is baked at the bucket's maturity, so scale the blit by the ratio of
+  // the plant's TRUE baseLen to the baked baseLen — the on-screen SIZE then tracks maturity
+  // continuously (no size-snap as growth tweens across a bucket edge), while the branch FORM stays
+  // bucketed. baseLen = (9 + mat*46)*perSeedJitter; the jitter cancels in the ratio. Uniform scale
+  // + rotation commute + scale is about the base (origin), so the base stays pinned at (cx,cy).
+  const s = ds * (9 + mat * 46) / (9 + sp.bakeMat * 46);
+  ctx.save();
+  ctx.translate(cx, cy);
+  if (bend) ctx.rotate(bend);
+  if (s !== 1) ctx.scale(s, s);
+  ctx.drawImage(sp.canvas, -sp.half, -sp.up, sp.canvas.width / sp.K, sp.canvas.height / sp.K); // dest in world units; base anchor → (cx,cy)
+  ctx.restore();
+  return true;
 }
 function drawLOD(o, cx, cy, rad) {
   if (o.family === 'seed') {

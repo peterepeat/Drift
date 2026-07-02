@@ -11,7 +11,8 @@ import { flingStep, ema, nudge, spring, deflectCircles } from './physics.js';
 import { wanderAt, drawCreature, creatureR, drawFish, fishR } from './creatures.js';
 import { drawGiant } from './giant.js';
 import { SPROUT_C, BIG_TREE_MAT, GIANT_R, shownMat, shownAged, stoneSize, stoneGeom, anomalyR, crystalR, formOf } from './forms.js';
-import { objRadius, isMovable, creaturePos, posOf, drawMark, drawObjectWorld, drawHeldScreen, paintAttend, FISH_SWIM_SPEED, FEED_RELEASE, FEED_RUSH_CAP_MS } from './draw.js'; // ctx-coupled object paint dispatch + position/geometry readers (4.14d)
+import { objRadius, isMovable, creaturePos, posOf, drawMark, drawObjectWorld, drawHeldScreen, paintAttend, SPRITE_Z_MAX, FISH_SWIM_SPEED, FEED_RELEASE, FEED_RUSH_CAP_MS } from './draw.js'; // ctx-coupled object paint dispatch + position/geometry readers (4.14d)
+import { spriteStats } from './spritecache.js'; // Stage B plant-canopy sprite cache — stats for the perf HUD
 import { IN, OUT } from './shared/protocol.js';
 import { attendId, clearHold, updateBefriend, updateDissolve, updateFlying, settleFlying } from './input.js'; // pointer/gesture/hold/throw/attend/befriend (4.14f)
 import { send, connect, setOnClearHold } from './net.js'; // WS connect/reconnect/send + the 9 message handlers + presence (4.14b)
@@ -394,11 +395,12 @@ function frame(now) {
   // "why is everything chunky" moment be read at a glance — a dropped tier (low budget) vs a
   // genuinely over-budget viewport. Screen space, top-left, above everything.
   if (showPerf) {
-    const q = qStats(), fps = q.ema > 0 ? Math.round(1000 / q.ema) : 0;
+    const q = qStats(), fps = q.ema > 0 ? Math.round(1000 / q.ema) : 0, ss = spriteStats();
     const lines = [
       `tier ${q.tier}${q.pinned ? ' ·pinned' : ''}   ~${fps}fps (${q.ema.toFixed(1)}ms)`,
       `on-screen ${list.length} / budget ${q.budget}`,
       S.frameLodCut > 0 ? `LOD: chunk < ${S.frameLodCut.toFixed(1)}px on screen` : 'LOD: all full detail',
+      `sprites ${ss.count} (${ss.mb} / ${ss.cap}MB)${camera.z > SPRITE_Z_MAX ? ' ·live (zoomed in)' : ''}`,
     ];
     ctx.font = '600 11px ui-monospace, SFMono-Regular, monospace';
     ctx.textAlign = 'left'; ctx.textBaseline = 'top';
