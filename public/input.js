@@ -6,7 +6,7 @@
 // The frame loop imports the per-frame passes (updateBefriend/Dissolve/Flying) + `attendId`;
 // the visibilitychange coordinator imports settleFlying; the bootstrap registers clearHold
 // into net via setOnClearHold. The session token + giantChime live here (input-only).
-import { canvas, camera, objects, S, mouseVelW, flying, swaying, creatureEvts } from './state.js';
+import { canvas, camera, objects, lifts, S, mouseVelW, flying, swaying, creatureEvts } from './state.js';
 import { screenToWorld, applyPan, clampCam, zMin, ZMAX, Z0, cancelArrive, vw, vh } from './view.js';
 import { creaturePos, posOf, objRadius, isMovable } from './draw.js';
 import { ema, flingStep } from './physics.js'; // hover/carry velocity EMA + the throw integrator (used by trackMouseHover + the fling)
@@ -40,7 +40,10 @@ let token = localStorage.getItem('drift_session');
 if (!token) { token = crypto.randomUUID(); localStorage.setItem('drift_session', token); }
 
 export let attendId = null; // the object currently under attention (hover/long-press); the frame reads it to bloom paintAttend
-let preGrab = null; // S.heldId / S.carry / S.heldSince now live on S (state.js) — the HOLD state (input+net write, draw+localfx read)
+// The HOLD state (heldId/carry/heldSince/preGrab) lives on S (state.js): input + net WRITE it, draw +
+// localfx READ it. preGrab is the pickup restore-target — net.js's PICKUP_ACK reads it on a lost race.
+// Anomaly-dissolve timings owned here (updateDissolve lives in this module); client.js imports them.
+export const ANOM_DISSOLVE_MS = 10000, ANOM_FADE_MS = 3000; // hold an anomaly 10s → it fades from your hands over the last 3s
 let flingVel = { x: 0, y: 0 }, lastCarryPos = null, lastCarryT = 0;
 let _lastFlingT = 0, _flyCarryAt = 0; // updateFlying's per-frame throttle anchors
 let lpTimer = null, lpFired = false;   // long-press arming (touch)
@@ -118,7 +121,7 @@ function beginHold(o, mode, off) {
   // Start the S.carry where the object is actually DRAWN: a free creature wanders off
   // its stored home, so seeding S.carry from o.x/o.y would snap it home on pickup.
   const live = (o.family === 'creature') ? creaturePos(o) : { x: o.x, y: o.y };
-  preGrab = { x: o.x, y: o.y };                   // the true stored position (restore target if rejected)
+  S.preGrab = { x: o.x, y: o.y };                 // the true stored position (net restores to it if the server rejects the grab)
   S.heldId = o.id; holdMode = mode; holdOff = off || { x: 0, y: 0 };
   S.heldSince = performance.now();
   S.carry = { x: live.x, y: live.y };
@@ -172,7 +175,7 @@ function placeHold(kind) {                         // settle the held object whe
   if (o) Audio.event(kind || 'place', { seed: o.seed, family: o.family, x: o.x }); // generative settle/land tone
   clearHold();
 }
-function clearHold() { S.heldId = null; holdMode = null; S.carry = null; preGrab = null; grab = null; }
+function clearHold() { S.heldId = null; holdMode = null; S.carry = null; S.preGrab = null; grab = null; }
 function maybeSendCarry() {
   const n = performance.now();
   if (n - lastCarry < CARRY_SEND_MS) return;

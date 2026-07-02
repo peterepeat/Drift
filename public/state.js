@@ -57,6 +57,7 @@ export const S = {
   heldId: null,       // id of the object this client is currently holding (or null)
   carry: null,        // the held object's live carried position { x, y } (null when not holding)
   heldSince: 0,       // performance.now() when the local hold began (drives anomaly dissolution)
+  preGrab: null,      // the object's true stored { x, y } at pickup — net restores to it if the server rejects the grab
 
   // per-frame RENDER scratch — the frame() cull pass WRITES these, draw.js READS them
   // (same frame, write-before-read). On S so client.js and draw.js share them by reference

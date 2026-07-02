@@ -14,7 +14,7 @@ import { SPROUT_C, BIG_TREE_MAT, GIANT_R, shownMat, shownAged, stoneSize, stoneG
 import { objRadius, isMovable, creaturePos, posOf, drawMark, drawObjectWorld, drawHeldScreen, paintAttend, drawStats, SPRITE_Z_MAX, FISH_SWIM_SPEED, FEED_RELEASE, FEED_RUSH_CAP_MS } from './draw.js'; // ctx-coupled object paint dispatch + position/geometry readers (4.14d)
 import { spriteStats } from './spritecache.js'; // Stage B plant-canopy sprite cache — stats for the perf HUD
 import { IN, OUT } from './shared/protocol.js';
-import { attendId, clearHold, updateBefriend, updateDissolve, updateFlying, settleFlying } from './input.js'; // pointer/gesture/hold/throw/attend/befriend (4.14f)
+import { attendId, clearHold, updateBefriend, updateDissolve, updateFlying, settleFlying, ANOM_DISSOLVE_MS, ANOM_FADE_MS } from './input.js'; // pointer/gesture/hold/throw/attend/befriend (4.14f)
 import { send, connect, setOnClearHold } from './net.js'; // WS connect/reconnect/send + the 9 message handlers + presence (4.14b)
 import { setLift, liftValue, isLifted, updateLifts, updateGrowth, updatePositions, updateNudge, updateCollision, updateSway, updateLeaves, drawLeaves, drawCreatureEvts, GIANT_VIS_SPEED, LIFT_MS, SETTLE_MS, EASE_RISE, EASE_SETTLE } from './localfx.js'; // lift anim + per-frame cosmetic-fx passes (4.14e) // the wire single-source (2.6) — client now sends IN.* / switches on OUT.* (string-identical to the old raw types)
 import { canvas, ctx, camera, objects, presences, lifts, flashes, ripples, feedRushes, grits, creatureEvts, giantFootprints, flying, swaying, mouseVelW, S } from './state.js'; // shared client state (4.14 mirror)
@@ -37,7 +37,7 @@ const SHARED_BOOST = 3.2;                     // strength of the extra between-t
 const FOOT_FADE_MS = 4200;                    // a footprint fades this fast (so the giant doesn't track prints all over the world)
 const GLOW_PARALLAX = 0.04;                   // ambient glows drift this fraction of the camera (Wave H depth)
 const DEPTH_TOP = 0.2;                         // objects at the TOP of the screen draw this much smaller (Wave K recession — subtle)
-const ANOM_DISSOLVE_MS = 10000, ANOM_FADE_MS = 3000; // hold an anomaly 10s and it fades from your hands
+// ANOM_DISSOLVE_MS / ANOM_FADE_MS now live in input.js (it owns updateDissolve); imported below.
 const GRIT_MS = 500;                          // a worn-out stone's grit scatter lifetime (spec §4.3)
 const MARK_LIFE_MS = 10 * 60 * 1000;          // a ground mark heals over ~10 min (mirror server MARK_LIFE_MS)
 // The nudge / collision / leaf-litter / sway-spring tuning consts now live in localfx.js (4.14e).

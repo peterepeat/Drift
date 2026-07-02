@@ -5,7 +5,7 @@
 // the pure providers (state/view/draw/localfx/audio/protocol) one-directionally; the one
 // call BACK into client.js — release-the-hold on disconnect/reclaim — is inverted into a
 // registered callback (setOnClearHold), so net imports nothing from client.js (no cycle).
-import { objects, presences, lifts, S, creatureEvts, ripples, flashes, feedRushes, flying } from './state.js';
+import { objects, presences, lifts, S, creatureEvts, ripples, flashes, feedRushes, flying, grits } from './state.js';
 import { viewHalf, home, startArrive, saveHome, screenToWorld, vw, vh } from './view.js';
 import { creaturePos, objRadius, FISH_SWIM_SPEED, FEED_RUSH_CAP_MS } from './draw.js';
 import { setLift, LIFT_MS, SETTLE_MS, EASE_RISE, EASE_SETTLE } from './localfx.js';
@@ -184,7 +184,7 @@ function onMessage(raw) {
         const o = objects.get(m.id);
         // held=false so the server's corrective object_state (held:true, from the real
         // holder) re-lifts it; leaving it true would suppress that re-lift.
-        if (o) { if (S.heldId === m.id && preGrab) { o.x = preGrab.x; o.y = preGrab.y; o._tx = preGrab.x; o._ty = preGrab.y; } o.held = false; }
+        if (o) { if (S.heldId === m.id && S.preGrab) { o.x = S.preGrab.x; o.y = S.preGrab.y; o._tx = S.preGrab.x; o._ty = S.preGrab.y; } o.held = false; }
         setLift(m.id, 0, SETTLE_MS, EASE_SETTLE);
         if (S.heldId === m.id) _onClearHold();
       }
