@@ -81,23 +81,29 @@
   </section>
 
   <section>
-    <h2>Fast-forward <span class="pill">accelerated tick</span></h2>
-    <div class="row">
-      <button data-n="10">+10 ticks</button>
-      <button data-n="100">+100 ticks</button>
+    <h2>Time <span class="pill">fast-forward</span></h2>
+    <p class="note" style="margin-top:0">The world moves on its own — one <b>tick</b> (≈1 minute of world-time) every 60&nbsp;seconds. Hurry it along to watch the slow stuff emerge: seasons turning, groves maturing, the gardeners rebalancing. This advances the <b>one shared world</b> for everyone — it isn't a private copy.</p>
+    <div class="row" style="margin-bottom:8px">
+      <span>Jump ahead</span>
+      <button data-n="10">+10</button>
+      <button data-n="100">+100</button>
       <button data-n="500">+500 ticks</button>
-      <label style="margin-left:10px">speed
+    </div>
+    <div class="row">
+      <span>Run continuously</span>
+      <button id="ffrun" class="go">▶&nbsp;run</button>
+      <label>at
         <select id="ffspeed">
-          <option value="0">paused</option>
-          <option value="2">≈120× (2 ticks/s)</option>
-          <option value="10">≈600× (10/s)</option>
-          <option value="50">≈3000× (50/s)</option>
-          <option value="200">≈12000× (200/s)</option>
-          <option value="500">≈30000× (500/s · max)</option>
+          <option value="2">2 ticks/s · ≈120×</option>
+          <option value="10" selected>10 ticks/s · ≈600×</option>
+          <option value="50">50 ticks/s · ≈3000×</option>
+          <option value="200">200 ticks/s · ≈12000×</option>
+          <option value="500">500 ticks/s · ≈30000× (max)</option>
         </select>
       </label>
+      <span id="ffstate" class="note">stopped</span>
     </div>
-    <p class="note">One tick = 60s of world time. Pick a speed to run continuously (the world advances for everyone, but that's just you) — great for watching long-term emergence, and a load test at the top end. Cumulative <code>objWrites</code> shown so you can watch the write cost.</p>
+    <p class="note">One tick = 60s of world-time, so 200&nbsp;ticks/s ≈ 12,000× real time (the top speed doubles as a load test). <b>Stop</b> only halts <i>your</i> fast-forward — the world keeps its own 60s clock regardless; it's never truly paused. <code>objWrites</code> tracks the write cost (the free-tier lever).</p>
     <div class="log" id="fflog"></div>
   </section>
 
@@ -110,19 +116,20 @@
   </section>
 
   <section>
-    <h2>Load test <span class="pill">fill</span></h2>
+    <h2>Populate <span class="pill">add seeds</span></h2>
     <div class="row">
-      <span>spawn</span>
+      <span>Sow</span>
       <input id="filln" type="number" value="2000" min="1" max="20000" />
-      <span>dormant seeds toward the ceiling</span>
-      <button id="fillgo">fill</button>
+      <span>fresh seeds across the world</span>
+      <button id="fillgo">sow</button>
     </div>
+    <p class="note">Drops that many dormant <b>seeds</b> at random — they sprout and grow on the normal clock. Use it to kickstart a thin world, or to stress-test performance toward the ceiling (<code>MAX_OBJECTS</code> ≈ 10,000). This <b>adds</b> to what's already there — it never deletes anything (that's Reseed, below).</p>
     <div class="log" id="filllog"></div>
   </section>
 
   <section style="border-color:#4a2c2c">
     <h2 style="color:var(--danger)">Reseed <span class="pill" style="border-color:#4a2c2c;color:var(--danger)">destructive · irreversible</span></h2>
-    <p class="note danger-note">A reseed DELETES every object anyone has built and regenerates the world from scratch. There is no undo. The season clock and checkpoint survive; everything placed is gone.</p>
+    <p class="note danger-note">Wipes the <b>entire</b> world and regenerates it from scratch — every object anyone has built is deleted, with no undo. This is the only way to start over or to apply a changed world-generator. The season clock and the write checkpoint survive; everything placed is gone.</p>
     <div class="row">
       <input id="reseedc" class="k" placeholder='type RESEED to confirm' autocomplete="off" />
       <button id="reseedgo" class="danger" disabled>reseed the world</button>
@@ -188,12 +195,23 @@ async function tick(n) {
   } catch (e) { log('#fflog', e.message, 'warn'); throw e; }
 }
 document.querySelectorAll('[data-n]').forEach((b) => b.onclick = () => tick(+b.dataset.n));
+// Continuous fast-forward: a plain Run/Stop toggle (the ACTION) separate from the speed picker (the
+// RATE). "Stop" only halts this accelerated stepping — the world's own 60s clock never stops.
 let ffTimer = null;
-$('#ffspeed').onchange = function () {
+function ffStop() {
   if (ffTimer) { clearInterval(ffTimer); ffTimer = null; }
-  const n = +this.value;
-  if (n > 0) ffTimer = setInterval(() => tick(n).catch(() => { clearInterval(ffTimer); ffTimer = null; $('#ffspeed').value = '0'; }), 1000); // stop on error (e.g. bad key)
-};
+  $('#ffrun').innerHTML = '▶&nbsp;run'; $('#ffrun').classList.add('go');
+  $('#ffstate').textContent = 'stopped'; $('#ffstate').style.color = 'var(--mut)';
+}
+function ffStart() {
+  const n = +$('#ffspeed').value;
+  if (ffTimer) clearInterval(ffTimer);
+  ffTimer = setInterval(() => tick(n).catch(ffStop), 1000); // one burst of n ticks each second; stop on error (e.g. bad key)
+  $('#ffrun').innerHTML = '⏸&nbsp;stop'; $('#ffrun').classList.remove('go');
+  $('#ffstate').textContent = 'running · ' + n + ' ticks/s'; $('#ffstate').style.color = 'var(--ok)';
+}
+$('#ffrun').onclick = () => (ffTimer ? ffStop() : ffStart());
+$('#ffspeed').onchange = () => { if (ffTimer) ffStart(); }; // change rate live while running
 
 // ---- fill (load test) ------------------------------------------------------
 $('#fillgo').onclick = async () => {
