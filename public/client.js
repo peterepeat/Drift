@@ -220,7 +220,7 @@ function frame(now) {
     dpr * (vw / 2 - camera.x * camera.z), dpr * (vh / 2 - camera.y * camera.z));
   paintGroundPatches(ctx); // world-anchored terrain COLOUR (cached, one blit) — always on: the backdrop stays consistent regardless of tier (only the OBJECTS chunk under load)
   for (const pd of S.pools) paintWaterWorld(ctx, pd, S.animT); // every pond, beneath the objects
-  if (Q.flow && poolOnScreen()) paintFlow(ctx, S.pool, S.animT); // faint flow streaks — only the central pool's drift band
+  if (Q.flow && poolOnScreen()) paintFlow(ctx, S.pool, S.animT, S.frameStones); // faint flow streaks — bent around visible rocks (the channelling made visible); only the central pool's drift band
   // ground marks (Wave S): flat rock-shaped stains, beneath objects, healing over ~10 min
   const markNow = Date.now() + S.clockSkew; // server clock for the heal age
   for (const o of objects.values()) {

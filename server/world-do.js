@@ -19,7 +19,7 @@
 // boolean `held` — never the token.
 // =============================================================================
 import { generateWorld, makeRecord, makeSeedRecord, makeAnomalyRecord, ANOMALY_KINDS, makeCrystalRecord, makeCreatureRecord, makeFishRecord, makeMarkRecord, CREATURE_KINDS, reseedAction, SEED_VERSION, rng, makeNoise } from './seed.js';
-import { FLOW_SEED, FLOW_SCALE, FLOW_REACH } from '../public/flow.js'; // shared with the client visual
+import { FLOW_SEED, FLOW_SCALE, FLOW_REACH, FLOW_STONE_R, deflectFlow } from '../public/flow.js'; // shared with the client visual (incl. the stone-channelling formula)
 import { POND_ASPECT, poolContaining as poolContainingIn, bankPoint } from '../public/shared/geometry.js'; // shared pond ellipse geometry (server + client + tests)
 import { stoneRadius } from '../public/shared/sizing.js'; // shared form-from-seed footprint (server + client + tests)
 import { MSG, scrubForbidden } from '../public/shared/protocol.js'; // shared wire message-types + invariant-#3 field whitelist
@@ -232,9 +232,8 @@ const STONE_PUSH_CLEAR = 14;               // body clearance for a non-plant obj
 // magnitude: Resting is near-frozen, Rising active, Turning disperses.
 // FLOW_SEED / FLOW_SCALE / FLOW_REACH are shared with the client via public/flow.js.
 const FLOW_SPEED = 1.6;                   // world units/tick at full strength — "very slowly"
-const FLOW_STONE_R = 70;                  // a stone deflects flow within this radius
-const FLOW_STONE_PUSH = 1.0;              // tangential deflection strength (channelling)
-const FLOW_STONE_RADIAL = 0.35;           // small radial-away term so flow never runs into a stone
+// FLOW_STONE_R / _PUSH / _RADIAL + the deflection formula now live in public/flow.js (shared with the
+// client's visible streaks so the channelling can't diverge). FLOW_STONE_R is imported for the grid query.
 const FLOW_SEASON = { growing: 0.4, turning: 0.85, resting: 0.05, rising: 1.0 }; // magnitude by season
 const POS_BCAST_DELTA = 6;                // broadcast a drifting object only once it has crept this far
 const FLOW_HEAT = 0.6;                     // how strongly the heat gradient bends flow toward cooler areas
@@ -1683,17 +1682,9 @@ export class WorldRoom {
     if (!this.flowNoise) this.flowNoise = makeNoise(FLOW_SEED);
     const a = this.flowNoise(x * FLOW_SCALE, y * FLOW_SCALE) * Math.PI;
     let vx = Math.cos(a), vy = Math.sin(a);
-    for (const s of this.#gridNear(x, y, FLOW_STONE_R, (s) => familyOf(s.family).deflectsFlow)) {
-      const dx = x - s.x, dy = y - s.y, d = Math.hypot(dx, dy);
-      if (d > 0.001 && d < FLOW_STONE_R) {
-        const f = 1 - d / FLOW_STONE_R, rx = dx / d, ry = dy / d;
-        // tangent perpendicular to the radial, oriented to agree with the base flow
-        let tx = -ry, ty = rx;
-        if (tx * vx + ty * vy < 0) { tx = -tx; ty = -ty; }
-        vx += (tx * FLOW_STONE_PUSH + rx * FLOW_STONE_RADIAL) * f;
-        vy += (ty * FLOW_STONE_PUSH + ry * FLOW_STONE_RADIAL) * f;
-      }
-    }
+    // bend the flow around nearby stones (the channelling) via the shared formula — identical to what
+    // the client paints, so the visible streaks and the real object-drift can never diverge.
+    ({ vx, vy } = deflectFlow(x, y, vx, vy, this.#gridNear(x, y, FLOW_STONE_R, (s) => familyOf(s.family).deflectsFlow)));
     if (this.heat.field) { // water flows toward cooler areas (PRD §4.2) — bend along -∇heat
       const g = this.heat.grad(x, y);
       vx -= g.gx * FLOW_HEAT; vy -= g.gy * FLOW_HEAT;

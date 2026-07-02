@@ -12,7 +12,7 @@
 // transform (dpr only) before calling.
 // =============================================================================
 import * as PG from './drift-procgen.js';
-import { FLOW_SEED, FLOW_SCALE, FLOW_REACH } from './flow.js'; // shared with the server flow field
+import { FLOW_SEED, FLOW_SCALE, FLOW_REACH, deflectFlow } from './flow.js'; // shared with the server flow field (incl. the stone-channelling formula)
 import { POND_ASPECT } from './shared/geometry.js'; // shared pond ellipse aspect (server + client)
 
 const PALETTE = PG.PALETTE;
@@ -267,8 +267,9 @@ export function paintWaterWorld(ctx, pool, t) {
 // band. Geometry is fixed; brightness crests travel downstream so it reads as
 // slow-moving water without particles.
 let _flowNoise = null, _flowPts = null;
-export function paintFlow(ctx, pool, t) {
+export function paintFlow(ctx, pool, t, stones) {
   if (!pool) return;
+  const rocks = stones || [];
   if (!_flowNoise) _flowNoise = PG.makeNoise(FLOW_SEED);
   if (!_flowPts) { // a deterministic scatter of sample points across the whole drift band
     const r = PG.rng(FLOW_SEED); _flowPts = [];
@@ -280,7 +281,9 @@ export function paintFlow(ctx, pool, t) {
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
   for (const p of _flowPts) {
-    const ang = _flowNoise(p.x * FLOW_SCALE, p.y * FLOW_SCALE) * Math.PI;
+    const a0 = _flowNoise(p.x * FLOW_SCALE, p.y * FLOW_SCALE) * Math.PI;
+    const df = deflectFlow(p.x, p.y, Math.cos(a0), Math.sin(a0), rocks); // bend the streak around nearby rocks — the channelling made visible (same formula the server drifts objects with)
+    const ang = Math.atan2(df.vy, df.vx);
     const along = p.x * Math.cos(ang) + p.y * Math.sin(ang); // project onto flow -> crests travel downstream
     const b = 0.5 + 0.5 * Math.sin(t * 0.5 - along * 0.02 + p.ph);
     const len = 16;
