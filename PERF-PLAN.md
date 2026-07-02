@@ -5,6 +5,24 @@ option set + risks live in the `perf-roadmap` memory; this file is the ordered, 
 **execution checklist**. Ship each numbered step as its own verified commit (build → verify →
 commit → push; assets auto-deploy). Re-profile between stages.
 
+## Resume here → STAGE B phase 2 / re-profile / STAGE C (Stage A + Stage B phase 1 are DONE)
+- **`HEAD == origin/main == 82e6a4e`.** **✅ STAGE B phase 1 SHIPPED** (`82e6a4e`): the plant-canopy
+  sprite cache (`public/spritecache.js`). Bakes `drawPlant` once per (seed | `floor(mat*20)` |
+  `floor(aged*8)` | dpr) and blits it; per-frame sway/depth/zoom + a maturity SIZE-CORRECTION (scale
+  by true/baked baseLen ratio → size tracks growth continuously) applied at blit time. Scoped to
+  mid-maturity plants (SPROUT_C≤mat<BIG_TREE_MAT), `camera.z≤1.8` (live-vector when zoomed in). LRU
+  96MB cap + 6-bakes/frame budget + max-sprite-size fallback. `forms.js` UNCHANGED (stays pure). Perf
+  HUD gained a `sprites N (MB)` line. Verified: 28 green; pixel-diff 99.5% coverage / 1px bbox;
+  800-sample clip sweep 0 clips; size-correction ≤1% at bucket edges; colour Δ<1.5/255 (imperceptible);
+  a 5-lens/21-agent adversarial review (1 real finding fixed = size quantization; ΔE + "critical
+  ds-offset" refuted by measurement; aged>0.167 branch quantization accepted for phase 1).
+- **▶ NEXT (pick per re-profile):** (a) **RE-PROFILE the pan win** on a REAL tab (perf HUD `?perf=1`):
+  the sprite cache targets exactly the far-pan jank the user reported. (b) **STAGE B phase 2** (deferred
+  from phase 1): cache STONES with a size cap (small stones are cheap to draw but numerous; big fused
+  boulders stay live — cheap + huge-sprite) + rooted BIG trees (draw roots live, cache the canopy). (c)
+  **STAGE C** (visible-set iteration + GC hitches). Real-tab watch items from phase 1: the z=1.8
+  sprite↔live handoff; aged-tree branch count during a far pan.
+
 ## Resume here → STAGE B (Stage A is DONE)
 - **`HEAD == origin/main == b878cc4`** (was `f8a70c2` at plan creation). **✅ STAGE A SHIPPED**
   as one cohesive commit `b878cc4` (the four sub-steps are interleaved across render.js/client.js/
@@ -78,8 +96,13 @@ without reordering; and A3b's glow parallax is BOUNDED to ±600px, not literally
   glows+sky+grade) is consistent at every tier; only OBJECTS ever chunk. Completes the `f8a70c2`
   fix. Remove the now-vestigial tier flags. Verify at pinned `?q=3` the atmosphere still reads.
 
-## Stage B — the big lever: sprite-cache the static forms (◀ START HERE)
+## Stage B — the big lever: sprite-cache the static forms  (phase 1 ✅ DONE `82e6a4e`; phase 2 = stones + big trees)
 The change that actually lets full detail hold without chunking. *(roadmap ①)*
+Phase 1 shipped the PLANT-canopy cache (the ~590-stroke cost). As-built deviations from the B1–B5
+text below: only plants are cached so far (stones are cheap single polygons + big fused boulders would
+make huge sprites → deferred to phase 2); big rooted trees (mat≥BIG_TREE_MAT) + pre-sprout seeds stay
+live; the cache lives in draw.js (not forms.js — forms.js must stay pure/Node-importable); a maturity
+SIZE-CORRECTION at blit time recovers continuous size on top of the bucketed form.
 
 - **B1. A sprite-cache module.** New `public/spritecache.js` (or fold into forms.js): given an
   object, return a cached offscreen canvas of its rendered form, keyed by
