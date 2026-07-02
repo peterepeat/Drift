@@ -179,7 +179,7 @@ function startFling(vx, vy) {
   // Remember a KNOWN-FINITE launch point so a corrupted glide can always settle home.
   const x0 = Number.isFinite(o.x) ? o.x : (S.carry ? S.carry.x : 0);
   const y0 = Number.isFinite(o.y) ? o.y : (S.carry ? S.carry.y : 0);
-  flying.set(id, { vx, vy, x0, y0 });               // stays lifted (from the drag) for the whole arc — settles on land
+  flying.set(id, { vx, vy, x0, y0, x: x0, y: y0 }); // the fling owns x/y locally (immune to server echoes); stays lifted for the arc
   clearHold();                                      // release the pointer NOW (the object flies on its own)
 }
 function reanchorCreature(o) { if (o && o.family === 'creature') o.wanderT0 = Date.now() + S.clockSkew; }
@@ -262,10 +262,14 @@ function updateFlying(now) {
   const sendNow = (now - _flyCarryAt) >= CARRY_SEND_MS;
   for (const [id, f] of flying) {
     const o = objects.get(id);
-    if (!o || !o.held) { flying.delete(id); continue; } // gone, or the server reclaimed it → stop gliding
-    const s = flingStep({ x: o.x, y: o.y }, f, dt, THROW_FRICTION, THROW_STOP);
-    // If a position ever goes non-finite, settle at the known-finite launch point
-    // rather than stream null (→ a phantom at world 0,0 that never lands).
+    // Stop ONLY if the object is gone (dissolved). A genuine reclaim/lost-hold deletes `flying`
+    // explicitly (PICKUP_ACK ok=false; the disconnect handler clears it) — so we must NOT abort on
+    // o.held here: a server ECHO of our own drag can momentarily clear o.held, and that must not kill
+    // a valid throw. The fling is CLIENT-authoritative until it lands.
+    if (!o) { flying.delete(id); continue; }
+    const s = flingStep({ x: f.x, y: f.y }, { x: f.vx, y: f.vy }, dt, THROW_FRICTION, THROW_STOP); // integrate from the fling's OWN x/y; flingStep reads vel.x/.y — MUST pass {x:vx,y:vy} (passing `f` fed it f.x/f.y = undefined→NaN→settle-at-launch: THE reason a fired throw still "dropped")
+    // If a position ever goes non-finite, settle at the known-finite launch point rather than stream
+    // null (→ a phantom at world 0,0 that never lands).
     if (!Number.isFinite(s.x) || !Number.isFinite(s.y)) {
       o.x = f.x0; o.y = f.y0; o._tx = f.x0; o._ty = f.y0; o.held = false; reanchorCreature(o);
       setLift(id, 0, SETTLE_MS, EASE_SETTLE);
@@ -273,7 +277,8 @@ function updateFlying(now) {
       flying.delete(id);
       continue;
     }
-    o.x = s.x; o.y = s.y; o._tx = s.x; o._ty = s.y; f.vx = s.vx; f.vy = s.vy;
+    f.x = s.x; f.y = s.y; f.vx = s.vx; f.vy = s.vy;                      // advance the fling's own position
+    o.x = s.x; o.y = s.y; o._tx = s.x; o._ty = s.y; o.held = true;      // write it onto the object + keep it held, overriding any echo that landed this frame
     if (s.stopped) {
       o.held = false; reanchorCreature(o);
       setLift(id, 0, SETTLE_MS, EASE_SETTLE);        // settle down where it came to rest
@@ -283,7 +288,7 @@ function updateFlying(now) {
     } else if (sendNow) {
       send({ t: IN.CARRY, id, token, x: o.x, y: o.y, ts: Date.now() });
     }
-    if (throwDbg) showThrowDbg(`FLYING  pos(${o.x.toFixed(0)},${o.y.toFixed(0)})  v ${Math.hypot(f.vx, f.vy).toFixed(0)}  held ${o.held}`);
+    if (throwDbg) showThrowDbg(`FLYING  pos(${o.x.toFixed(0)},${o.y.toFixed(0)})  v ${Math.hypot(f.vx, f.vy).toFixed(0)}`);
   }
   if (sendNow) _flyCarryAt = now;
 }
