@@ -25,7 +25,7 @@ const HIT_PAD = 3, HIT_GROW = 1.18;          // grab area modestly exceeds the d
 const CARRY_SEND_MS = 50;                    // throttle for streaming a carried object
 const THROW_MIN = 110;                       // release speed (world units/s) below which a drag just places — no fling (low: a gentle toss flings, esp. on touch)
 const THROW_RECENT_MS = 130;                 // the last carry-move must be this recent at release to count as a flick (touch events are sparser → widened from 90)
-const THROW_FRICTION = 0.1;                  // velocity retained per second mid-fling (more glide → more momentum, still a calm settle)
+const THROW_FRICTION = 0.045;                // velocity retained per second mid-fling — LOWER = more friction / harder deceleration (was 0.1 = too floaty/linear); a thrown thing now bleeds speed and settles sooner
 const THROW_STOP = 28;                        // a fling settles to a place once it slows below this (wu/s)
 const THROW_MAX = 1600;                       // cap the launch speed so a hard flick can't hurl a thing across the world
 const PAN_MIN = 170;                          // release speed (world u/s) below which a pan just stops — no inertia glide
