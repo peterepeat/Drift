@@ -73,8 +73,14 @@ function setLift(id, target, dur, ease) {
   lifts.set(id, { value: from, from, target, start: performance.now(), dur, ease });
 }
 function liftValue(id) { const l = lifts.get(id); return l ? l.value : 0; }
+// Write a lift value DIRECTLY, bypassing the timer tween — used by the throw glide so a flung
+// object DESCENDS as it slows (the lift tracks its remaining speed) instead of dropping via a
+// fixed timer only once it has already stopped. The `manual` flag makes updateLifts skip it; a
+// later setLift() (on landing) reads the residual value and hands it back to a normal ease-to-0.
+function setLiftValue(id, v) { lifts.set(id, { value: v < 0 ? 0 : v > 1 ? 1 : v, manual: true }); }
 function updateLifts(now) {
   for (const [id, l] of lifts) {
+    if (l.manual) continue;                                 // a flight-lift value owned by updateFlying — don't tween or GC it here
     const t = l.dur > 0 ? Math.min(1, (now - l.start) / l.dur) : 1;
     l.value = l.from + (l.target - l.from) * l.ease(t);
     if (t >= 1 && l.target === 0) lifts.delete(id);
@@ -289,4 +295,4 @@ function drawCreatureEvts(now) {
   }
 }
 
-export { setLift, liftValue, isLifted, updateLifts, updateGrowth, updatePositions, updateNudge, updateCollision, updateSway, updateLeaves, drawLeaves, drawCreatureEvts };
+export { setLift, setLiftValue, liftValue, isLifted, updateLifts, updateGrowth, updatePositions, updateNudge, updateCollision, updateSway, updateLeaves, drawLeaves, drawCreatureEvts };

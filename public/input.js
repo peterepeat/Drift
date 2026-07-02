@@ -10,7 +10,7 @@ import { canvas, camera, objects, lifts, S, mouseVelW, flying, swaying, creature
 import { screenToWorld, applyPan, clampCam, zMin, ZMAX, Z0, cancelArrive, startPanGlide, vw, vh } from './view.js';
 import { creaturePos, posOf, objRadius, isMovable } from './draw.js';
 import { ema, flingStep } from './physics.js'; // hover/carry velocity EMA + the throw integrator (used by trackMouseHover + the fling)
-import { setLift, isLifted, LIFT_MS, SETTLE_MS, EASE_RISE, EASE_SETTLE } from './localfx.js';
+import { setLift, setLiftValue, isLifted, LIFT_MS, SETTLE_MS, EASE_RISE, EASE_SETTLE } from './localfx.js';
 import { send } from './net.js';
 import { formOf, SPROUT_C, shownMat, GIANT_R } from './forms.js';
 import { Audio } from './audio.js';
@@ -27,6 +27,8 @@ const THROW_MIN = 110;                       // release speed (world units/s) be
 const THROW_RECENT_MS = 130;                 // the last carry-move must be this recent at release to count as a flick (touch events are sparser → widened from 90)
 const THROW_FRICTION = 0.045;                // velocity retained per second mid-fling — LOWER = more friction / harder deceleration (was 0.1 = too floaty/linear); a thrown thing now bleeds speed and settles sooner
 const THROW_STOP = 28;                        // a fling settles to a place once it slows below this (wu/s)
+const STONE_FRICTION = 0.010;                // ROCKS are HEAVY — far more friction than a light object: they bleed speed fast, travel a short arc, and thud to rest (user: "even more friction for rocks")
+const STONE_STOP = 42;                        // and settle sooner (higher stop threshold) → a decisive landing, not a long skid
 const THROW_MAX = 1600;                       // cap the launch speed so a hard flick can't hurl a thing across the world
 const PAN_MIN = 170;                          // release speed (world u/s) below which a pan just stops — no inertia glide
 const ATTEND_MS = 450;                        // long-press dwell before an object is "attended" (PRD §5.2)
@@ -176,10 +178,11 @@ function startFling(vx, vy) {
   if (!o || !Number.isFinite(vx) || !Number.isFinite(vy)) { placeHold(); return; }
   const sp = Math.hypot(vx, vy);
   if (sp > THROW_MAX) { const k = THROW_MAX / sp; vx *= k; vy *= k; }
+  const sp0 = Math.hypot(vx, vy) || 1;              // post-clamp launch speed → drives the fall-to-earth descent map (and later the merge-on-throw signal)
   // Remember a KNOWN-FINITE launch point so a corrupted glide can always settle home.
   const x0 = Number.isFinite(o.x) ? o.x : (S.carry ? S.carry.x : 0);
   const y0 = Number.isFinite(o.y) ? o.y : (S.carry ? S.carry.y : 0);
-  flying.set(id, { vx, vy, x0, y0, x: x0, y: y0 }); // the fling owns x/y locally (immune to server echoes); stays lifted for the arc
+  flying.set(id, { vx, vy, x0, y0, x: x0, y: y0, sp0 }); // the fling owns x/y locally (immune to server echoes); descends over the arc via sp0
   clearHold();                                      // release the pointer NOW (the object flies on its own)
 }
 function reanchorCreature(o) { if (o && o.family === 'creature') o.wanderT0 = Date.now() + S.clockSkew; }
@@ -267,7 +270,8 @@ function updateFlying(now) {
     // o.held here: a server ECHO of our own drag can momentarily clear o.held, and that must not kill
     // a valid throw. The fling is CLIENT-authoritative until it lands.
     if (!o) { flying.delete(id); continue; }
-    const s = flingStep({ x: f.x, y: f.y }, { x: f.vx, y: f.vy }, dt, THROW_FRICTION, THROW_STOP); // integrate from the fling's OWN x/y; flingStep reads vel.x/.y — MUST pass {x:vx,y:vy} (passing `f` fed it f.x/f.y = undefined→NaN→settle-at-launch: THE reason a fired throw still "dropped")
+    const isRock = o.family === 'stone';                                // rocks are heavy → more friction, settle sooner
+    const s = flingStep({ x: f.x, y: f.y }, { x: f.vx, y: f.vy }, dt, isRock ? STONE_FRICTION : THROW_FRICTION, isRock ? STONE_STOP : THROW_STOP); // integrate from the fling's OWN x/y; flingStep reads vel.x/.y — MUST pass {x:vx,y:vy} (passing `f` fed it f.x/f.y = undefined→NaN→settle-at-launch: THE reason a fired throw still "dropped")
     // If a position ever goes non-finite, settle at the known-finite launch point rather than stream
     // null (→ a phantom at world 0,0 that never lands).
     if (!Number.isFinite(s.x) || !Number.isFinite(s.y)) {
@@ -281,12 +285,17 @@ function updateFlying(now) {
     o.x = s.x; o.y = s.y; o._tx = s.x; o._ty = s.y; o.held = true;      // write it onto the object + keep it held, overriding any echo that landed this frame
     if (s.stopped) {
       o.held = false; reanchorCreature(o);
-      setLift(id, 0, SETTLE_MS, EASE_SETTLE);        // settle down where it came to rest
+      setLift(id, 0, SETTLE_MS, EASE_SETTLE);        // touch down from the residual lift (already near the ground — the arc brought it most of the way)
       send({ t: IN.PLACE, id, token, x: o.x, y: o.y, ts: Date.now() });
       Audio.event('land', { seed: o.seed, family: o.family, x: o.x });
       flying.delete(id);
-    } else if (sendNow) {
-      send({ t: IN.CARRY, id, token, x: o.x, y: o.y, ts: Date.now() });
+    } else {
+      // FALL TO EARTH as it slows: the lift tracks the fling's REMAINING speed (1 at launch → 0 at rest),
+      // so the object descends across the arc instead of dropping via a timer once already stopped. sqrt
+      // keeps it aloft through the fast early decay and eases it down over the final slow glide.
+      const p = f.sp0 > 0 ? clamp(Math.hypot(s.vx, s.vy) / f.sp0, 0, 1) : 0;
+      setLiftValue(id, Math.sqrt(p));
+      if (sendNow) send({ t: IN.CARRY, id, token, x: o.x, y: o.y, ts: Date.now() });
     }
     if (throwDbg) showThrowDbg(`FLYING  pos(${o.x.toFixed(0)},${o.y.toFixed(0)})  v ${Math.hypot(f.vx, f.vy).toFixed(0)}`);
   }
