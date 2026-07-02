@@ -399,6 +399,8 @@ export class WorldRoom {
       // a wordless "a gardener just tended here" cue — a bespoke one-shot bcast (never persisted),
       // turned into a soft shimmer bloom on the client. Rate is bounded by GIANT_TENDS_PER_TICK.
       tendCue: (x, y) => self.#bcast({ t: MSG.TEND, x, y }, null),
+      // a wordless "a creature is nibbling here" cue — bounded per tick by the caller; zero-persist.
+      grazeCue: (x, y) => self.#bcast({ t: MSG.GRAZE, x, y }, null),
     };
     const tune = {
       get REACH() { return GIANT_REACH; }, get SIGHT() { return GIANT_SIGHT; }, get BREAK_R() { return GIANT_BREAK_R; },
@@ -1756,6 +1758,7 @@ export class WorldRoom {
       if (c >= COMMUNION_TICKS && this.objects.size + ctx.spawned.length < this.maxObjects - CEIL_TRIM) {
         this.communion.set(key, -COMMUNION_COOLDOWN);         // bloom, then rest
         for (const o of this.#communionBloom(mx, my, now)) ctx.spawn(o);
+        this.#bcast({ t: MSG.BLOOM, x: mx, y: my }, null);    // a wide gathering of light where two lingered together — the communion made visible (wordless, zero-persist)
       } else this.communion.set(key, c);
     }
     // patches no longer shared cool off (negative = cooldown counts back up to 0)

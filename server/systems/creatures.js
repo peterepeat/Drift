@@ -43,6 +43,8 @@ const CURIOSITY_STANDOFF = 95;            // it stops this far off (curious, not
 const CREATURE_FOLLOW_R = 1500;           // a bonded creature follows a person within this (beyond it, it just stays put + lives — no snap)
 const CREATURE_FOLLOW_STANDOFF = 70;      // ...and settles this close to its person
 const CREATURE_FOLLOW_STEP = 130;         // home units it closes toward its person per tick (≈3× a normal drive step — keeps up, but at its own pace, not glued)
+const GRAZE_CHANCE = 0.5;                 // per-tick chance a FED creature (arrived at its plant) shows a visible nibble — seeded per (creature,tick), NOT global RNG (keeps the tick's RNG stream byte-identical)
+const GRAZE_CUES_MAX = 24;                // cap graze cues per tick (bounds the wire chatter — the effect stays calm/legible, never a flood)
 
 export class CreatureManager {
   constructor(world, tune, pools) {
@@ -107,14 +109,19 @@ export class CreatureManager {
   // this cycle (a plant / the pool / a stone). Broadcast the new home (ctx.change); the
   // client eases it, so it reads as a slow purposeful drift beneath the wander.
   moveHomes(ctx) {
+    let grazeBudget = GRAZE_CUES_MAX;                          // per-tick graze-cue cap (bounds the wire)
+    const tickInt = Math.floor(this.world.season / this.tune.SEASON_PER_TICK); // for a per-(creature,tick) seeded graze roll
     for (const o of this.world.objects.values()) {
       if (o.family !== 'creature' || o.held !== '') continue;
       let mx = 0, my = 0;
       const goal = this.#creatureGoal(o);
+      const bonded = o.tameUntil && o.tameUntil > Date.now();
       if (goal) {                                    // step toward what it needs this cycle (a bonded creature follows FASTER, to keep up with you)
-        const bonded = o.tameUntil && o.tameUntil > Date.now();
         const dx = goal.x - o.x, dy = goal.y - o.y, d = Math.hypot(dx, dy);
         if (d > CREATURE_ARRIVE) { const step = Math.min(bonded ? CREATURE_FOLLOW_STEP : this.tune.STEP, d - CREATURE_ARRIVE); mx += (dx / d) * step; my += (dy / d) * step; }
+        else if (!bonded && grazeBudget > 0 && this.driveLabel(o) === 'feed' && rng(((o.seed ^ tickInt) >>> 0) || 1)() < GRAZE_CHANCE) {
+          this.world.grazeCue(goal.x, goal.y); grazeBudget--; // arrived at its plant + feeding → a visible nibble at the plant (seeded, bounded, zero-write)
+        }
       }
       const sep = this.#creatureSeparation(o);        // ALWAYS shove off the crowd (even while grazing) — no pile-ups
       if (sep.x || sep.y) { const sl = Math.hypot(sep.x, sep.y); const push = Math.min(CREATURE_SEP_STEP, sl * CREATURE_SEP_STEP); mx += (sep.x / sl) * push; my += (sep.y / sl) * push; }
