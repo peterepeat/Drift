@@ -46,8 +46,14 @@ export let attendId = null; // the object currently under attention (hover/long-
 // localfx READ it. preGrab is the pickup restore-target — net.js's PICKUP_ACK reads it on a lost race.
 // Anomaly-dissolve timings owned here (updateDissolve lives in this module); client.js imports them.
 export const ANOM_DISSOLVE_MS = 10000, ANOM_FADE_MS = 3000; // hold an anomaly 10s → it fades from your hands over the last 3s
-let flingVel = { x: 0, y: 0 }, lastCarryPos = null, lastCarryT = 0;
+let carryHist = [], lastCarryT = 0; // recent {x,y,t} carried positions → a robust release velocity for the throw
 let panVel = { x: 0, y: 0 }, lastPanT = 0; // pan velocity (world u/s, ema-smoothed) for release-inertia
+const throwDbg = new URLSearchParams(location.search).has('throwdbg'); // ?throwdbg=1 → an on-screen readout of each toss's release speed (mobile)
+let dbgEl = null;
+function showThrowDbg(msg) {
+  if (!dbgEl) { dbgEl = document.createElement('div'); dbgEl.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:9999;background:rgba(0,0,0,.72);color:#9f9;font:12px/1.35 ui-monospace,monospace;padding:6px 9px;border-radius:5px;pointer-events:none;white-space:pre'; document.body.appendChild(dbgEl); }
+  dbgEl.textContent = msg;
+}
 let _lastFlingT = 0, _flyCarryAt = 0; // updateFlying's per-frame throttle anchors
 let lpTimer = null, lpFired = false;   // long-press arming (touch)
 let befriendTrack = null, befriendSince = 0, befriendSent = false;
@@ -128,7 +134,7 @@ function beginHold(o, mode, off) {
   S.heldId = o.id; holdMode = mode; holdOff = off || { x: 0, y: 0 };
   S.heldSince = performance.now();
   S.carry = { x: live.x, y: live.y };
-  flingVel.x = 0; flingVel.y = 0; lastCarryPos = null; lastCarryT = 0; // fresh velocity
+  carryHist = []; lastCarryT = 0;                 // fresh release-velocity history
   o.held = true;                                  // optimistic; the server confirms via pickup_ack
   setLift(o.id, 1, LIFT_MS, EASE_RISE);
   send({ t: IN.PICKUP, id: o.id, token, ts: Date.now() });
@@ -144,19 +150,27 @@ function carryTo(cx, cy) {                         // keep the grab point under 
 }
 function trackVel() {
   const t = performance.now();
-  if (lastCarryPos && lastCarryT) {
-    const dt = (t - lastCarryT) / 1000;
-    if (dt > 0.001) {
-      flingVel.x = ema(flingVel.x, (S.carry.x - lastCarryPos.x) / dt, 0.6);
-      flingVel.y = ema(flingVel.y, (S.carry.y - lastCarryPos.y) / dt, 0.6);
-    }
-  }
-  lastCarryPos = { x: S.carry.x, y: S.carry.y }; lastCarryT = t;
+  carryHist.push({ x: S.carry.x, y: S.carry.y, t });                 // keep ~160ms of carried-position history
+  while (carryHist.length > 2 && t - carryHist[0].t > 160) carryHist.shift();
+  lastCarryT = t;
 }
-function startFling() {
+// Release velocity (world u/s) = the AVERAGE motion over the last ~120ms of the drag. Robust where an
+// ema-over-the-whole-drag under-reads a flick and a single last-sample delta is noisy — and it tolerates
+// sparse touch pointer events (a flick may only fire a few moves). A paused-before-release drag → the
+// window is stationary → ~0 → the object just places. This is why the mouse worked but touch didn't.
+function releaseVel() {
+  const n = carryHist.length;
+  if (n < 2) return { x: 0, y: 0 };
+  const last = carryHist[n - 1];
+  let ref = carryHist[0];
+  for (let i = n - 1; i >= 0; i--) { if (last.t - carryHist[i].t <= 120) ref = carryHist[i]; else break; } // oldest sample within 120ms
+  const dt = (last.t - ref.t) / 1000;
+  if (dt <= 0.001) return { x: 0, y: 0 };
+  return { x: (last.x - ref.x) / dt, y: (last.y - ref.y) / dt };
+}
+function startFling(vx, vy) {
   const id = S.heldId;
   const o = objects.get(id);
-  let vx = flingVel.x, vy = flingVel.y;
   // A non-finite velocity (the THROW_MAX clamp divides by speed — Infinity/Infinity →
   // NaN) must never reach the glide: it would fly forever, streaming null → (0,0).
   if (!o || !Number.isFinite(vx) || !Number.isFinite(vy)) { placeHold(); return; }
@@ -196,8 +210,10 @@ function endPointer(e) {
 
   if (holdMode === 'drag') {
     // released an active S.carry: if it was still moving, throw it (detaches); else place it.
-    const speed = Math.hypot(flingVel.x, flingVel.y);
-    if (speed > THROW_MIN && (performance.now() - lastCarryT) < THROW_RECENT_MS) startFling();
+    const rv = releaseVel(), speed = Math.hypot(rv.x, rv.y), recent = performance.now() - lastCarryT;
+    const willFling = speed > THROW_MIN && recent < THROW_RECENT_MS;
+    if (throwDbg) showThrowDbg(`toss  speed ${speed.toFixed(0)}  v(${rv.x.toFixed(0)},${rv.y.toFixed(0)})\nrecent ${recent.toFixed(0)}ms  samples ${carryHist.length}  z ${camera.z.toFixed(2)}\n→ ${willFling ? 'FLING' : 'place (no throw)'}   [min ${THROW_MIN}]`);
+    if (willFling) startFling(rv.x, rv.y);
     else placeHold();
   } else if (!moved && !wasLong && !multiTouched) {       // a still, deliberate tap
     const tnow = performance.now();
