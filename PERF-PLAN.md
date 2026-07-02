@@ -5,8 +5,14 @@ option set + risks live in the `perf-roadmap` memory; this file is the ordered, 
 **execution checklist**. Ship each numbered step as its own verified commit (build → verify →
 commit → push; assets auto-deploy). Re-profile between stages.
 
-## Resume here → STAGE B phase 2 / re-profile / STAGE C (Stage A + Stage B phase 1 are DONE)
-- **`HEAD == origin/main == 82e6a4e`.** **✅ STAGE B phase 1 SHIPPED** (`82e6a4e`): the plant-canopy
+## Resume here → STAGE B phase 2 / re-profile / STAGE C (Stage A + Stage B phase 1 + a fix are DONE)
+- **`HEAD == origin/main == 1ee8939`.** **✅ ZOOM-OUT REGRESSION FIX** (`1ee8939`): the user field-tested
+  phase 1 — pan got smoother ✅ but zoom-OUT got jankier (~10fps; HUD `sprites 226 (95.8/96MB)` = cache
+  PEGGED + thrashing) because phase 1 baked at FIXED world-resolution regardless of display size. Fixed
+  by resolution-MATCHING the bake to zoom: `K = dpr*bakeZoom(camera.z)` (√2 buckets in [0.25,1.4]); same
+  grove now 8-16MB, tier holds at 0. `SPRITE_Z_MAX` 1.8→1.4. **LESSON: sprite resolution must track
+  DISPLAY size, not world size** — applies to phase 2 (stones/big trees) too.
+- **`HEAD == 82e6a4e`.** **✅ STAGE B phase 1 SHIPPED** (`82e6a4e`): the plant-canopy
   sprite cache (`public/spritecache.js`). Bakes `drawPlant` once per (seed | `floor(mat*20)` |
   `floor(aged*8)` | dpr) and blits it; per-frame sway/depth/zoom + a maturity SIZE-CORRECTION (scale
   by true/baked baseLen ratio → size tracks growth continuously) applied at blit time. Scoped to
