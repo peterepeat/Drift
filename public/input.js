@@ -23,8 +23,9 @@ const SLOP = 8;                              // px of movement that turns a tap 
 const HIT_MIN = 26;                          // min tap radius in CSS px (accessibility)
 const HIT_PAD = 3, HIT_GROW = 1.18;          // grab area modestly exceeds the drawn form — easy to grab, but not so greedy it steals pans
 const CARRY_SEND_MS = 50;                    // throttle for streaming a carried object
-const THROW_MIN = 140;                       // release speed (world units/s) below which a drag just places — no fling (lowered: a gentler toss now flings)
-const THROW_FRICTION = 0.08;                 // velocity retained per second mid-fling (a touch more glide → more momentum, still a calm settle)
+const THROW_MIN = 110;                       // release speed (world units/s) below which a drag just places — no fling (low: a gentle toss flings, esp. on touch)
+const THROW_RECENT_MS = 130;                 // the last carry-move must be this recent at release to count as a flick (touch events are sparser → widened from 90)
+const THROW_FRICTION = 0.1;                  // velocity retained per second mid-fling (more glide → more momentum, still a calm settle)
 const THROW_STOP = 28;                        // a fling settles to a place once it slows below this (wu/s)
 const THROW_MAX = 1600;                       // cap the launch speed so a hard flick can't hurl a thing across the world
 const PAN_MIN = 170;                          // release speed (world u/s) below which a pan just stops — no inertia glide
@@ -196,7 +197,7 @@ function endPointer(e) {
   if (holdMode === 'drag') {
     // released an active S.carry: if it was still moving, throw it (detaches); else place it.
     const speed = Math.hypot(flingVel.x, flingVel.y);
-    if (speed > THROW_MIN && (performance.now() - lastCarryT) < 90) startFling();
+    if (speed > THROW_MIN && (performance.now() - lastCarryT) < THROW_RECENT_MS) startFling();
     else placeHold();
   } else if (!moved && !wasLong && !multiTouched) {       // a still, deliberate tap
     const tnow = performance.now();
@@ -217,8 +218,10 @@ function endPointer(e) {
     }
     grab = null;                                          // a single tap does nothing (no sticky pickup)
   } else {
-    // a single-finger PAN release: if it was still flicking (recent + fast), glide on with momentum
-    if (moved && !multiTouched && (performance.now() - lastPanT) < 100 && Math.hypot(panVel.x, panVel.y) > PAN_MIN) {
+    // a PAN release — ONE- or TWO-finger: if it was still flicking at the LAST finger up, glide on
+    // with momentum. Gated on the final release (pointers.size 0), a recent + fast pan velocity, so a
+    // pinch-ZOOM (≈no centroid velocity → below PAN_MIN) and a mid-gesture finger-lift (size > 0) don't.
+    if (pointers.size === 0 && (performance.now() - lastPanT) < 130 && Math.hypot(panVel.x, panVel.y) > PAN_MIN) {
       startPanGlide(panVel.x, panVel.y);
     }
     grab = null;
@@ -320,7 +323,14 @@ canvas.addEventListener('pointermove', (e) => {
     camera.z = clamp(pinch.z0 * (d / pinch.d0), zMin(), ZMAX);
     const after = screenToWorld(mx, my);
     camera.x += before.x - after.x; camera.y += before.y - after.y;     // zoom, anchored at the centroid
-    applyPan(-(mx - pinch.mx) / camera.z, -(my - pinch.my) / camera.z); // + two-finger pan (resisted at the edge)
+    const panDX = -(mx - pinch.mx) / camera.z, panDY = -(my - pinch.my) / camera.z; // two-finger pan world delta
+    const tp = performance.now();                                       // track the CENTROID velocity for release-inertia (same as one-finger)
+    if (lastPanT) { const dtp = (tp - lastPanT) / 1000; if (dtp > 0.001) {
+      panVel.x = ema(panVel.x, panDX / dtp, 0.4);
+      panVel.y = ema(panVel.y, panDY / dtp, 0.4);
+    } }
+    lastPanT = tp;
+    applyPan(panDX, panDY);                                             // two-finger pan (resisted at the edge)
     pinch.mx = mx; pinch.my = my;
     clampCam(); // keep the zoom-anchor jump inside the world too
     cancelArrive();
