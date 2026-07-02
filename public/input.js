@@ -24,6 +24,7 @@ const HIT_MIN = 26;                          // min tap radius in CSS px (access
 const HIT_PAD = 3, HIT_GROW = 1.18;          // grab area modestly exceeds the drawn form — easy to grab, but not so greedy it steals pans
 const CARRY_SEND_MS = 50;                    // throttle for streaming a carried object
 const THROW_MIN = 110;                       // release speed (world units/s) below which a drag just places — no fling (low: a gentle toss flings, esp. on touch)
+const THROW_MIN_STONE = 340;                 // ROCKS are heavy + hard to throw: a normal drag-release just PLACES a rock (sets it down where it is → merges if on top of another); only a DECISIVE flick actually flings it (and a flung rock then carries PAST, it does NOT merge). This is the physical read: place = stack, throw = knock past.
 const THROW_RECENT_MS = 130;                 // the last carry-move must be this recent at release to count as a flick (touch events are sparser → widened from 90)
 const THROW_FRICTION = 0.045;                // velocity retained per second mid-fling — LOWER = more friction / harder deceleration (was 0.1 = too floaty/linear); a thrown thing now bleeds speed and settles sooner
 const THROW_STOP = 28;                        // a fling settles to a place once it slows below this (wu/s)
@@ -214,8 +215,10 @@ function endPointer(e) {
   if (holdMode === 'drag') {
     // released an active S.carry: if it was still moving, throw it (detaches); else place it.
     const rv = releaseVel(), speed = Math.hypot(rv.x, rv.y), recent = performance.now() - lastCarryT;
-    const willFling = speed > THROW_MIN && recent < THROW_RECENT_MS;
-    if (throwDbg) showThrowDbg(`toss  speed ${speed.toFixed(0)}  v(${rv.x.toFixed(0)},${rv.y.toFixed(0)})\nrecent ${recent.toFixed(0)}ms  samples ${carryHist.length}  z ${camera.z.toFixed(2)}\n→ ${willFling ? 'FLING' : 'place (no throw)'}   [min ${THROW_MIN}]`);
+    const ho = objects.get(S.heldId);
+    const minThrow = (ho && ho.family === 'stone') ? THROW_MIN_STONE : THROW_MIN; // a rock takes a decisive flick to throw; a gentle drop places it (→ merges on top)
+    const willFling = speed > minThrow && recent < THROW_RECENT_MS;
+    if (throwDbg) showThrowDbg(`toss  speed ${speed.toFixed(0)}  v(${rv.x.toFixed(0)},${rv.y.toFixed(0)})\nrecent ${recent.toFixed(0)}ms  samples ${carryHist.length}  z ${camera.z.toFixed(2)}\n→ ${willFling ? 'FLING' : 'place (no throw)'}   [min ${minThrow}]`);
     if (willFling) startFling(rv.x, rv.y);
     else placeHold();
   } else if (!moved && !wasLong && !multiTouched) {       // a still, deliberate tap
@@ -277,7 +280,7 @@ function updateFlying(now) {
     if (!Number.isFinite(s.x) || !Number.isFinite(s.y)) {
       o.x = f.x0; o.y = f.y0; o._tx = f.x0; o._ty = f.y0; o.held = false; reanchorCreature(o);
       setLift(id, 0, SETTLE_MS, EASE_SETTLE);
-      send({ t: IN.PLACE, id, token, x: f.x0, y: f.y0, ts: Date.now() });
+      send({ t: IN.PLACE, id, token, x: f.x0, y: f.y0, fling: 1, ts: Date.now() });
       flying.delete(id);
       continue;
     }
@@ -286,7 +289,7 @@ function updateFlying(now) {
     if (s.stopped) {
       o.held = false; reanchorCreature(o);
       setLift(id, 0, SETTLE_MS, EASE_SETTLE);        // touch down from the residual lift (already near the ground — the arc brought it most of the way)
-      send({ t: IN.PLACE, id, token, x: o.x, y: o.y, ts: Date.now() });
+      send({ t: IN.PLACE, id, token, x: o.x, y: o.y, fling: 1, ts: Date.now() }); // fling:1 → a THROWN thing; a thrown rock carries past & does NOT merge (only a gentle place merges on top)
       Audio.event('land', { seed: o.seed, family: o.family, x: o.x });
       flying.delete(id);
     } else {
@@ -304,7 +307,7 @@ function updateFlying(now) {
 function settleFlying() {
   for (const id of flying.keys()) {
     const o = objects.get(id);
-    if (o) { o.held = false; reanchorCreature(o); o._tx = o.x; o._ty = o.y; setLift(id, 0, SETTLE_MS, EASE_SETTLE); send({ t: IN.PLACE, id, token, x: o.x, y: o.y, ts: Date.now() }); }
+    if (o) { o.held = false; reanchorCreature(o); o._tx = o.x; o._ty = o.y; setLift(id, 0, SETTLE_MS, EASE_SETTLE); send({ t: IN.PLACE, id, token, x: o.x, y: o.y, fling: 1, ts: Date.now() }); } // a mid-flight tab-hide flush is still a thrown thing → no merge
   }
   flying.clear();
 }

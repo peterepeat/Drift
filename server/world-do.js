@@ -1065,16 +1065,22 @@ export class WorldRoom {
         await this.#removeObject(o, { grit: true });
         return;
       }
-      // Dropped onto another stone → FUSE (target grows, this one is consumed) — UNLESS the
-      // target is already AT the cap, in which case they BOUNCE (the dropper is kept + eased clear).
-      const fused = this.#tryFuse(o, now);
-      if (fused && fused.bounce) { bounced = true; }
-      else if (fused) {
-        await this.#removeObject(o, { fused: fused.id });
-        await this.#persist(fused);
-        this.#bcast(this.#stateMsg(fused, now), null);
-        this.#updateCog(fused.x, fused.y);
-        return;
+      // A GENTLY-PLACED stone set down on another → FUSE (target grows, this one is consumed) —
+      // the physical "stack it on top". A THROWN stone (m.fling) keeps its momentum: it does NOT
+      // merge, it carries past and just rests clear of whatever it landed against ("knock past").
+      // On a gentle place, a target already AT the cap BOUNCES the dropper off (kept + eased clear).
+      if (m.fling) {
+        this.#settleStoneClear(o); // a thrown rock never merges — ease it clear of any overlap, it came to rest beside/past
+      } else {
+        const fused = this.#tryFuse(o, now);
+        if (fused && fused.bounce) { bounced = true; }
+        else if (fused) {
+          await this.#removeObject(o, { fused: fused.id });
+          await this.#persist(fused);
+          this.#bcast(this.#stateMsg(fused, now), null);
+          this.#updateCog(fused.x, fused.y);
+          return;
+        }
       }
     }
     // No rocks in water: a stone left in a pool rolls to the nearest bank. We set its
@@ -1493,8 +1499,10 @@ export class WorldRoom {
   // (in which case it's settled clear so it doesn't overlap a neighbour).
   #tryFuse(o, now) {
     const ro = stoneRadiusOf(o);
-    // the nearest free stone whose own footprint the drop landed within → fuse into it
-    const target = this.#gridNearest(o.x, o.y, ro + this.maxStoneR, (s) => s.family === 'stone' && s.id !== o.id && s.held === '' && Math.hypot(s.x - o.x, s.y - o.y) < stoneRadiusOf(s));
+    // the nearest free stone the drop landed substantially ON TOP of → fuse into it. Forgiving of
+    // not-dead-centre: the dropped stone merges if its centre is within the target's footprint plus
+    // half its own radius (i.e. it's more than half over the target) — a clear "on top", not a graze.
+    const target = this.#gridNearest(o.x, o.y, ro + this.maxStoneR, (s) => s.family === 'stone' && s.id !== o.id && s.held === '' && Math.hypot(s.x - o.x, s.y - o.y) < stoneRadiusOf(s) + ro * 0.5);
     if (!target) { this.#settleStoneClear(o); return null; }
     // A target already AT the cap can't grow — fusing would just delete the dropped stone for
     // nothing. They BOUNCE instead: ease the dropper clear and signal a recoil (kept whole).

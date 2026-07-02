@@ -25,10 +25,16 @@ async function snap() { const ws = await open(); const w = await ws.world; ws.cl
 const stones = (w) => w.objects.filter((o) => o.family === 'stone');
 
 const ctl = await open(); await ctl.world;
-async function move(id, x, y) { // pick up then drop at (x, y) — the unit of interaction
+async function move(id, x, y) { // pick up then GENTLY drop at (x, y) — the unit of interaction (a place merges on top)
   ctl.send(JSON.stringify({ t: 'pickup', id, token: TOK, ts: Date.now() }));
   await wait(60);
   ctl.send(JSON.stringify({ t: 'place', id, token: TOK, x, y, ts: Date.now() }));
+  await wait(60);
+}
+async function fling(id, x, y) { // pick up then THROW to (x, y) — a thrown rock (fling:1) carries past, it never merges
+  ctl.send(JSON.stringify({ t: 'pickup', id, token: TOK, ts: Date.now() }));
+  await wait(60);
+  ctl.send(JSON.stringify({ t: 'place', id, token: TOK, x, y, fling: 1, ts: Date.now() }));
   await wait(60);
 }
 const byId = (w, id) => stones(w).find((o) => o.id === id);
@@ -61,6 +67,19 @@ const pp = byId(w1c, P), qq = byId(w1c, Q);
 const gap = Math.hypot(qq.x - pp.x, qq.y - pp.y);
 check(!!qq, 'an off-centre overlapping drop does not fuse (it just settles clear)');
 check(gap >= rP + rQ - 1.5, `it settles clear of the other stone, not through it (gap ${gap.toFixed(1)} >= ${(rP + rQ).toFixed(1)})`);
+
+// 1c. a THROWN stone (fling:1) dropped DEAD-CENTRE on another does NOT fuse — a thrown rock keeps
+// its momentum and carries past; only a GENTLE place stacks-and-merges. Both survive, settled clear.
+const T1 = pool[11], T2 = pool[12], TSITE = -5000;
+await move(T1, TSITE, TSITE);                            // isolate the target (gentle)
+const rT1 = radOf(byId(await snap(), T1)), rT2 = stoneR(byId(await snap(), T2).seed);
+await fling(T2, TSITE, TSITE);                           // THROW T2 dead-centre onto T1 → must NOT merge
+const w1d = await snap();
+const t1 = byId(w1d, T1), t2 = byId(w1d, T2);
+check(!!t1 && !!t2, 'a thrown stone dropped on another does NOT fuse (both survive, not consumed)');
+check(t1 && radOf(t1) <= rT1 + 0.5, `the target did not grow from a thrown rock (r ${t1 ? radOf(t1).toFixed(0) : '?'} <= ${rT1.toFixed(0)})`);
+const tgap = t1 && t2 ? Math.hypot(t2.x - t1.x, t2.y - t1.y) : 0;
+check(tgap >= rT1 + rT2 - 1.5, `the thrown stone settled clear, did not merge (gap ${tgap.toFixed(1)} >= ${(rT1 + rT2).toFixed(1)})`);
 
 // 2. BREAK: fuse a few stones into a big one, then break it -> smaller stones appear
 const G = 9000;
