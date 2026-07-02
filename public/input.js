@@ -9,6 +9,7 @@
 import { canvas, camera, objects, S, mouseVelW, flying, swaying, creatureEvts } from './state.js';
 import { screenToWorld, applyPan, clampCam, zMin, ZMAX, Z0, cancelArrive, vw, vh } from './view.js';
 import { creaturePos, posOf, objRadius, isMovable } from './draw.js';
+import { ema, flingStep } from './physics.js'; // hover/carry velocity EMA + the throw integrator (used by trackMouseHover + the fling)
 import { setLift, isLifted, LIFT_MS, SETTLE_MS, EASE_RISE, EASE_SETTLE } from './localfx.js';
 import { send } from './net.js';
 import { formOf, SPROUT_C, shownMat, GIANT_R } from './forms.js';
